@@ -1,0 +1,12 @@
+platforms:
+  telegram:
+    enabled: true
+    bot_token: "ENV_VAR"
+    provider: "openrouter"
+    model: "nousresearch/hermes-3-llama-3-70b:free"
+
+assistants:
+  claude:
+    claudeBinaryPath: "./core-modules/archon/bin/archon"
+    apiBaseUrl: "http://localhost:20128/v1"
+    defaultModel: "qwen-2.5-coder-32b-instruct:free"
