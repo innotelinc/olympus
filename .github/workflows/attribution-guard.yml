@@ -11,6 +11,9 @@
 # The actual patterns live in .githooks/guard-lib (shared with the local
 # commit-msg/pre-commit hooks), so this workflow just sources that file and
 # feeds it the streams above. It never inspects author/committer identity.
+# A self-test step first proves the guard still rejects and allows what it
+# must — including that the real pre-commit hook fires — so a silently
+# broken guard fails CI instead of passing everything.
 # ═══════════════════════════════════════════════════════════════════════════
 
 name: Attribution guard
@@ -28,9 +31,15 @@ jobs:
     name: Check attribution
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Guard self-test (the guard must still fire)
+        run: |
+          source .githooks/guard-lib
+          guard_selftest --self-commit
+          echo "guard self-test passed"
 
       - name: Check commit messages, PR text, and file changes
         env:
@@ -54,7 +63,7 @@ jobs:
           # historical trailers never block a release.
           if [ "${REF_TYPE:-}" = "tag" ]; then
             git log -1 --format=%B "${GITHUB_REF_NAME}" | guard_check_stream || fail=1
-            added="$(git show --format= --no-color -U0 "${GITHUB_REF_NAME}" -- . 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+            added="$(git show --format= --no-color -U0 "${GITHUB_REF_NAME}" -- . 2>/dev/null | grep '^+' | grep -v '^+++' | sed 's/^+//' || true)"
             if [ -n "$added" ]; then
               printf '%s\n' "$added" | guard_check_stream || fail=1
             fi
@@ -98,15 +107,18 @@ jobs:
           fi
 
           # ── 3. Lines added to files in the push/PR ────────────────────
+          # The '+' diff marker is stripped after filtering: the trailer rule
+          # is anchored (^), so a leading '+' would hide foreign credit lines
+          # from the scan.
           added=""
           if [ -n "$base" ] && [ -n "$head" ]; then
             if git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1; then
-              added="$(git diff --no-color -U0 "$base" "$head" -- . 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+              added="$(git diff --no-color -U0 "$base" "$head" -- . 2>/dev/null | grep '^+' | grep -v '^+++' | sed 's/^+//' || true)"
             else
-              added="$(git show --format= --no-color -U0 "$head" -- . 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+              added="$(git show --format= --no-color -U0 "$head" -- . 2>/dev/null | grep '^+' | grep -v '^+++' | sed 's/^+//' || true)"
             fi
           else
-            added="$(git log -p --format= --no-color HEAD 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+            added="$(git log -p --format= --no-color HEAD 2>/dev/null | grep '^+' | grep -v '^+++' | sed 's/^+//' || true)"
           fi
           if [ -n "$added" ]; then
             printf '%s\n' "$added" | guard_check_stream || fail=1

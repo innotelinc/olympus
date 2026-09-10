@@ -47,50 +47,212 @@ TOOL_TOKEN='codebuff|claude|anthropic|copilot|chatgpt|openai|gemini|bard|aider|c
 # runtime so the source text stays self-clean.
 FORBIDDEN_PATTERNS=(
   "co-authored-by:[[:space:]]*[^<]*(${TOOL_TOKEN})"
-  "co-authored-by:[[:space:]]*[^<]*([0-9a-z]\\.)?ai[[:space:]<,]"
+  "co-authored-by:[[:space:]]*[^<]*([0-9a-z]\\\\.)?ai[[:space:]<,]"
   "(generated|created|authored|written|built|developed|made|powered|maintained)[[:space:]]+[bw]y[[:space:]]+[^.,;]*(${TOOL_TOKEN})"
   "(generated|created|authored|written|built|developed|made|powered)[[:space:]]+with[[:space:]]+[^.,;]*(${TOOL_TOKEN})"
   "(generated|created|authored|written|built|developed|made|powered)[[:space:]]+(using|via)[[:space:]]+[^.,;]*(${TOOL_TOKEN})"
-  "co-authored-by:[[:space:]]*[^<]*noreply@(${TOOL_TOKEN%|*}|codebuff)(\\.ai|\\.com|\\.org)"
+  "co-authored-by:[[:space:]]*[^<]*noreply@(${TOOL_TOKEN%|*}|codebuff)(\\\\.ai|\\\\.com|\\\\.org)"
   "(${TOOL_TOKEN})[[:space:]]+<noreply@"
   "(credit|credits|thanks|acknowledg)[[:space:]]*:?[[:space:]]*(to[[:space:]]+)?(${TOOL_TOKEN})"
 )
 
+# Escape ERE metacharacters in a literal so allowlisted identities such as
+# dependabot[bot] match literally instead of being read as a bracket
+# expression.
+guard_escape_ere() {
+  printf '%s' "$1" | sed -e 's/[][\\.^$*+?(){}|]/\\&/g'
+}
+
 # Scan text on stdin; exit 0 if clean, 1 (printing a reason) if any
 # attribution is found. Reads stdin ONCE into a variable first — each grep in
-# the loop must test the same buffer; piping stdin per iteration would let the
-# first grep consume it.
+# FORBIDDEN_PATTERNS runs against that single in-memory copy.
 guard_check_stream() {
-  local line value lc ok pat
-  text="$(cat)"
+  local input
+  input="$(cat)"
 
-  # 1) Attribution-phrase patterns (AI assistants / tools).
-  for pat in "${FORBIDDEN_PATTERNS[@]}"; do
-    if printf '%s\n' "$text" | grep -Eiq "$pat"; then
-      printf '%s\n' "forbidden attribution matched: /$pat/" >&2
-      return 1
-    fi
-  done
-
-  # 2) Trailer allow-list: any git-trailer credit line must name Darnel Hunter.
-  while IFS= read -r line; do
-    if printf '%s\n' "$line" | grep -Eiq "^[[:space:]]*(${TRAILER_PREFIXES})[[:space:]]*:"; then
-      value="${line#*:}"                       # strip the prefix up to ':'
-      value="$(printf '%s' "$value" | xargs)"  # trim surrounding whitespace
-      lc="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+  # 1. Git-trailer credit lines must name an allowed attribution. A trailer
+  #    line is BAD unless its value is exactly one of the allowed identities —
+  #    never the reverse (a negated character class over the allowlist would
+  #    silently pass any foreign value sharing a letter with it).
+  if printf '%s\n' "$input" | grep -Eiq "^(${TRAILER_PREFIXES})[[:space:]]*:"; then
+    local bad="" line ok
+    while IFS= read -r line; do
+      case "$line" in *[A-Za-z0-9]*) ;; *) continue ;; esac
+      # Not a trailer line at all? Then rule 1 does not apply to it.
+      printf '%s\n' "$line" | grep -Eqi "^(${TRAILER_PREFIXES})[[:space:]]*:" || continue
+      # Trailer line: BAD unless the value is exactly an allowed identity.
       ok=0
       for allowed in "${ALLOWED_ATTRIBUTIONS[@]}"; do
-        if [ "$lc" = "$(printf '%s' "$allowed" | tr '[:upper:]' '[:lower:]')" ]; then
+        if printf '%s\n' "$line" \
+            | grep -Eqi "^(${TRAILER_PREFIXES})[[:space:]]*:[[:space:]]*$(guard_escape_ere "$allowed")[[:space:]]*$"; then
           ok=1
           break
         fi
       done
-      if [ "$ok" -ne 1 ]; then
-        printf '%s\n' "forbidden trailer credit: ${line#*: } (only Darnel Hunter <dhunter@innotel.us> may be credited)" >&2
-        return 1
+      if [ "$ok" -eq 0 ]; then
+        bad+="$line"$'\n'
       fi
+    done <<< "$input"
+    if [ -n "$bad" ]; then
+      printf '%s' "$bad" | sed 's/^/guard: bad trailer:/' >&2
+      return 1
     fi
-  done <<< "$text"
+  fi
 
+  # 2. AI-assistant attribution phrases are forbidden.
+  for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
+    if printf '%s\n' "$input" | grep -Eiq -- "$pattern"; then
+      printf 'guard: forbidden attribution pattern matched: %s\n' "$pattern" >&2
+      return 1
+    fi
+  done
+
+  return 0
+}
+
+# Self-test: prove the guard actually fires. Every MUST_REJECT case must be
+# rejected and every MUST_ALLOW case must pass — a guard that never rejects
+# is worse than no guard, so the tests force the failure paths too.
+#
+#   guard_selftest                 exit 0 if every case behaves, 1 otherwise
+#   guard_selftest --self-commit   additionally prove the real pre-commit
+#                                  hook fires: a staged diff carrying a
+#                                  forbidden line must be blocked and a clean
+#                                  staged diff must pass. Runs against a
+#                                  temporary git dir + index, so the working
+#                                  tree and the real index are untouched.
+guard_selftest() {
+  local want_hooks=0
+  [ "${1:-}" = "--self-commit" ] && want_hooks=1
+
+  local fails=0
+
+  # Fixtures naming a tool are assembled at runtime from token variables so
+  # this file itself never contains a literal tool attribution (the guard
+  # scans its own source and must stay clean).
+  local tool_first tool_last ai
+  tool_first="${TOOL_TOKEN%%|*}"
+  tool_last="${TOOL_TOKEN##*|}"
+  ai=ai
+
+  local MUST_REJECT=(
+    'co-authored-by: Someone Else <else@example.com>'
+    'signed-off-by: Jane Roe <jane@example.com>'
+    'Co-authored-by: Bot [bot] <bot@example.com>'
+    "co-authored-by: an ${ai} assistant"
+    "credits: ${tool_first} wrote this line"
+    "generated with ${tool_first} over the weekend"
+    "built by ${tool_last}, honestly"
+  )
+  local MUST_ALLOW=(
+    "signed-off-by: Darnel Hunter <dhunter@innotel.us>"
+    'Co-Authored-By: dependabot[bot] <support@github.com>'
+    'Uses an OpenAI-compatible endpoint for inference.'
+    'Docs are generated by the release pipeline.'
+    'This line credits nobody in particular.'
+  )
+
+  local line reason
+  for line in "${MUST_REJECT[@]}"; do
+    if printf '%s\n' "$line" | guard_check_stream >/dev/null 2>&1; then
+      printf 'guard_selftest: FAIL — not rejected: %s\n' "$line" >&2
+      fails=$((fails + 1))
+    fi
+  done
+  for line in "${MUST_ALLOW[@]}"; do
+    if ! reason="$(printf '%s\n' "$line" | guard_check_stream 2>&1)"; then
+      printf 'guard_selftest: FAIL — wrongly rejected: %s (%s)\n' "$line" "$reason" >&2
+      fails=$((fails + 1))
+    fi
+  done
+
+  # A blank line before the trailer must not defeat the trailer check.
+  if printf 'Subject\n\nco-authored-by: Someone Else <else@example.com>\n' \
+      | guard_check_stream >/dev/null 2>&1; then
+    printf 'guard_selftest: FAIL — trailer after a blank body line was not rejected\n' >&2
+    fails=$((fails + 1))
+  fi
+
+  # The guard must never reject its own source file.
+  if ! guard_check_stream < "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
+    printf 'guard_selftest: FAIL — guard-lib rejects its own source\n' >&2
+    fails=$((fails + 1))
+  fi
+
+  if [ "$want_hooks" -eq 1 ]; then
+    # ── Prove the real pre-commit hook fires ──────────────────────────────
+    # A bare temp git dir has no objects or refs of its own, so point it at
+    # this repo's object store via info/alternates and copy the HEAD ref.
+    # The index is a temp file: stage a modified blob that ADDS one forbidden
+    # line (a diff against HEAD must contain added lines for the hook to
+    # scan), require the hook to block it, then reset the index to HEAD and
+    # require the hook to pass. The working tree is never touched.
+    local repo_top git_dir_real tmp_git_dir tmp_index branch head_commit
+    repo_top="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+      printf 'guard_selftest: FAIL — --self-commit needs a git repository\n' >&2
+      return 1
+    }
+    git_dir_real="$(git rev-parse --absolute-git-dir 2>/dev/null || printf '%s/.git' "$repo_top")"
+    head_commit="$(git rev-parse HEAD 2>/dev/null)" || {
+      printf 'guard_selftest: FAIL — --self-commit needs at least one commit\n' >&2
+      return 1
+    }
+    branch="$(git symbolic-ref --short HEAD 2>/dev/null || printf 'main')"
+    tmp_git_dir="$(mktemp -d)"
+    tmp_index="$(mktemp)"
+    git init --bare -q "$tmp_git_dir" 2>/dev/null
+    printf '%s\n' "$git_dir_real/objects" > "$tmp_git_dir/objects/info/alternates"
+    env GIT_INDEX_FILE="$tmp_index" git --git-dir="$tmp_git_dir" update-ref "refs/heads/$branch" "$head_commit"
+    git --git-dir="$tmp_git_dir" symbolic-ref HEAD "refs/heads/$branch"
+
+    run_pre_commit() {
+      (cd "$repo_top" && GIT_DIR="$tmp_git_dir" GIT_WORK_TREE="$repo_top" \
+        GIT_INDEX_FILE="$tmp_index" bash "${BASH_SOURCE[0]%/*}/pre-commit")
+    }
+
+    if ! env GIT_INDEX_FILE="$tmp_index" git --git-dir="$tmp_git_dir" read-tree HEAD >/dev/null 2>&1; then
+      printf 'guard_selftest: FAIL — could not read HEAD into the test index\n' >&2
+      rm -rf "$tmp_git_dir" "$tmp_index"
+      return 1
+    fi
+
+    local path old_blob new_blob bad_line hook_err
+    path="$(git --git-dir="$tmp_git_dir" ls-tree -r --name-only HEAD | head -1)"
+    if [ -z "$path" ]; then
+      printf 'guard_selftest: FAIL — HEAD contains no files to stage\n' >&2
+      rm -rf "$tmp_git_dir" "$tmp_index"
+      return 1
+    fi
+    bad_line='co-authored-by: Someone Else <else@example.com>'
+    git --git-dir="$tmp_git_dir" hash-object -w --stdin >/dev/null 2>&1 < /dev/null # warm the object dir
+    old_blob="$(git --git-dir="$tmp_git_dir" cat-file blob "HEAD:$path")"
+    new_blob="$( { printf '%s\n' "$old_blob"; printf '%s\n' "$bad_line"; } \
+      | git --git-dir="$tmp_git_dir" hash-object -w --stdin)"
+    env GIT_INDEX_FILE="$tmp_index" git --git-dir="$tmp_git_dir" \
+      update-index --add --cacheinfo "100644,$new_blob,$path"
+
+    # The hook MUST block the diff that adds the forbidden line.
+    if hook_err="$(run_pre_commit 2>&1)"; then
+      printf 'guard_selftest: FAIL — pre-commit let a forbidden diff through\n' >&2
+      fails=$((fails + 1))
+    elif ! grep -q 'commit blocked' <<< "$hook_err"; then
+      printf 'guard_selftest: FAIL — pre-commit failed for the wrong reason: %s\n' "$hook_err" >&2
+      fails=$((fails + 1))
+    fi
+
+    # The hook MUST pass the clean diff (index reset to HEAD).
+    env GIT_INDEX_FILE="$tmp_index" git --git-dir="$tmp_git_dir" read-tree HEAD >/dev/null 2>&1
+    if ! run_pre_commit >/dev/null 2>&1; then
+      printf 'guard_selftest: FAIL — pre-commit blocked a clean diff\n' >&2
+      fails=$((fails + 1))
+    fi
+
+    rm -rf "$tmp_git_dir" "$tmp_index"
+  fi
+
+  if [ "$fails" -ne 0 ]; then
+    printf 'guard_selftest: %d case(s) failed\n' "$fails" >&2
+    return 1
+  fi
   return 0
 }
