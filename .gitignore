@@ -1,9 +1,36 @@
-node_modules/
-.bun/
-.uv/
+# Secrets + local env (setup.sh copies from .env.example)
 .env
 .factory-env
 .archon/tokens.yaml
 .archon/cache/
 *.log
+
+# Toolchain + deps
+node_modules/
+.bun/
+.uv/
+
+# Factory runtime state, never committed
+.factory/runs/
+.factory/ledger.jsonl
+.factory/locks-runtime/
+.factory/findings/
+.factory/needs-human.md
+.factory/escalations.log
+.factory/trigger.json
+.factory/deployed.json
+.factory/deploy-history.log
+.factory/STOP
+.factory/loop.pid
+.factory/assumptions/
+.factory/followups/
+harness/.results/
+.factory/holdout/.results/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# OS artifacts
 .DS_Store

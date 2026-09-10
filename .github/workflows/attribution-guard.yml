@@ -1,0 +1,119 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# attribution-guard.yml — enforce the attribution policy on every push and PR.
+#
+# Policy: no credit is given to anyone but Darnel Hunter <dhunter@innotel.us>.
+# The guard rejects attribution text (Co-Authored-By/Signed-off-by trailers
+# naming anyone else, "Generated with/by <AI tool>", credit lines) in:
+#   - commit messages introduced by this push/PR,
+#   - the PR title/body (pull requests),
+#   - lines added to any file in the push/PR.
+#
+# The actual patterns live in .githooks/guard-lib (shared with the local
+# commit-msg/pre-commit hooks), so this workflow just sources that file and
+# feeds it the streams above. It never inspects author/committer identity.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: Attribution guard
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Check attribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commit messages, PR text, and file changes
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -uo pipefail
+          source .githooks/guard-lib
+
+          fail=0
+
+          # ── Tag pushes introduce no new history ───────────────────────
+          # A tag push carries an all-zero "before" SHA (like a brand-new
+          # repo), but the tag itself adds only the tagged commit. Scan the
+          # tag's own commit message + diff instead of the full history, so
+          # historical trailers never block a release.
+          if [ "${REF_TYPE:-}" = "tag" ]; then
+            git log -1 --format=%B "${GITHUB_REF_NAME}" | guard_check_stream || fail=1
+            added="$(git show --format= --no-color -U0 "${GITHUB_REF_NAME}" -- . 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+            if [ -n "$added" ]; then
+              printf '%s\n' "$added" | guard_check_stream || fail=1
+            fi
+            if [ "$fail" -ne 0 ]; then
+              echo "::error::Attribution guard failed — only Darnel Hunter <dhunter@innotel.us> may be credited."
+              exit 1
+            fi
+            echo "attribution guard: clean"
+            exit 0
+          fi
+
+          # ── Determine the commit range to scan ─────────────────────────
+          if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+            base="${PR_BASE:-}"; head="${PR_HEAD:-}"
+          else
+            base="${BASE_SHA:-}"; head="${HEAD_SHA:-}"
+          fi
+          # A brand-new branch/repo pushes with an all-zero "before" SHA —
+          # in that case scan the full reachable history instead.
+          if [ -n "$base" ] && printf '%s' "$base" | grep -Eq '^0+$'; then
+            base=""
+          fi
+
+          # ── 1. Commit messages in the range ───────────────────────────
+          if [ -n "$base" ] && [ -n "$head" ]; then
+            if git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1; then
+              git log --format=%B "${base}..${head}" | guard_check_stream || fail=1
+            else
+              # A force-push left the "before" SHA unreachable (history was
+              # rewritten), so the range can't be resolved. Scan the pushed
+              # head commit only, mirroring the tag-push path.
+              git log -1 --format=%B "$head" | guard_check_stream || fail=1
+            fi
+          else
+            git log --format=%B | guard_check_stream || fail=1
+          fi
+
+          # ── 2. PR title + body (content check only) ───────────────────
+          if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+            { printf '%s\n' "${PR_TITLE:-}"; printf '%s\n' "${PR_BODY:-}"; } | guard_check_stream || fail=1
+          fi
+
+          # ── 3. Lines added to files in the push/PR ────────────────────
+          added=""
+          if [ -n "$base" ] && [ -n "$head" ]; then
+            if git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1; then
+              added="$(git diff --no-color -U0 "$base" "$head" -- . 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+            else
+              added="$(git show --format= --no-color -U0 "$head" -- . 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+            fi
+          else
+            added="$(git log -p --format= --no-color HEAD 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+          fi
+          if [ -n "$added" ]; then
+            printf '%s\n' "$added" | guard_check_stream || fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::Attribution guard failed — only Darnel Hunter <dhunter@innotel.us> may be credited."
+            exit 1
+          fi
+          echo "attribution guard: clean"

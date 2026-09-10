@@ -1,0 +1,53 @@
+# Publish the project landing page (web/landing/) to GitHub Pages.
+#
+#   https://innotelinc.github.io/olympus/  (landing, static)
+#
+# Requires Pages to be enabled once: repo Settings -> Pages -> Source:
+# "GitHub Actions" (this workflow also attempts to enable it automatically).
+# After that, every push to main that touches web/landing republishes.
+# workflow_dispatch works too.
+
+name: GitHub Pages
+
+on:
+  push:
+    # [main, master]: repos default to either branch across the portfolio.
+    branches: [main, master]
+    paths:
+      - "web/landing/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Cancel any in-flight publish for the same ref; a Pages deploy is atomic.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload static site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/landing
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

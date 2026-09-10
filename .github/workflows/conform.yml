@@ -1,0 +1,32 @@
+name: Conformity
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Conformity audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the stack repo (standard + audit script)
+        uses: actions/checkout@v4
+        with:
+          repository: innotelinc/innotel-platform-stack
+          path: .stack
+
+      - name: Run the conformity audit
+        run: |
+          set -uo pipefail
+          bash .stack/scripts/conform-project.sh . | tee /tmp/conform.out
+          if grep -q '✗' /tmp/conform.out; then
+            echo "::error::Conformity audit found failures — see the log above."
+            exit 1
+          fi
+          echo "conformity audit: clean"

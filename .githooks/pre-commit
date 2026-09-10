@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# pre-commit — block attribution from landing in committed FILES.
+#
+# The message/trailer is enforced by the sibling commit-msg hook (the message
+# isn't written until later); this hook scans the staged diff so any
+# attribution added to docs, READMEs, credits, or comments in the tree itself
+# is rejected before the commit can be created. Policy: only Darnel Hunter
+# <dhunter@innotel.us> may ever be credited.
+#
+# Install (enables the guard locally):
+#     git config core.hooksPath .githooks
+# setup.sh on a fresh install already does this.
+# ═══════════════════════════════════════════════════════════════════════════
+set -uo pipefail
+
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=.githooks/guard-lib
+# shellcheck disable=SC1091
+source "$HOOK_DIR/guard-lib"
+
+say() { printf 'guard: %s\n' "$*"; }
+
+# Scan only the ADDED lines of the staged diff (never the unchanged context).
+added="$(git diff --cached --no-color -U0 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+if [ -n "$added" ]; then
+  if ! printf '%s\n' "$added" | guard_check_stream; then
+    say "commit blocked: the staged changes introduce attribution to someone other than Darnel Hunter <dhunter@innotel.us>."
+    exit 1
+  fi
+fi
+exit 0
