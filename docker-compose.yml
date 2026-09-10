@@ -20,8 +20,10 @@ services:
       - .env
     environment:
       OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://host.docker.internal:20128/v1}
+      OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       SPEC: ${SPEC:-}
+      OPENAI_API_KEY: ${OMNIROUTE_API_KEY:-${OPENAI_API_KEY:-}}
     volumes:
       - olympus-builds:/app/builds
       - ./build-requests:/app/build-requests:ro

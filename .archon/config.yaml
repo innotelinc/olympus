@@ -6,10 +6,14 @@ platforms:
     model: "nousresearch/hermes-3-llama-3-70b:free"
 
 assistants:
+  codex:
+    codexBinaryPath: "codex"
+    apiBaseUrl: "http://localhost:20128/v1"
+    defaultModel: "auto/coding"
   claude:
     claudeBinaryPath: "./core-modules/archon/bin/archon"
     apiBaseUrl: "http://localhost:20128/v1"
-    defaultModel: "qwen-2.5-coder-32b-instruct:free"
+    defaultModel: "auto/coding"
 
 # NEW: Instructs the harness where to export freshly manufactured apps
 factory_settings:

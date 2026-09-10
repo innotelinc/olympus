@@ -1,6 +1,6 @@
 # Olympus — The AI Software Factory (FactoryOps)
-# Runtime: Node 20 + Bun + Python 3.11 + git/curl. The factory itself (Archon +
-# OmniRoute routing; Hermes 3 + Qwen via gateway) is zero-local-GPU by design —
+# Runtime: Node 20 + Bun + Python 3.11 + git/curl + Codex. The factory itself (Archon +
+# OmniRoute routing; Codex auto/coding + Hermes 3 via gateway) is zero-local-GPU by design —
 # heavy inference is behind OMNIROUTE_BASE_URL (default http://omniroute:20128).
 # This image runs the Telegram surface + the manufacture loop; builds/ is a
 # bind-mount (gitignored) so generated apps survive restarts.
@@ -42,6 +42,10 @@ RUN if [ -f package.json ]; then bun install 2>/dev/null || bun install --ignore
 RUN for req in core-modules/ai-software-factory/requirements.txt factory/requirements.txt requirements.txt; do \
       if [ -f "$req" ]; then python3 -m pip install --no-cache-dir -r "$req" 2>/dev/null || true; fi; \
     done
+
+# Codex CLI (factory coding brain — Responses API via OmniRoute)
+RUN npm install -g @openai/codex 2>/dev/null || npm i -g @openai/codex 2>/dev/null || true \
+    && codex --version 2>/dev/null | head -1 || true
 
 # Entrypoint helper that manufacture.sh / setup.sh already handle
 RUN chmod +x scripts/*.sh setup.sh 2>/dev/null || true \

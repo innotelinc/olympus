@@ -13,8 +13,8 @@
 #      it and continues (the agents still get wired, ready for when it is up).
 #   5. Ensures an OmniRoute API key exists and is stored where the agents and
 #      the omniroute CLI can find it (~/.omniroute/.env, gitignored).
-#   6. Wires the coding agents to OmniRoute:
-#        codex  -> ~/.codex/config.toml + auth.json + per-model profiles
+#   6. Wires the coding agents to OmniRoute (Responses API for Codex):
+#        codex  -> ~/.codex/config.toml + auth.json + per-model profiles (wire_api=responses)
 #        claude -> ~/.claude/settings.json (ANTHROPIC_BASE_URL/AUTH_TOKEN)
 #   7. Runs `python3 factory/doctor.py` and prints the result.
 #
@@ -194,22 +194,46 @@ api_key_args=()
 if command -v codex >/dev/null 2>&1; then
   say "Wiring Codex to ${OMNIROUTE_BASE_URL}"
   if [ -n "$key" ]; then
-    omniroute setup-codex --remote "${OMNIROUTE_BASE_URL}" "${api_key_args[@]}" >/dev/null 2>&1 || \
+    # --api-key sk-... trips on the dash in the key value; use env-var form reliably
+    OMNIROUTE_API_KEY="$key" omniroute setup-codex --remote "${OMNIROUTE_BASE_URL}" >/dev/null 2>&1 || \
       warn "omniroute setup-codex failed (server down?). Profiles will be written next run."
   fi
 
-  # Base config: point codex at OmniRoute
+  # Base config: point codex at OmniRoute (Responses API)
   mkdir -p "$HOME/.codex"
   if [ ! -f "$HOME/.codex/config.toml" ] || ! grep -q 'openai_base_url' "$HOME/.codex/config.toml" 2>/dev/null; then
     cat > "$HOME/.codex/config.toml" <<EOF
 openai_base_url = "${OMNIROUTE_BASE_URL}/v1"
 requires_openai_auth = true
+model = "auto/coding"
+model_provider = "omniroute"
+
+[model_providers.omniroute]
+name = "OmniRoute"
+base_url = "${OMNIROUTE_BASE_URL}/v1"
+wire_api = "responses"
+requires_openai_auth = true
 EOF
+  else
+    # Existing config — ensure Responses API fields are present (idempotent)
+    if ! grep -q 'wire_api' "$HOME/.codex/config.toml" 2>/dev/null; then
+      python3 - <<PYEOF 2>/dev/null || true
+import pathlib
+p=pathlib.Path.home()/".codex/config.toml"
+t=p.read_text(encoding="utf-8", errors="replace")
+if "wire_api" not in t:
+    t=t.rstrip()+"\n\n[model_providers.omniroute]\nname = \"OmniRoute\"\nbase_url = \"${OMNIROUTE_BASE_URL}/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+    p.write_text(t)
+PYEOF
+    fi
   fi
 
-  # auth.json holds the API key for codex
-  if [ -n "$key" ] && [ ! -f "$HOME/.codex/auth.json" ]; then
-    printf '{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "%s"\n}\n' "$key" > "$HOME/.codex/auth.json"
+  # auth.json holds the API key for codex (update if changed)
+  if [ -n "$key" ]; then
+    mkdir -p "$HOME/.codex"
+    if [ ! -f "$HOME/.codex/auth.json" ] || ! grep -qF "$key" "$HOME/.codex/auth.json" 2>/dev/null; then
+      printf '{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "%s"\n}\n' "$key" > "$HOME/.codex/auth.json"
+    fi
   fi
 
   # The harness calls `omniroute launch-codex -p auto-coding`; make sure a
@@ -232,7 +256,7 @@ fi
 if command -v claude >/dev/null 2>&1; then
   say "Wiring Claude Code to ${OMNIROUTE_BASE_URL}"
   if [ -n "$key" ]; then
-    omniroute setup-claude --remote "${OMNIROUTE_BASE_URL}" "${api_key_args[@]}" >/dev/null 2>&1 || \
+    OMNIROUTE_API_KEY="$key" omniroute setup-claude --remote "${OMNIROUTE_BASE_URL}" >/dev/null 2>&1 || \
       warn "omniroute setup-claude failed (server down?). Profiles will be written next run."
   fi
 
