@@ -1,0 +1,52 @@
+name: 🏭 Olympus App Manufacturing Engine
+
+on:
+  push:
+    paths:
+      - 'build-requests/*.md'
+
+permissions:
+  contents: write
+
+jobs:
+  build-new-app:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📁 Checkout Olympus Workspace
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Monolithic Runtimes (Node & Python)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 🍞 Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 🏗️ Run Monolithic Setup
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          echo "$TELEGRAM_BOT_TOKEN" | ./setup.sh
+
+      - name: 🌐 Initialize Background Cloud Gateway (OmniRoute)
+        run: |
+          cd core-modules/omniroute
+          npm run start &
+          sleep 5
+
+      - name: 🚀 Manufacture Standalone App from Specification
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Identify the newly added spec file in the build-requests folder
+          SPEC_FILE=$(git diff-tree --no-commit-id --name-only -r HEAD | grep 'build-requests/' | head -n 1)
+          
+          # Force the software factory execution block to generate a new app tree
+          python3 core-modules/ai-software-factory/bin/factory.py run archon-greenfield \
+            --input spec="$SPEC_FILE" \
+            --output="./builds" \
+            --detach --json
