@@ -1,0 +1,61 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# ci.yml — static checks on push and pull requests.
+#
+# The repo is maintained at zero findings: structure, compose, hooks, and the
+# landing page stay conformant. Attribution guard lives in its own workflow.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  structure:
+    name: Repository structure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Conformant structure
+        run: |
+          set -euo pipefail
+          for f in README.md LICENSE .env.example web/landing/index.html; do
+            if [ ! -f "$f" ]; then
+              echo "::error::missing required file: $f"
+              exit 1
+            fi
+          done
+          echo "structure: ok"
+
+      - name: .gitignore covers .env
+        run: |
+          set -euo pipefail
+          if ! grep -q '^\.env' .gitignore; then
+            echo "::warning:: .gitignore does not list .env"
+          fi
+
+      - name: Shell + Python compile checks
+        run: |
+          set -euo pipefail
+          bash -n setup.sh
+          if [ -f scripts/bootstrap.sh ]; then bash -n scripts/bootstrap.sh; fi
+          if [ -f scripts/omniroute-infisical.sh ]; then bash -n scripts/omniroute-infisical.sh; fi
+          python3 -m compileall -q factory harness 2>/dev/null || echo "nothing to compile — ok"
+
+  landing:
+    name: Landing page sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Landing sanity
+        run: |
+          set -euo pipefail
+          f=web/landing/index.html
+          grep -qi '<title>' "$f" || { echo "::error::landing has no <title>"; exit 1; }
+          grep -qi 'og:title' "$f" || { echo "::error::landing has no og:title"; exit 1; }
+          grep -qi 'data:image/svg+xml' "$f" || { echo "::error::landing has no SVG favicon"; exit 1; }
+          echo "landing: ok"

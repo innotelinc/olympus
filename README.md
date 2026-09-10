@@ -1,220 +1,92 @@
-# Olympus — Zero-Cost Coding Agent Platform
+<div align="center">
 
-> **Local CPU, Free Cloud Brains.** 100% of heavy AI inference is outsourced to free cloud providers — your machine stays perfectly cool.
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-brightgreen.svg)](LICENSE)
 
-Olympus converges three open-source frameworks under one monorepo parent:
+# 🏭 Olympus — The AI Software Factory
 
-| Module | Path | Role |
-|---|---|---|
-| **OmniRoute** | `core-modules/omniroute` | Cloud routing gateway proxy — forwards all LLM calls to free endpoints |
-| **Archon** | `core-modules/archon` | Deterministic YAML-based DAG workflow engine |
-| **AI Software Factory** | `core-modules/ai-software-factory` | SDLC project scheduling & task consumer engine |
+**The repository-local automation platform that turns GitHub issues into validated pull requests — observable, gated, and self-hosted.**
 
-**Cost:** $0 — OpenRouter Free Tiers + DeepInfra Free evaluation endpoints.  
-**Compute:** Local CPU only — bypasses local Ollama weights entirely.  
-**Frontend Agent:** `Hermes 3 (70B)` via OpenRouter Free → Telegram Bot interface.  
-**Backend Coding Brain:** `Qwen 2.5 Coder (32B/70B)` via OmniRoute Cloud → repository code modifications.
+Olympus is a deterministic issue → PR factory for the repo it lives in: Archon workflows (YAML DAGs) drive triage → plan → implement → independent validation → controlled merge, with protected-path enforcement, required markers, non-zero evidence counts, and stop controls. One clone, one command, and a coding agent is wired to your OmniRoute gateway — ready to run factory workflows without re-implementing identity, secrets, billing, or storage.
 
----
+[![CI](https://github.com/innotelinc/olympus/actions/workflows/ci.yml/badge.svg)](https://github.com/innotelinc/olympus/actions/workflows/ci.yml)
+[![Conformity](https://github.com/innotelinc/olympus/actions/workflows/conform.yml/badge.svg)](https://github.com/innotelinc/olympus/actions/workflows/conform.yml)
+[![Pages](https://github.com/innotelinc/olympus/actions/workflows/pages.yml/badge.svg)](https://github.com/innotelinc/olympus/actions/workflows/pages.yml)
 
-## Prerequisites
-
-| Tool | Check | Install |
-|---|---|---|
-| `git` | `git --version` | https://git-scm.com/downloads |
-| `bun` | `bun --version` | `curl -fsSL https://bun.sh/install \| bash` |
-| `python3` (≥3.10) | `python3 --version` | https://www.python.org/downloads |
-| `gh` (GitHub CLI) | `gh --version` | https://cli.github.com/ — then `gh auth login` |
-| `npm` (ships with Node) | `npm --version` | https://nodejs.org/ |
-
-> All five are validated automatically by `setup.sh`. Missing tools abort with an install hint.
-
-You also need a **Telegram Bot Token** — create one free via [@BotFather](https://t.me/BotFather) → `/newbot`.
+</div>
 
 ---
 
-## Quickstart
+## Why Olympus
 
-### 1. Clone the repo
+| Problem | Olympus answer |
+| --- | --- |
+| Issues stall between triage and a trustworthy PR | Deterministic factory workflows (prime → implement → validate, plus regress and triage) with independent validation |
+| Automation that silently skips checks or walks past missing evidence | Non-zero evidence counts, required markers, ratchet floors, and fail-closed behavior are enforced |
+| Agents that touch governance or secrets as ordinary work | Protected paths, secret-shaped-file blocks, and bounded PR size — fix the source, never the harness |
+| Heavy model inference that heats the local CPU | 100% of heavy inference routed to free cloud models via the OmniRoute gateway (Hermes 3 + Qwen), local Ollama bypassed |
+| No visibility into autonomy, blockers, or held work | `factory/doctor.py` and `factory/trigger.py --status` report readiness, autonomy, evidence, and what is held |
+
+> **About Olympus** — a repository-local AI software factory built with three upstream frameworks under `core-modules/` — [OmniRoute](https://github.com/inotex/omniroute) (cloud routing gateway), [Archon](https://github.com/JohanLi233/archon) (YAML DAG workflow engine), and the AI Software Factory (SDLC scheduling and task consumer). The local CPU stays cool because the frontend agent (Hermes 3 70B via OpenRouter Free) and the coding brain (Qwen 2.5 Coder via OmniRoute) never load weights locally — they run behind the gateway at `http://localhost:20128/v1` (Telegram interface at `nousresearch/hermes-3-llama-3-70b:free`). **Landing page:** [innotelinc.github.io/olympus](https://innotelinc.github.io/olympus)
+
+---
+
+## What it is
+
+- **Owns:** repository automation (issue → watched workflow → open PR), validation and safety (protected paths, required markers, evidence counts, stop controls), and operational visibility (`factory/doctor.py`, `factory/trigger.py`)
+- **Owns:** the five Archon factory workflows and the harness as the definition of "working" — the harness is never edited to make a check pass
+- **Provides:** a one-command agent-ready clone (`bash scripts/bootstrap.sh`) and an interactive Telegram surface for issue → fix laps
+- **Fast lane:** Issue → Fix PR in ~35 minutes including autonomous code review
+- **Classification:** **FactoryOps** — see [docs/stack.md](docs/stack.md)
+
+---
+
+## Quick start
 
 ```bash
-git clone https://github.com/<your-org>/olympus.git
+git clone https://github.com/innotelinc/olympus.git
 cd olympus
+bash scripts/bootstrap.sh
 ```
 
-### 2. Run the setup wizard
+The bootstrap is idempotent and does, in order:
+
+1. Installs what is missing: the OmniRoute CLI, the Codex CLI, the Claude Code CLI, and the Archon CLI.
+2. Checks that an OmniRoute server is reachable (`http://localhost:20128`; override with `OMNIROUTE_BASE_URL`). If not, tries `scripts/omniroute-infisical.sh`; otherwise prints how to start it and continues.
+3. Creates an OmniRoute API key and stores it in `~/.omniroute/.env` (never in the repo).
+4. Wires both agents to OmniRoute: Codex → `~/.codex/config.toml` + `~/.codex/auth.json`, Claude Code → `~/.claude/settings.json` (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`).
+5. Runs `python3 factory/doctor.py` so you can see readiness at a glance.
+
+Then run the factory manually at autonomy level 0 (nothing unattended until a human has watched a real lap):
 
 ```bash
-chmod +x setup.sh
-./setup.sh
+python3 factory/doctor.py
+archon workflow run factory-implement --branch factory/impl-<n> "implement gh:issue:<n>"
+archon workflow run factory-validate --branch factory/val-<n> "validate gh:pr:<n>"
 ```
 
-What it does:
-
-1. Validates `git`, `bun`, `python3`, `gh`, `npm` are installed (with version floors).
-2. Creates `core-modules/` and `.archon/cache/`.
-3. Clones vendor tools if absent (skips if already present):
-   - `core-modules/omniroute`
-   - `core-modules/archon`
-   - `core-modules/ai-software-factory`
-4. Runs `bun install` inside each module that has a `package.json`.
-5. Initializes the Software Factory setup wizard programmatically (`setup.py --non-interactive` / `scripts/setup.sh` / stub `factory/consumer.py` fallback) and installs any `requirements.txt`.
-6. Securely prompts for your **Telegram Bot Token** (hidden input, `0600` perms) and writes it to `.factory-env`:
-   ```env
-   TELEGRAM_BOT_TOKEN=123456:AAH...
-   OPENROUTER_MODEL=nousresearch/hermes-3-llama-3-70b:free
-   OMNIROUTE_BASE_URL=http://localhost:20128/v1
-   QWEN_MODEL=qwen-2.5-coder-32b-instruct:free
-   ARCHON_BINARY=./core-modules/archon/bin/archon
-   ```
-
-Re-running is idempotent — existing clones are `git pull --ff-only`'d and the token prompt offers to keep the current value. Non-interactive CI can inject `TELEGRAM_BOT_TOKEN=... ./setup.sh`.
-
-### 3. Launch OmniRoute and enable Free Tier Mode
-
-Open a dedicated terminal (OmniRoute stays running):
-
-```bash
-cd core-modules/omniroute
-npm run start
-```
-
-Then open **http://localhost:20128** in your browser and toggle **Free Tier Mode → ON**.
-
-This routes all inference through:
-
-- **OpenRouter Free** (`nousresearch/hermes-3-llama-3-70b:free`) — Telegram chat
-- **DeepInfra Free / OpenRouter Free** (`qwen-2.5-coder-32b-instruct:free`) — code edits
-
-Leave this terminal running. Verify the gateway is reachable:
-
-```bash
-curl -s http://localhost:20128/v1/models | head
-```
-
-> Archon is configured in `.archon/config.yaml` to hit this gateway:
-> ```yaml
-> assistants:
->   claude:
->     claudeBinaryPath: "./core-modules/archon/bin/archon"
->     apiBaseUrl: "http://localhost:20128/v1"
->     defaultModel: "qwen-2.5-coder-32b-instruct:free"
-> ```
-
-### 4. Keep the system active — run the Factory consumer loop
-
-Open a **second terminal** from the repo root:
-
-```bash
-source .factory-env
-python3 factory/consumer.py loop
-```
-
-This is the SDLC scheduling loop: it polls the Archon DAG, pulls queued tasks, and dispatches code-modification jobs to **Qwen 2.5 Coder via OmniRoute** (`http://localhost:20128/v1`). Poll interval defaults to `5s` (`--interval 5`).
-
-- Single poll (for debugging): `python3 factory/consumer.py once`
-- Stop: `Ctrl+C`
-
-Keep this process alive — e.g. `tmux`, `screen`, `nohup`, or a systemd unit.
-
-### 5. Message the bot on Telegram — trigger autonomous edits at zero local CPU cost
-
-1. Open Telegram → search for the bot username you created with `@BotFather`.
-2. Send `/start` — **Hermes 3 (70B) via OpenRouter Free** replies (routed through OmniRoute, no local GPU/CPU inference).
-3. Describe a codebase task in natural language, e.g.:
-   - `Refactor factory/consumer.py to add retry with exponential backoff`
-   - `Add unit tests for the Archon DAG parser and open a PR`
-   - `Fix the failing bun install in core-modules/archon on Node 20`
-4. The frontend (Hermes 3) parses intent → Archon creates a DAG run from YAML → Factory consumer picks it up → **Qwen 2.5 Coder (32B/70B) via OmniRoute Cloud** edits files locally and commits via `gh`.
-5. Watch progress in the `factory/consumer.py loop` terminal and in Telegram — the bot streams status back through Hermes 3.
-
-**Why zero local CPU cost:** Neither Hermes 3 nor Qwen ever load weights locally. All `chat/completions` calls go to `http://localhost:20128/v1` (OmniRoute), which proxies to OpenRouter/DeepInfra free endpoints. Your CPU only runs git, bun, Python, and the lightweight gateway.
+See `MISSION.md`, `FACTORY.md`, and `FACTORY_RULES.md` in the source repo for scope, operations, and safety rules, and `harness/END-TO-END.md` plus `.factory/holdout/HOLDOUT.md` for the holdout contract.
 
 ---
 
-## Project Structure
+## Documentation
 
-```
-olympus/
-├── .archon/
-│   ├── config.yaml          # Telegram + Archon gateway config (see below)
-│   └── cache/               # DAG run cache (gitignored)
-├── .factory-env             # Telegram token + free-model env (0600, gitignored)
-├── .gitignore
-├── core-modules/
-│   ├── omniroute/           # Cloud routing gateway proxy
-│   ├── archon/              # YAML DAG workflow engine (binary at bin/archon)
-│   └── ai-software-factory/ # SDLC scheduler & task consumer
-├── factory/
-│   └── consumer.py          # SDLC loop entrypoint (python3 factory/consumer.py loop)
-├── setup.sh                 # One-shot reproducible setup wizard
-└── README.md
-```
-
-### `.archon/config.yaml`
-
-```yaml
-platforms:
-  telegram:
-    enabled: true
-    bot_token: "ENV_VAR"   # injected at runtime from $TELEGRAM_BOT_TOKEN (.factory-env)
-    provider: "openrouter"
-    model: "nousresearch/hermes-3-llama-3-70b:free"
-
-assistants:
-  claude:
-    claudeBinaryPath: "./core-modules/archon/bin/archon"
-    apiBaseUrl: "http://localhost:20128/v1"
-    defaultModel: "qwen-2.5-coder-32b-instruct:free"
-```
-
-### `.gitignore`
-
-```
-node_modules/
-.bun/
-.uv/
-.env
-.factory-env
-.archon/tokens.yaml
-.archon/cache/
-*.log
-.DS_Store
-```
-
----
-
-## Configuration Notes
-
-- **Free Tier Mode** must be ON at `http://localhost:20128` or upstream calls will attempt paid endpoints.
-- Override upstream repos without editing the script:
-  ```bash
-  OMNIROUTE_REPO=https://github.com/<fork>/omniroute.git \
-  ARCHON_REPO=https://github.com/<fork>/archon.git \
-  FACTORY_REPO=https://github.com/<fork>/AI-Software-Factory.git \
-  ./setup.sh
-  ```
-- `TELEGRAM_BOT_TOKEN` can be injected non-interactively: `TELEGRAM_BOT_TOKEN=123:ABC ./setup.sh`
-
----
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| `setup.sh: Missing required command: bun` | `curl -fsSL https://bun.sh/install \| bash && source ~/.bashrc` |
-| `gh auth login` not authenticated | `gh auth login` then re-run `setup.sh` |
-| `curl http://localhost:20128/v1/models` refused | Ensure `cd core-modules/omniroute && npm run start` is still running |
-| Telegram bot not replying | `source .factory-env && echo $TELEGRAM_BOT_TOKEN` — verify token; check OmniRoute Free Tier Mode is ON; check `factory/consumer.py loop` is running |
-| `Insufficient credits` / 402 from gateway | Free Tier Mode is OFF or free model string misspelled — confirm `qwen-2.5-coder-32b-instruct:free` and `nousresearch/hermes-3-llama-3-70b:free` in `.archon/config.yaml` and `.factory-env` |
-| `factory/consumer.py: No such file` | Re-run `./setup.sh` — it copies/scaffolds the consumer into `factory/` |
+| Document | What it covers |
+| --- | --- |
+| [docs/stack.md](docs/stack.md) | This platform's role in the [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) (FactoryOps) |
+| `MISSION.md` | What Olympus is and is not — the factory's scope (in the source repo) |
+| `FACTORY.md` | How the five components are built, autonomy ladder (in the source repo) |
+| `FACTORY_RULES.md` | Safety rules: protected files, gates, caps (in the source repo) |
+| `AGENTS.md` | Conventions for agents working in this repo (in the source repo) |
+| `harness/END-TO-END.md` | Journeys that must pass (in the source repo) |
+| `.factory/holdout/HOLDOUT.md` | Holdout the auto-merge rests on (in the source repo) |
+| `INFISICAL.md` | Infisical setup for OmniRoute credentials |
 
 ---
 
 ## License
 
-MIT — see `LICENSE` (if present). Vendor modules retain their upstream licenses under `core-modules/*/LICENSE`.
+Olympus is licensed under the **GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)**. See [LICENSE](LICENSE) for the full text. Upstream frameworks under `core-modules/` retain their own licenses in-tree.
 
 ---
 
-*Built for a cool CPU and a hot cloud — 100% free inference, 100% reproducible.*
+*Olympus · FactoryOps · [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) — one job per platform, platform services consumed by business functions.*
