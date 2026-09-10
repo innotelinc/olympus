@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check check-commits check-compose factory-doctor factory-trigger
+.PHONY: help setup doctor up down logs ps check check-commits check-compose factory-doctor factory-trigger app new-request builds
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -29,6 +29,21 @@ factory-doctor: ## Run factory doctor (readiness + blockers)
 
 factory-trigger: ## Show scheduler trigger status (expected: NOT_ARMED)
 	python3 factory/trigger.py --status
+
+## ---- App manufacturing (local dev — mirrors olympus-app-builder.yml) ------
+
+app: ## Manufacture app from SPEC (or most recent build-requests/*.md) → ./builds
+	bash scripts/manufacture.sh $(if $(SPEC),$(SPEC),)
+
+new-request: ## Scaffold build-requests/$(NAME).md from factory/APP_SPEC_TEMPLATE.md
+	@if [ -z "$(NAME)" ]; then echo "usage: make new-request NAME=my-app" >&2; exit 2; fi
+	@mkdir -p build-requests
+	@if [ -f "build-requests/$(NAME).md" ]; then echo "already exists: build-requests/$(NAME).md" >&2; exit 1; fi
+	@cp factory/APP_SPEC_TEMPLATE.md "build-requests/$(NAME).md"
+	@echo "created build-requests/$(NAME).md — edit it, then run: make app SPEC=build-requests/$(NAME).md"
+
+builds: ## List factory output (./builds, gitignored)
+	@ls -la builds 2>/dev/null || echo "builds/: empty (run make app) — output is gitignored per .gitignore:builds/"
 
 ## ---- Compose (Infisical profile) -----------------------------------------
 
