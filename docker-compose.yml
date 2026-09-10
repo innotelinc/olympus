@@ -1,0 +1,62 @@
+# Olympus — containerized factory (FactoryOps)
+# Usage: cp .env.example .env && $EDITOR .env   # TELEGRAM_BOT_TOKEN, OMNIROUTE_* etc.
+#        docker compose up --build -d            # or: make docker-up
+# Then:  make docker-logs | make docker-app SPEC=build-requests/my-todo.md
+#
+# Builds/ is a named volume (factory output, gitignored); build-requests/ is
+# bind-mounted so dropping a spec triggers the next `make docker-app` without rebuild.
+# OmniRoute defaults to an external gateway; set OMNIROUTE_BASE_URL=http://host.docker.internal:20128
+# if you run the gateway on the host, or add an `omniroute` service below if you vendor it.
+
+services:
+  olympus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/innotelinc/olympus:local
+    container_name: olympus
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://host.docker.internal:20128/v1}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      SPEC: ${SPEC:-}
+    volumes:
+      - olympus-builds:/app/builds
+      - ./build-requests:/app/build-requests:ro
+      # Persist the factory token across restarts when using env_file .env
+      - ./.factory-env:/app/.factory-env
+    ports:
+      - "${OLYMPUS_PORT:-20128}:20128"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:20128/health >/dev/null 2>&1 || python3 factory/doctor.py 2>/dev/null | grep -qi 'ready\\|ok' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  # Optional bundled gateway — uncomment if you vendor OmniRoute under core-modules/omniroute
+  # and want the factory to bring its own gateway inside the stack rather than reaching
+  # host.docker.internal. When enabled, set OMNIROUTE_BASE_URL=http://omniroute:20128/v1.
+  # omniroute:
+  #   image: node:20-bookworm-slim
+  #   working_dir: /app
+  #   command: bash -c "cd /app/core-modules/omniroute && npm ci && npm run start"
+  #   volumes:
+  #     - .:/app
+  #   ports:
+  #     - "20128:20128"
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "curl -fsS http://localhost:20128/health >/dev/null 2>&1 || exit 1"]
+  #     interval: 15s
+  #     retries: 10
+
+volumes:
+  olympus-builds:
+
+networks:
+  default:
+    name: olympus-net
