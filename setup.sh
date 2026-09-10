@@ -100,6 +100,12 @@ prepare_core_dir() {
   success "Created $CORE_DIR"
   mkdir -p "$ROOT_DIR/.archon/cache"
   mkdir -p "$ROOT_DIR/factory"
+  # Local dev: build-requests is the trigger, builds is the factory output (both documented, builds/ is gitignored)
+  mkdir -p "$ROOT_DIR/build-requests"
+  mkdir -p "$ROOT_DIR/builds"
+  if [[ ! -f "$ROOT_DIR/build-requests/.gitkeep" && -z "$(ls -A "$ROOT_DIR/build-requests" 2>/dev/null | grep -v README)" ]]; then
+    touch "$ROOT_DIR/build-requests/.gitkeep" 2>/dev/null || true
+  fi
 }
 
 # ──────────────────────────────────────────────
