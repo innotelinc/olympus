@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check check-commits check-compose factory-doctor factory-trigger app new-request builds
+.PHONY: help setup doctor up down logs ps check check-commits check-compose factory-doctor factory-trigger app new-request builds docker-build docker-up docker-down docker-logs docker-ps docker-shell docker-app docker-clean
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -58,6 +58,32 @@ logs: ## Tail logs from supporting services
 
 ps: ## List supporting service status
 	docker compose -f compose.infisical.yml --profile infisical ps 2>/dev/null || docker compose -f docker-compose.infisical.yml --profile infisical ps 2>/dev/null || true
+
+## ---- Docker (container) ---------------------------------------------------
+
+docker-build: ## Build the Olympus image (ghcr.io/innotelinc/olympus:local)
+	docker build -t ghcr.io/innotelinc/olympus:local .
+
+docker-up: ## Start the Olympus container (detached, builds → volume)
+	docker compose up --build -d
+
+docker-down: ## Stop the Olympus container (keeps builds volume)
+	docker compose down
+
+docker-logs: ## Tail Olympus container logs
+	docker compose logs -f
+
+docker-ps: ## List Olympus container status
+	docker compose ps
+
+docker-shell: ## Shell into the running Olympus container
+	docker compose exec olympus bash
+
+docker-app: ## Manufacture inside the container (SPEC= or newest build-request)
+	docker compose exec olympus bash scripts/manufacture.sh $(if $(SPEC),$(SPEC),)
+
+docker-clean: ## Remove container + builds volume (irreversible)
+	docker compose down -v
 
 ## ---- Conformity -----------------------------------------------------------
 

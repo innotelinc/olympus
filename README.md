@@ -42,11 +42,35 @@ Olympus is a deterministic issue → PR factory for the repo it lives in: Archon
 
 ## Quick start
 
+### Local (clone → ready)
+
 ```bash
 git clone https://github.com/innotelinc/olympus.git
 cd olympus
 bash scripts/bootstrap.sh
 ```
+
+### Docker (one command)
+
+```bash
+git clone https://github.com/innotelinc/olympus.git
+cd olympus
+cp .env.example .env   # set TELEGRAM_BOT_TOKEN, OMNIROUTE_* if you have a gateway
+make docker-up          # builds image ghcr.io/innotelinc/olympus:local + starts container
+make docker-logs        # tail factory + gateway logs
+```
+
+Then inside the container (or via `make docker-app`):
+
+```bash
+make new-request NAME=my-todo   # → build-requests/my-todo.md
+$EDITOR build-requests/my-todo.md
+make app                         # local — or: make docker-app SPEC=build-requests/my-todo.md
+make builds                       # list ./builds (volume, gitignored)
+```
+
+Docker also runs the same `push` manufacture trigger in CI: `.github/workflows/olympus-app-builder.yml`
+(`on.push.paths: build-requests/*.md`).
 
 The bootstrap is idempotent and does, in order:
 
@@ -59,9 +83,15 @@ The bootstrap is idempotent and does, in order:
 Then run the factory manually at autonomy level 0 (nothing unattended until a human has watched a real lap):
 
 ```bash
+# Local
 python3 factory/doctor.py
 archon workflow run factory-implement --branch factory/impl-<n> "implement gh:issue:<n>"
 archon workflow run factory-validate --branch factory/val-<n> "validate gh:pr:<n>"
+
+# Docker
+make docker-shell
+python3 factory/doctor.py
+# or from the host: docker compose exec olympus bash scripts/manufacture.sh build-requests/my-todo.md
 ```
 
 See `MISSION.md`, `FACTORY.md`, and `FACTORY_RULES.md` in the source repo for scope, operations, and safety rules, and `harness/END-TO-END.md` plus `.factory/holdout/HOLDOUT.md` for the holdout contract.
