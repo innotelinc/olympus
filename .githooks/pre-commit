@@ -11,7 +11,7 @@
 # Install (enables the guard locally):
 #     git config core.hooksPath .githooks
 # setup.sh on a fresh install already does this.
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
 set -uo pipefail
 
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -22,7 +22,9 @@ source "$HOOK_DIR/guard-lib"
 say() { printf 'guard: %s\n' "$*"; }
 
 # Scan only the ADDED lines of the staged diff (never the unchanged context).
-added="$(git diff --cached --no-color -U0 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+# Strip the '+' diff marker after filtering — the trailer rule is anchored (^),
+# so a leading '+' would hide a foreign credit line from the scan.
+added="$(git diff --cached --no-color -U0 2>/dev/null | grep '^+' | grep -v '^+++' | sed 's/^+//' || true)"
 if [ -n "$added" ]; then
   if ! printf '%s\n' "$added" | guard_check_stream; then
     say "commit blocked: the staged changes introduce attribution to someone other than Darnel Hunter <dhunter@innotel.us>."

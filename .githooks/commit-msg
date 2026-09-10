@@ -11,7 +11,7 @@
 # Install (enables the guard locally):
 #     git config core.hooksPath .githooks
 # setup.sh on a fresh install already does this.
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
 set -uo pipefail
 
 MSG_FILE="${1:-}"
