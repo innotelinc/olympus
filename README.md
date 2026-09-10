@@ -102,6 +102,7 @@ See `MISSION.md`, `FACTORY.md`, and `FACTORY_RULES.md` in the source repo for sc
 
 | Document | What it covers |
 | --- | --- |
+| [UPSTREAMS.md](UPSTREAMS.md) | Vendored upstream mirrors (Archon, AI Software Factory, skills, OmniRoute) — provenance, SHAs, licenses, recovery | 
 | [docs/stack.md](docs/stack.md) | This platform's role in the [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) (FactoryOps) |
 | `MISSION.md` | What Olympus is and is not — the factory's scope (in the source repo) |
 | `FACTORY.md` | How the five components are built, autonomy ladder (in the source repo) |

@@ -114,6 +114,7 @@ prepare_core_dir() {
 clone_if_missing() {
   local name="$1"
   local repo="$2"
+  local fallback="$3"
   local dest="$CORE_DIR/$name"
 
   if [[ -d "$dest/.git" ]]; then
@@ -123,24 +124,34 @@ clone_if_missing() {
     warn "$dest exists but is not a git repo — skipping clone for $name"
   else
     info "Cloning $name from $repo ..."
-    git clone "$repo" "$dest"
-    success "$name cloned"
+    if git clone --depth 1 "$repo" "$dest" 2>/dev/null; then
+      success "$name cloned (mirror)"
+    elif [[ -n "$fallback" ]] && git clone --depth 1 "$fallback" "$dest" 2>/dev/null; then
+      success "$name cloned (upstream fallback: $fallback)"
+    else
+      error "Failed to clone $name from $repo ${fallback:+or $fallback}"
+      return 1
+    fi
   fi
 }
 
 clone_vendor_tools() {
   header "Cloning Vendor Tools"
 
-  # Upstream sources — all open-source, zero-cost
-  # Override via env vars if you track forks:
+  # Vendored mirrors under innotelinc (full-history copies of the upstreams, see
+  # UPSTREAMS.md) so the factory survives upstream deletion/moves. The original
+  # upstream is kept as fallback for updates. Override via env vars:
   #   OMNIROUTE_REPO, ARCHON_REPO, FACTORY_REPO
-  local OMNIROUTE_REPO="${OMNIROUTE_REPO:-https://github.com/inotex/omniroute.git}"
-  local ARCHON_REPO="${ARCHON_REPO:-https://github.com/JohanLi233/archon.git}"
-  local FACTORY_REPO="${FACTORY_REPO:-https://github.com/Andy-Zhouelect/AI-Software-Factory.git}"
+  local OMNIROUTE_REPO="${OMNIROUTE_REPO:-https://github.com/innotelinc/omniroute.git}"
+  local OMNIROUTE_UPSTREAM="https://github.com/diegosouzapw/OmniRoute.git"
+  local ARCHON_REPO="${ARCHON_REPO:-https://github.com/innotelinc/Archon.git}"
+  local ARCHON_UPSTREAM="https://github.com/coleam00/Archon.git"
+  local FACTORY_REPO="${FACTORY_REPO:-https://github.com/innotelinc/ai-software-factory.git}"
+  local FACTORY_UPSTREAM="https://github.com/coleam00/ai-software-factory.git"
 
-  clone_if_missing "omniroute"            "$OMNIROUTE_REPO"
-  clone_if_missing "archon"               "$ARCHON_REPO"
-  clone_if_missing "ai-software-factory"  "$FACTORY_REPO"
+  clone_if_missing "omniroute"            "$OMNIROUTE_REPO"   "$OMNIROUTE_UPSTREAM"
+  clone_if_missing "archon"               "$ARCHON_REPO"      "$ARCHON_UPSTREAM"
+  clone_if_missing "ai-software-factory"  "$FACTORY_REPO"     "$FACTORY_UPSTREAM"
 
   success "All vendor tools ready under $CORE_DIR/"
 }
