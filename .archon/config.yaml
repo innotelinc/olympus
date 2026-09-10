@@ -10,3 +10,8 @@ assistants:
     claudeBinaryPath: "./core-modules/archon/bin/archon"
     apiBaseUrl: "http://localhost:20128/v1"
     defaultModel: "qwen-2.5-coder-32b-instruct:free"
+
+# NEW: Instructs the harness where to export freshly manufactured apps
+factory_settings:
+  output_dir: "./builds"
+  scaffold_templates: "./core-modules/ai-software-factory/templates"
