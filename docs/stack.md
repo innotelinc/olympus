@@ -13,17 +13,17 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 - Operational visibility — setup blockers, configured autonomy, earned evidence, in-flight work, held work, and verification results (fail-closed)
 - The five Archon factory workflows (prime, implement, validate, regress, triage) and the harness as the definition of “working”
 - Fast lane (Issue → Fix PR): ~35 min wall-clock per issue including autonomous code review
-- Local CPU posture — 100% of heavy model inference outsourced to free cloud models via the OmniRoute gateway (Hermes 3 + Qwen), local Ollama bypassed
+- Local CPU posture — 100% of heavy model inference outsourced to free cloud models via the OmniRoute gateway (Codex `auto/coding` + Hermes 3), local Ollama bypassed
 
 ## Provides
 
-- An agent-ready clone: `bash scripts/bootstrap.sh` installs the OmniRoute, Codex, Claude Code, and Archon CLIs, wires both agents to the gateway, mints an API key, and reports `factory/doctor.py`
+- An agent-ready clone: `bash scripts/bootstrap.sh` installs the OmniRoute, Codex (primary coding brain, `wire_api = "responses"`), Claude Code, and Archon CLIs, wires agents to the gateway, mints an API key, and reports `factory/doctor.py`
 - Deterministic gating/merging after independent validation; mutation checks and holdout contract for auto-merge quality
 - The “teammate” SDLC loop (Archon DAG + factory consumer) that can be triggered from Telegram via Hermes 3
 
 ## Consumes
 
-- OmniRoute — model gateway (Hermes 3 + Qwen free-tier models via OpenRouter/DeepInfra)
+- OmniRoute — model gateway (Codex `auto/coding` + Hermes 3 via OpenRouter/DeepInfra)
 - Authentik — identity, SSO (Cerulean's Authentik; optional: local/OIDC mode where applicable)
 - Infisical — secrets, credentials (gateway keys, tokens)
 - Cerulean — trust (DNS/TLS for the operator surfaces where exposed)
@@ -44,7 +44,7 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 | `.archon/workflows/factory/` | Archon YAML workflows | Prime → implement → validate, plus regress and triage |
 | `scripts/bootstrap.sh` + `scripts/omniroute-infisical.sh` | bash + OmniRoute CLI | One-command clone-to-ready and gateway launcher |
 | Telegram interface | Hermes 3 via OpenRouter Free through OmniRoute | Interactive bot that parses intent into Archon DAG runs |
-| Coding brain | Qwen 2.5 Coder via OmniRoute Cloud | Repository code modifications dispatched by the factory consumer |
+| Coding brain | Codex (`auto/coding`) via OmniRoute Responses API (`wire_api = "responses"`) | Repository code modifications dispatched by the factory consumer + harness E2E (`omniroute launch-codex -p auto-coding`) |
 
 ## In the ecosystem
 
@@ -54,7 +54,7 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 | Identity | Cerulean's Authentik at `https://auth.cerulean.innotel.us` (platform alias `auth.olympus.innotel.us` where wired) — OIDC provider per service |
 | Secrets | Cerulean's Infisical — credentials live in Infisical; `.env` is derived and gitignored |
 | Trust / Edge | Cerulean (DNS/certs) and NPM Edge where the hosting host is fronted — managed by Cerulean |
-| AI plane | OmniRoute gateway in front of upstream models — one wire_api (`responses`) for agents, one key per user |
+| AI plane | OmniRoute gateway in front of upstream models — Codex via `wire_api = "responses"` (primary), one key per user |
 
 ## Integration with other platforms
 
