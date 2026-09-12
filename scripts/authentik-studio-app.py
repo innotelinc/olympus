@@ -22,6 +22,11 @@ Configuration falls back to the repo-root `.env` — the same file Studio reads 
 so `make studio-oidc` needs no exports. Real process env wins over the file, so
 CI can drive it without a file on disk.
 
+`AUTHENTIK_TOKEN` may also be a `vault://<mount>/<path>#<key>` reference: on the
+platform the credential lives in Cerulean Vault and `.env` carries only the
+reference, exactly as it does for the gateway password. Pass VAULT_ADDR and a
+token via VAULT_TOKEN or VAULT_TOKEN_FILE (both usually already in `.env`).
+
 The default redirect URIs are the local dev callback plus, when
 `STUDIO_PUBLIC_HOST` is set, that host's HTTPS callback. Studio derives its
 callback from the incoming request, so every name it is served on has to be
@@ -75,6 +80,93 @@ def load_env_file(path: Path) -> dict[str, str]:
         values[key] = value.strip().strip('"').strip("'")
 
     return values
+
+
+def resolve_vault_reference(value: str, setting, env_path: Path) -> str:
+    """Resolve `vault://<mount>/<path>#<key>` through Cerulean Vault.
+
+    The registration credential is a secret, so `.env` is allowed to carry a
+    reference instead of the value — the convention the rest of this stack uses
+    (`OMNIROUTE_INITIAL_PASSWORD=vault://…`) and that scripts/omniroute-vault.sh
+    already resolves for the gateway. Without this the tool would send the
+    literal `vault://…` string as a bearer token and fail as an opaque 403.
+
+    Only references are touched: a plain value is returned unchanged, so a
+    checkout with no Vault behaves exactly as before.
+    """
+    if not value.startswith("vault://"):
+        return value
+
+    location, _, key = value[len("vault://"):].partition("#")
+    parts = [segment for segment in location.split("/") if segment]
+    if len(parts) < 2 or not key:
+        sys.exit(
+            f"AUTHENTIK_TOKEN is not a usable Vault reference: {value}\n"
+            "Expected vault://<mount>/<path>#<KEY>, e.g. "
+            "vault://cerulean/olympus/authentik#AUTHENTIK_TOKEN"
+        )
+    mount, secret_path = parts[0], "/".join(parts[1:])
+
+    address = setting("VAULT_ADDR").rstrip("/")
+    if not address:
+        sys.exit(
+            "AUTHENTIK_TOKEN is a Vault reference but VAULT_ADDR is not set.\n"
+            "Set VAULT_ADDR, or put the token itself in AUTHENTIK_TOKEN."
+        )
+
+    token = setting("VAULT_TOKEN")
+    if not token:
+        token_file = setting("VAULT_TOKEN_FILE")
+        if not token_file:
+            sys.exit(
+                "AUTHENTIK_TOKEN is a Vault reference but no Vault token is available.\n"
+                "Set VAULT_TOKEN or VAULT_TOKEN_FILE."
+            )
+        # Relative paths in .env are relative to the repository root, and the
+        # operator may run this from anywhere.
+        candidate = Path(token_file)
+        if not candidate.is_absolute():
+            candidate = env_path.parent / candidate
+        try:
+            token = candidate.read_text(encoding="utf-8").strip()
+        except OSError as error:
+            sys.exit(f"Could not read VAULT_TOKEN_FILE ({candidate}): {error.strerror}")
+        if not token:
+            sys.exit(f"VAULT_TOKEN_FILE ({candidate}) is empty.")
+
+    context = None
+    if setting("VAULT_SKIP_VERIFY") in ("1", "true", "yes"):
+        context = ssl._create_unverified_context()
+    elif setting("VAULT_CACERT"):
+        context = ssl.create_default_context(cafile=setting("VAULT_CACERT"))
+
+    request = urllib.request.Request(f"{address}/v1/{mount}/data/{secret_path}")
+    request.add_header("X-Vault-Token", token)
+    request.add_header("Accept", "application/json")
+    if setting("VAULT_NAMESPACE"):
+        request.add_header("X-Vault-Namespace", setting("VAULT_NAMESPACE"))
+
+    try:
+        with urllib.request.urlopen(request, timeout=30, context=context) as response:
+            payload = json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as error:
+        sys.exit(
+            f"Could not read {value} from Vault at {address}: HTTP {error.code}.\n"
+            "Check that the mount/path are right and the token is allowed to read them."
+        )
+    except (urllib.error.URLError, OSError) as error:
+        sys.exit(f"Could not reach Vault at {address}: {getattr(error, 'reason', error)}")
+
+    # KV v2 nests under data.data; KV v1 stops at data.
+    outer = payload.get("data") if isinstance(payload, dict) else None
+    inner = outer.get("data") if isinstance(outer, dict) else None
+    source = inner if isinstance(inner, dict) else (outer if isinstance(outer, dict) else {})
+    resolved = source.get(key)
+    if not isinstance(resolved, str) or not resolved.strip():
+        sys.exit(f"Vault returned no '{key}' at {mount}/{secret_path}.")
+
+    print(f"  token:      resolved from Vault ({mount}/{secret_path}#{key})")
+    return resolved.strip()
 
 
 def default_redirect_uris(setting) -> list[str]:
@@ -192,7 +284,7 @@ def main() -> int:
         return os.environ.get(name) or file_values.get(name) or fallback
 
     api_base = args.api_base or setting("AUTHENTIK_URL")
-    token = args.token or setting("AUTHENTIK_TOKEN")
+    token = args.token or resolve_vault_reference(setting("AUTHENTIK_TOKEN"), setting, env_path)
 
     if not api_base:
         sys.exit("Set AUTHENTIK_URL (e.g. https://auth.cerulean.innotel.us) or pass --api-base.")

@@ -60,7 +60,7 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 | Flow | Path |
 |---|---|
 | Definition source | [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) is canonical; this page is the product's link to it |
-| Identity | Cerulean's Authentik at `https://auth.cerulean.innotel.us`, aliased at `auth.olympus.innotel.us` — the same alias every platform gets — OIDC provider per service |
+| Identity | Cerulean's Authentik at `https://auth.cerulean.innotel.us`, aliased at `auth.olympus.innotel.us` — the same alias every platform gets — OIDC provider per service; the registration tooling authenticates as a least-privilege service account, never as an administrator |
 | Secrets | Cerulean Vault (KV v2) — credentials live in Vault; `.env` carries `vault://` references and is gitignored |
 | Trust / Edge | Cerulean (DNS/certs) and NPM Edge where the hosting host is fronted — managed by Cerulean |
 | AI plane | OmniRoute gateway in front of upstream models — Codex via `wire_api = "responses"` (primary), one key per user |
@@ -136,6 +136,18 @@ convention Cerulean uses, so the stack and the platform agree on one format:
 
 `scripts/omniroute-vault.sh` resolves that secret with `curl` and starts the
 gateway with it, so no Vault CLI has to exist on the host.
+
+The Authentik registration credential lives beside that password, still inside
+this stack's own path, and `.env` carries the reference rather than the value:
+
+    AUTHENTIK_TOKEN=vault://cerulean/olympus/authentik#AUTHENTIK_TOKEN
+
+`make vault-bootstrap` writes it there when `AUTHENTIK_URL` and
+`AUTHENTIK_TOKEN` are set, and `scripts/authentik-studio-app.py` resolves the
+reference before it calls Authentik. The credential is a service account
+(`olympus-studio`), not an administrator: the `olympus-studio-registration` role
+grants exactly the reads and the provider/application writes that registration
+needs — no users, groups, roles, outposts, and no deletes.
 
 For a checkout with no platform Vault, `compose.vault.yml` provides a dev-mode
 one — in-memory and auto-unsealed, which is fine for local iteration and **not**

@@ -27,6 +27,12 @@ Optional:
     OMNIROUTE_PASSWORD_FILE
                         also drop the generated password here (0600).
                         Unset = leave it only in Vault.
+    AUTHENTIK_URL / AUTHENTIK_TOKEN
+                        when both are set, ALSO store them at
+                        ``{PREFIX}/{VAULT_PATH}/authentik`` so ``.env`` can carry
+                        ``AUTHENTIK_TOKEN=vault://…/authentik#AUTHENTIK_TOKEN``
+                        instead of the credential itself. A token that is itself
+                        a ``vault://`` reference is left alone (already there).
 
 Once written, ``.env`` may carry a reference instead of the value:
 
@@ -97,6 +103,10 @@ TOKEN = read_token()
 PREFIX = (os.environ.get("VAULT_PREFIX", "").strip() or DEFAULT_PREFIX).strip("/")
 SECRET_PATH = (os.environ.get("VAULT_PATH", "").strip() or DEFAULT_PATH).strip("/")
 NAMESPACE = os.environ.get("VAULT_NAMESPACE", "").strip()
+# The Authentik registration credential lives BESIDE the generated password,
+# never merged into it (that write replaces the whole secret), and stays under
+# this stack's own path so the scoped `olympus` policy still covers it.
+AUTHENTIK_PATH = f"{SECRET_PATH}/authentik"
 
 _verify: ssl.SSLContext | bool = True
 if os.environ.get("VAULT_SKIP_VERIFY", "").strip() in ("1", "true", "yes"):
@@ -214,6 +224,45 @@ def ensure_kv2() -> None:
     print(f"--- {PREFIX}/ is KV v2 ---")
 
 
+def store_authentik_credential() -> None:
+    """Stash the Authentik registration credential, when one is configured.
+
+    Deliberately a *sub-path* rather than extra keys in the secret above: that
+    write is a full replace, so folding an unrelated credential into it would
+    make every re-run a quiet coin flip between the two.
+    """
+    url = os.environ.get("AUTHENTIK_URL", "").strip()
+    token = os.environ.get("AUTHENTIK_TOKEN", "").strip()
+
+    if not url or not token:
+        print("\n--- no AUTHENTIK_URL/AUTHENTIK_TOKEN in the environment — skipping that credential ---")
+        return
+    if token.startswith("vault://"):
+        print("\n--- AUTHENTIK_TOKEN is already a Vault reference — nothing to store ---")
+        return
+
+    print(f"--- writing AUTHENTIK_URL + AUTHENTIK_TOKEN to {PREFIX}/{AUTHENTIK_PATH} ---")
+    status, written = api(
+        "POST",
+        f"{PREFIX}/data/{AUTHENTIK_PATH}",
+        {"data": {"AUTHENTIK_URL": url, "AUTHENTIK_TOKEN": token}},
+    )
+    if status not in (200, 204):
+        fail(f"Writing the Authentik credential failed: HTTP {status} — {written.get('errors')}")
+
+    status, read = api("GET", f"{PREFIX}/data/{AUTHENTIK_PATH}")
+    if status != 200:
+        fail(f"Could not read the Authentik credential back: HTTP {status} — {read.get('errors')}")
+    got = (read.get("data") or {}).get("data") or {}
+    if got.get("AUTHENTIK_TOKEN") != token or got.get("AUTHENTIK_URL") != url:
+        fail("The Authentik credential did not read back identically.")
+
+    version = ((read.get("data") or {}).get("metadata") or {}).get("version")
+    print(f"    stored (version {version}), values not printed")
+    print("    point .env at it instead of pasting the value:")
+    print(f"      AUTHENTIK_TOKEN=vault://{PREFIX}/{AUTHENTIK_PATH}#AUTHENTIK_TOKEN")
+
+
 def main() -> int:
     print(f"Vault:  {ADDR}")
     print(f"  mount: {PREFIX}/  path: {SECRET_PATH}  token: {len(TOKEN)} chars")
@@ -268,6 +317,8 @@ def main() -> int:
         print(f"    also wrote {path} (0600)")
     else:
         print("    password left in Vault only (set OMNIROUTE_PASSWORD_FILE to also drop it)")
+
+    store_authentik_credential()
 
     print("\nReference it from .env instead of pasting the value:")
     print(f"  OMNIROUTE_INITIAL_PASSWORD=vault://{PREFIX}/{SECRET_PATH}#{SECRET_KEY}")
