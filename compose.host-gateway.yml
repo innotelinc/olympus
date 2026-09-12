@@ -1,0 +1,43 @@
+# compose.host-gateway.yml — reach a loopback-published gateway with host networking.
+#
+# WHY THIS EXISTS
+# ---------------
+# The gateway this stack talks to is published on the host's loopback only
+# (`127.0.0.1:20128`), and Docker publishes a loopback binding to the loopback
+# interface alone. A bridge container therefore cannot reach it. All four
+# candidate addresses were probed from a bridge container and all four failed:
+#
+#   http://host.docker.internal:20128/v1   -> no connection
+#   http://172.17.0.1:20128/v1             -> no connection
+#   http://192.168.1.10:20128/v1           -> no connection
+#
+# This is the topology docker-compose.yml documents as "loopback-published on
+# host" — the sanctioned answer is host networking plus
+# `OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1`, which is what this file does.
+#
+# WHEN NOT TO USE IT
+# ------------------
+# Leave it out if your gateway is published on 0.0.0.0, if you run the
+# profile-gated sibling `omniroute` on the shared network, or if the gateway is
+# on another machine — the base file's defaults already cover those. Read the
+# caveat at the top of docker-compose.yml before changing anything here.
+#
+# USAGE
+# -----
+#   docker compose -f docker-compose.yml -f compose.host-gateway.yml up -d
+#
+# `ports` and `extra_hosts` are cleared rather than left in place: Docker
+# discards published ports in host mode and warns loudly, and host.docker.internal
+# is pointless when the container already shares the host's network namespace.
+# An explicit override keeps the output honest instead of papering over it.
+
+services:
+  olympus:
+    network_mode: host
+    ports: !override []
+    extra_hosts: !override []
+
+  studio:
+    network_mode: host
+    ports: !override []
+    extra_hosts: !override []
