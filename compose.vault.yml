@@ -5,7 +5,7 @@
 # as `cerulean-vault`, so consume it instead:
 #
 #   VAULT_ADDR=http://<host>:8200
-#   VAULT_TOKEN_FILE=./data/vault/token/cerulean.token   # scoped, never root
+#   VAULT_TOKEN_FILE=./data/vault/token/olympus.token   # scoped, never root
 #   VAULT_PREFIX=cerulean
 #
 # and reference secrets as `vault://<mount>/<path>#<key>` — the same convention
