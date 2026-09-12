@@ -35,6 +35,7 @@ Olympus is a deterministic issue → PR factory for the repo it lives in: Archon
 - **Owns:** repository automation (issue → watched workflow → open PR), validation and safety (protected paths, required markers, evidence counts, stop controls), and operational visibility (`factory/doctor.py`, `factory/trigger.py`)
 - **Owns:** the five Archon factory workflows and the harness as the definition of "working" — the harness is never edited to make a check pass
 - **Provides:** a one-command agent-ready clone (`bash scripts/bootstrap.sh`) and an interactive Telegram surface for issue → fix laps
+- **Provides:** [Studio](web/studio/) — the browser vibe-coding surface: describe an app in plain language, watch it build, iterate on it, all against the same OmniRoute gateway (`make studio-dev`)
 - **Fast lane:** Issue → Fix PR in ~35 minutes including autonomous code review
 - **Classification:** **FactoryOps** — see [docs/stack.md](docs/stack.md)
 
@@ -102,8 +103,8 @@ See `MISSION.md`, `FACTORY.md`, and `FACTORY_RULES.md` in the source repo for sc
 
 | Document | What it covers |
 | --- | --- |
-| [UPSTREAMS.md](UPSTREAMS.md) | Vendored upstream mirrors (Archon, AI Software Factory, skills, OmniRoute) — provenance, SHAs, licenses, recovery | 
-| [docs/stack.md](docs/stack.md) | This platform's role in the [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) (FactoryOps) |
+| [UPSTREAMS.md](UPSTREAMS.md) | Vendored upstream mirrors (Archon, AI Software Factory, skills, OmniRoute) — provenance, SHAs, licenses, recovery || [docs/stack.md](docs/stack.md) | This platform's role in the [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) (FactoryOps) | 
+| [web/studio/README.md](web/studio/README.md) | Studio — the vibe-coding web UI: how to run it, configuration, output contract, security posture | 
 | `MISSION.md` | What Olympus is and is not — the factory's scope (in the source repo) |
 | `FACTORY.md` | How the five components are built, autonomy ladder (in the source repo) |
 | `FACTORY_RULES.md` | Safety rules: protected files, gates, caps (in the source repo) |
