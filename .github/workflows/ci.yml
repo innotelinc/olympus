@@ -43,6 +43,8 @@ jobs:
           bash -n setup.sh
           if [ -f scripts/bootstrap.sh ]; then bash -n scripts/bootstrap.sh; fi
           if [ -f scripts/omniroute-vault.sh ]; then bash -n scripts/omniroute-vault.sh; fi
+          bash -n scripts/studio-token-alert.sh
+          bash -n scripts/install-token-check-timer.sh
           python3 -m compileall -q scripts/vault-bootstrap.py scripts/authentik-studio-app.py
           python3 -m compileall -q scripts/authentik-studio-token.py
           # The rotation program is generated, so it has to stay valid Python.

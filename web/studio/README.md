@@ -184,9 +184,11 @@ result. It is minted in that container's shell rather than over the REST API
 because Authentik 2026.8 forces api-intent tokens to the tenant's
 `default_token_duration` (`minutes=30` here) whatever you request, and because a
 `PATCH` that does not mention `user` re-parents a token to the caller — a footgun
-that turned this credential into an administrator token once, while it was being
-built. `make studio-oidc-check` covers both the discovery probe and the
-credential's expiry.
+that turned this credential into an administrator token once, while itwas being built. `make studio-oidc-check` covers both the discovery probe and the
+credential's expiry. On the deployment host,
+`scripts/install-token-check-timer.sh` schedules that check daily and alerts
+through Telegram while the credential is lapsing (see the Secrets section of
+`docs/stack.md`).
 
 It takes the Authentik base URL and API token from `AUTHENTIK_URL` /
 `AUTHENTIK_TOKEN` in `.env` (real environment wins over the file, so CI can drive
