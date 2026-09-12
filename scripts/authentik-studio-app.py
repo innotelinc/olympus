@@ -27,10 +27,11 @@ platform the credential lives in Cerulean Vault and `.env` carries only the
 reference, exactly as it does for the gateway password. Pass VAULT_ADDR and a
 token via VAULT_TOKEN or VAULT_TOKEN_FILE (both usually already in `.env`).
 
-The default redirect URIs are the local dev callback plus, when
-`STUDIO_PUBLIC_HOST` is set, that host's HTTPS callback. Studio derives its
-callback from the incoming request, so every name it is served on has to be
-registered here or `/authorize` rejects the sign-in.
+The default redirect URIs are the local dev callback plus one HTTPS callback per
+public name: `STUDIO_PUBLIC_HOST` (the builder) and `BASE_DOMAIN` (the root host,
+which shows a landing screen with a sign-in button). Studio derives its callback
+from the incoming request, so every name it is served on has to be registered
+here or `/authorize` rejects the sign-in.
 
 The script is idempotent: if the provider or application already exists it
 reports that instead of creating a duplicate, and it PATCHes what is missing —
