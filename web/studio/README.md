@@ -73,8 +73,9 @@ failing obscurely.
 | `STUDIO_PORT` | `3001` | Host port for the dev server. |
 | `STUDIO_ACCESS_TOKEN` | — | When set, every route requires an `x-studio-token` header. Empty = open. |
 | `STUDIO_PUBLIC_HOST` | — | Public host the edge serves Studio on. Read by `make studio-oidc`, which registers `https://<host>/api/auth/callback` as a redirect URI; Studio itself derives the callback from the request. |
+| `BASE_DOMAIN` | — | The stack's root host. Read by `make studio-oidc` too: the root name serves a landing screen with a sign-in button, so its callback is registered alongside the studio host's — sign-in works from whichever host the visitor arrived on. |
 | `STUDIO_DATA_DIR` | `<repo>/data/studio` | Where saved apps live. The compose service points it at a named volume. |
-| `STUDIO_RATE_LIMIT_PER_MIN` | `20` | Generations per minute per signed-in identity on `/api/generate` (hard cap 600). Exceeding it answers `429` with `retry-after`; rejected requests consume no budget. |
+| `STUDIO_RATE_LIMIT_PER_MIN` | `20` | Generations per minute per signed-in identity on `/api/generate` (hard cap 600). Exceeding it answers `429` with `retry-after`; rejected requests consume no budget. `0` (or `off`) disables the limit — for a single-operator deployment behind the IdP; a typo falls back to the default, never to unlimited. |
 
 Placeholders from `.env.example` (`change-me…`) count as unset, so an unedited
 template fails loudly instead of sending a bogus key.
@@ -194,9 +195,10 @@ through Telegram while the credential is lapsing (see the Secrets section of
 It takes the Authentik base URL and API token from `AUTHENTIK_URL` /
 `AUTHENTIK_TOKEN` in `.env` (real environment wins over the file, so CI can drive
 it), derives the application slug and client ID from `OIDC_ISSUER_URL` /
-`OIDC_CLIENT_ID`, and registers the local callback plus
-`STUDIO_PUBLIC_HOST`'s HTTPS callback. It is idempotent, and a re-run *repairs*
-rather than skipping: it adds a redirect URI that was never registered and
+`OIDC_CLIENT_ID`, and registers the local callback, `STUDIO_PUBLIC_HOST`'s
+HTTPS callback, and `BASE_DOMAIN`'s (the root host lands on a welcome screen
+whose button starts sign-in). It is idempotent, and a re-run *repairs* rather
+than skipping: it adds a redirect URI that was never registered and
 PATCHes `grant_types` if it is empty. Three details it exists to get right, all
 learned against Authentik 2026.8:
 

@@ -170,13 +170,24 @@ def resolve_vault_reference(value: str, setting, env_path: Path) -> str:
 
 
 def default_redirect_uris(setting) -> list[str]:
-    """Local callback always; the public host's callback when one is configured."""
+    """Local callback; the public host's callback; the stack's root host too.
+
+    The app answers on two public names: `STUDIO_PUBLIC_HOST` (the builder) and
+    `BASE_DOMAIN` (the front door, which shows a landing screen with a
+    sign-in button). Studio derives its callback from the incoming request, so
+    both names must be registered or sign-in from that host is refused at
+    /authorize.
+    """
     port = setting("STUDIO_PORT", DEFAULT_STUDIO_PORT)
     uris = [f"http://localhost:{port}/api/auth/callback"]
 
     host = setting("STUDIO_PUBLIC_HOST")
     if host:
         uris.append(f"https://{host}/api/auth/callback")
+
+    root = setting("BASE_DOMAIN")
+    if root and f"https://{root}/api/auth/callback" not in uris:
+        uris.append(f"https://{root}/api/auth/callback")
 
     return uris
 
