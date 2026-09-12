@@ -349,9 +349,10 @@ build than the one on screen. `GET` returns the same bytes as a download, so the
 handoff still works on a deployment that never mounted the directory.
 
 > **Permissions.** Studio runs as uid 1001, so the bind mount has to be writable
-> by that uid — `chown 1001:1001 build-requests` once. Without it the export
-> answers `503` with that instruction in the message instead of an opaque
-> failure.
+> by that uid. `make studio-export-dir` settles it — idempotent, and `setup.sh`
+> runs it on every install, so a fresh deployment needs no manual step. Without
+> it the export answers `503` naming the fix instead of failing obscurely. The
+> uid is `STUDIO_UID` if you have changed it (default `1001`).
 
 ## Security posture
 

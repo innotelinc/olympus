@@ -47,6 +47,7 @@ jobs:
           bash -n scripts/studio-token-alert.sh
           bash -n scripts/vault-renew-alert.sh
           bash -n scripts/install-token-check-timer.sh
+          bash -n scripts/studio-export-dir.sh
           python3 -m compileall -q scripts/vault-bootstrap.py scripts/authentik-studio-app.py
           python3 -m compileall -q scripts/authentik-studio-token.py
           # The rotation program is generated, so it has to stay valid Python.

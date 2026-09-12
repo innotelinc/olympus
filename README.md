@@ -84,6 +84,7 @@ make docker-logs                   # tail factory + gateway logs
 make studio-install                # install web/studio dependencies (npm ci)
 make studio-dev                    # dev server → http://localhost:3001
 make studio-test                   # vitest: parser, gateway route, OIDC flow, saved apps
+make studio-export-dir             # let Studio write build-requests/ specs (uid 1001)
 
 # or inside the stack
 docker compose up -d studio
