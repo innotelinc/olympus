@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { EMPTY_DOCUMENT, buildPreviewDocument, parseFiles, type GeneratedFile } from "@/lib/files";
+import { EMPTY_DOCUMENT, buildPreviewDocument, currentFileFrom, parseFiles, type GeneratedFile } from "@/lib/files";
 import CodeView from "./CodeView";
 import Preview from "./Preview";
 
@@ -35,6 +35,16 @@ function titleFromPrompt(prompt: string): string {
   return line.trim().slice(0, 60);
 }
 
+/** m:ss elapsed label. */
+function clock(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** Human-readable byte count for the progress line. */
+function kilobytes(bytes: number): string {
+  return bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`;
+}
+
 async function readFailure(response: Response): Promise<string> {
   try {
     const payload = (await response.json()) as { error?: unknown };
@@ -57,6 +67,14 @@ export default function Studio({ user = null }: { user?: string | null }) {
   const [showSettings, setShowSettings] = useState(false);
   const [previewDoc, setPreviewDoc] = useState(EMPTY_DOCUMENT);
 
+  // Live progress, driven by the stream itself: which file is open, how much
+  // of it has arrived, when the build started, and when data last moved.
+  const [currentFile, setCurrentFile] = useState<{ path: string; bytes: number } | null>(null);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [lastChunkAt, setLastChunkAt] = useState<number | null>(null);
+  const [queued, setQueued] = useState(false);
+  const [nowTick, setNowTick] = useState(0);
+
   // Saved-app library. Kept server-side under the signed-in identity, so the
   // same account gets the same apps on any browser.
   const [savedApps, setSavedApps] = useState<SavedApp[]>([]);
@@ -67,6 +85,18 @@ export default function Studio({ user = null }: { user?: string | null }) {
   const [libraryError, setLibraryError] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+
+  // Mirrors of state the streaming core reads, so a queued instruction can
+  // start with the files the previous turn actually produced (state updates
+  // have not rendered yet the moment a turn ends) and so continuous prompting
+  // never reads a stale closure.
+  const busyRef = useRef(false);
+  const pendingRef = useRef<string | null>(null);
+  const filesRef = useRef<GeneratedFile[]>([]);
+  const promptRef = useRef("");
+  const tokenRef = useRef("");
+  const activeAppRef = useRef<string | null>(null);
+  const appTitleRef = useRef("");
 
   useEffect(() => {
     try {
@@ -79,6 +109,32 @@ export default function Studio({ user = null }: { user?: string | null }) {
 
   const streamedFiles = useMemo(() => parseFiles(raw), [raw]);
   const activeFiles = streamedFiles.length > 0 ? streamedFiles : files;
+
+  // Keep the mirrors current. filesRef is also assigned directly at the moment
+  // a turn produces files, because a queued turn starts before the next render.
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+  useEffect(() => {
+    promptRef.current = prompt;
+  }, [prompt]);
+  useEffect(() => {
+    tokenRef.current = token;
+  }, [token]);
+  useEffect(() => {
+    activeAppRef.current = activeAppId;
+  }, [activeAppId]);
+  useEffect(() => {
+    appTitleRef.current = appTitle;
+  }, [appTitle]);
+
+  // Re-render once a second while streaming so the elapsed counter and the
+  // waiting indicator move without waiting for stream data.
+  useEffect(() => {
+    if (status !== "streaming") return;
+    const id = window.setInterval(() => setNowTick((tick) => tick + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [status]);
 
   // Rebuild the preview on a delay while streaming so the iframe is not torn
   // down and recreated on every token.
@@ -233,114 +289,168 @@ export default function Studio({ user = null }: { user?: string | null }) {
   }, []);
 
   const stop = useCallback(() => {
+    pendingRef.current = null;
+    setQueued(false);
     abortRef.current?.abort();
     abortRef.current = null;
     setStatus("idle");
   }, []);
 
   const generate = useCallback(async () => {
-    const instruction = prompt.trim();
-    if (!instruction || status === "streaming") return;
+    if (busyRef.current) return;
+    const firstInstruction = promptRef.current.trim();
+    if (!firstInstruction) return;
 
+    busyRef.current = true;
     const controller = new AbortController();
     abortRef.current = controller;
 
     setStatus("streaming");
     setError(null);
     setRaw("");
+    setQueued(false);
+    setCurrentFile(null);
+    setStartedAt(Date.now());
+    setLastChunkAt(Date.now());
 
     try {
-      const headers: Record<string, string> = { "content-type": "application/json" };
-      if (token) headers["x-studio-token"] = token;
-
-      const response = await fetch("/api/generate", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ prompt: instruction, files }),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        if (response.status === 401) setShowSettings(true);
-        throw new Error(await readFailure(response));
-      }
-      if (!response.body) throw new Error("The gateway returned an empty stream.");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let accumulated = "";
+      // This turn's inputs. A turn queued while another was streaming takes
+      // over here — the loop is what makes continuous prompting seamless: the
+      // next instruction starts the moment the current stream closes.
+      let turnPrompt = firstInstruction;
+      let priorFiles = filesRef.current;
 
       for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        accumulated += decoder.decode(value, { stream: true });
-        setRaw(accumulated);
-      }
-      accumulated += decoder.decode();
+        const headers: Record<string, string> = { "content-type": "application/json" };
+        if (tokenRef.current) headers["x-studio-token"] = tokenRef.current;
 
-      // The stream has ended, so recover a final block whose closing tag the
-      // model never sent. Mid-stream this stays strict (see `streamedFiles`),
-      // which is what keeps half-written files out of the preview.
-      const produced = parseFiles(accumulated, { allowUnterminatedLast: true });
-      if (produced.length === 0) {
-        setRaw("");
-        throw new Error("The model replied without any file blocks. Try rephrasing the request.");
-      }
+        const response = await fetch("/api/generate", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ prompt: turnPrompt, files: priorFiles }),
+          signal: controller.signal,
+        });
 
-      setFiles(produced);
-      setRaw("");
-      setTurns((count) => count + 1);
-      setStatus("idle");
-
-      // Editing a saved app keeps its saved copy current, so reopening it never
-      // silently reverts the last revision. Best-effort: the build already
-      // succeeded, so a failed save is reported and must not fail the build.
-      if (activeAppId) {
-        try {
-          const app = await persistApp({
-            id: activeAppId,
-            title: appTitle,
-            prompt: instruction,
-            files: produced,
-          });
-          setAppTitle(app.title);
-          await listSavedApps();
-        } catch {
-          setLibraryError("The build succeeded, but saving it failed. Use Save to retry.");
+        if (!response.ok) {
+          if (response.status === 401) setShowSettings(true);
+          throw new Error(await readFailure(response));
         }
+        if (!response.body) throw new Error("The gateway returned an empty stream.");
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let accumulated = "";
+
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          accumulated += decoder.decode(value, { stream: true });
+          setRaw(accumulated);
+          setCurrentFile(currentFileFrom(accumulated));
+          setLastChunkAt(Date.now());
+        }
+        accumulated += decoder.decode();
+
+        // The stream has ended, so recover a final block whose closing tag the
+        // model never sent (parseFiles does this by default now).
+        const produced = parseFiles(accumulated);
+        if (produced.length === 0) {
+          setRaw("");
+          setCurrentFile(null);
+          throw new Error("The model replied without any file blocks. Try rephrasing the request.");
+        }
+
+        setFiles(produced);
+        filesRef.current = produced;
+        setRaw("");
+        setCurrentFile(null);
+        setTurns((count) => count + 1);
+
+        // Editing a saved app keeps its saved copy current, so reopening it
+        // never silently reverts the last revision. Best-effort: the build
+        // already succeeded, so a failed save must not fail the build.
+        if (activeAppRef.current) {
+          try {
+            const app = await persistApp({
+              id: activeAppRef.current,
+              title: appTitleRef.current,
+              prompt: turnPrompt,
+              files: produced,
+            });
+            appTitleRef.current = app.title;
+            setAppTitle(app.title);
+            await listSavedApps();
+          } catch {
+            setLibraryError("The build succeeded, but saving it failed. Use Save to retry.");
+          }
+        }
+
+        const nextInstruction = pendingRef.current;
+        if (!nextInstruction?.trim()) break;
+
+        pendingRef.current = null;
+        setQueued(false);
+        turnPrompt = nextInstruction.trim();
+        priorFiles = produced;
+
+        // Clear the composer only when it still holds the queued text; if the
+        // operator started typing something new mid-stream, that draft stays.
+        if (promptRef.current === nextInstruction) setPrompt("");
+
+        setError(null);
+        setRaw("");
+        setStartedAt(Date.now());
+        setLastChunkAt(Date.now());
       }
+
+      setStatus("idle");
     } catch (thrown) {
       if (controller.signal.aborted) return;
       setError(thrown instanceof Error ? thrown.message : "Generation failed.");
       setStatus("error");
+      setCurrentFile(null);
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
+      busyRef.current = false;
     }
-  }, [
-    activeAppId,
-    appTitle,
-    files,
-    listSavedApps,
-    persistApp,
-    prompt,
-    status,
-    token,
-  ]);
+  }, [listSavedApps, persistApp]);
+
+  /** Submit: start a build, or queue the instruction while one is running. */
+  const submit = useCallback(() => {
+    const text = prompt.trim();
+    if (!text) return;
+
+    if (busyRef.current) {
+      pendingRef.current = text;
+      setQueued(true);
+      return;
+    }
+    void generate();
+  }, [generate, prompt]);
+
+  const unqueue = useCallback(() => {
+    pendingRef.current = null;
+    setQueued(false);
+  }, []);
 
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
       if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
         event.preventDefault();
-        void generate();
+        submit();
       }
     },
-    [generate],
+    [submit],
   );
 
   const statusLabel = status === "streaming" ? "Building" : status === "error" ? "Failed" : "Ready";
   const statusDot = status === "streaming" ? "live" : status === "error" ? "bad" : "ok";
   const busy = status === "streaming";
   const hasFiles = activeFiles.length > 0;
+  // Recomputed each render; the 1-second interval (and every chunk) re-renders
+  // while streaming, so both move live.
+  const elapsedSeconds = busy && startedAt !== null ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
+  const waiting = busy && lastChunkAt !== null && Date.now() - lastChunkAt > 4000;
 
   return (
     <div className="shell">
@@ -351,6 +461,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
         <span className="pill">
           <span className={`dot ${statusDot}`} />
           {statusLabel}
+          {busy ? ` ${clock(elapsedSeconds)}` : ""}
         </span>
         {turns > 0 ? <span className="pill">{hasFiles ? `${activeFiles.length} files` : "no files"}</span> : null}
         <span className="topbar-spacer" />
@@ -381,17 +492,29 @@ export default function Studio({ user = null }: { user?: string | null }) {
               onKeyDown={onKeyDown}
               placeholder="A budgeting app with categories, a monthly summary, and a bar chart drawn with CSS."
               spellCheck={false}
-              disabled={busy}
             />
           </div>
 
           <div className="actions">
             {busy ? (
-              <button type="button" className="primary" onClick={stop}>
-                Stop
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={submit}
+                  disabled={!prompt.trim() || queued}
+                >
+                  {queued ? "Queued ✓" : "Queue next"}
+                </button>
+                <button type="button" className="ghost" onClick={unqueue} disabled={!queued}>
+                  Clear
+                </button>
+                <button type="button" className="ghost" onClick={stop}>
+                  Stop
+                </button>
+              </>
             ) : (
-              <button type="button" className="primary" onClick={() => void generate()} disabled={!prompt.trim()}>
+              <button type="button" className="primary" onClick={submit} disabled={!prompt.trim()}>
                 {turns > 0 ? "Revise" : "Build"}
               </button>
             )}
@@ -403,6 +526,18 @@ export default function Studio({ user = null }: { user?: string | null }) {
           {error ? (
             <div className="alert error" role="alert">
               <span>{error}</span>
+            </div>
+          ) : null}
+
+          {queued ? (
+            <div className="alert note" role="status">
+              <span>
+                Queued — it runs the moment the current build finishes. Keep typing; your draft stays.
+              </span>
+              <span className="topbar-spacer" />
+              <button type="button" className="ghost" onClick={unqueue}>
+                Cancel
+              </button>
             </div>
           ) : null}
 
@@ -522,11 +657,36 @@ export default function Studio({ user = null }: { user?: string | null }) {
             </div>
           ) : null}
 
-          {hasFiles ? (
-            <div className="produced">
+          {busy && startedAt !== null ? (
+            <div className="produced progress">
               <span className="produced-head">
-                {busy ? "Writing files" : "Files in this build"}
+                <span className={`dot ${waiting ? "wait" : "live"}`} />
+                {currentFile
+                  ? `Writing ${currentFile.path} · ${kilobytes(currentFile.bytes)}`
+                  : hasFiles
+                    ? "Finishing files"
+                    : "Waiting for the first file block"}
+                <span className="topbar-spacer" />
+                <span className={waiting ? "progress-wait" : undefined}>
+                  {waiting ? `no data for ${clock(Math.floor((Date.now() - (lastChunkAt ?? 0)) / 1000))}` : "streaming"}
+                </span>
               </span>
+              <div className="progress-bar" aria-hidden="true">
+                <div className={`progress-fill ${waiting ? "stalled" : ""}`} />
+              </div>
+              {activeFiles.length > 0 ? (
+                <div className="produced-list">
+                  {activeFiles.map((file) => (
+                    <span key={file.path} className="file-chip">
+                      {file.path}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : hasFiles ? (
+            <div className="produced">
+              <span className="produced-head">Files in this build</span>
               <div className="produced-list">
                 {activeFiles.map((file) => (
                   <span key={file.path} className="file-chip">

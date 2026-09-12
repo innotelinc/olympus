@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPreviewDocument, languageFor, parseFiles } from "@/lib/files";
+import { buildPreviewDocument, currentFileFrom, languageFor, parseFiles } from "@/lib/files";
 
 const ONE_FILE = `<file path="index.html">
 <!doctype html><html><head><title>Counter</title></head>
@@ -18,15 +18,25 @@ describe("parseFiles", () => {
     expect(parseFiles(ONE_FILE)[0].contents.startsWith("\n")).toBe(false);
   });
 
-  it("ignores a block whose closing tag has not streamed in yet", () => {
-    expect(parseFiles('<file path="index.html">\n<!doctype html><html>')).toHaveLength(0);
+  it("surfaces a file whose closing tag has not streamed in yet", () => {
+    // Default: the tail of the stream is shown as it grows, so the preview
+    // fills progressively instead of sitting blank until the stream ends.
+    expect(parseFiles('<file path="index.html">\n<!doctype html><html>')).toEqual([
+      { path: "index.html", contents: "<!doctype html><html>" },
+    ]);
+  });
+
+  it("still hides an unterminated block in strict mode", () => {
+    expect(
+      parseFiles('<file path="index.html">\n<!doctype html><html>', { allowUnterminatedLast: false }),
+    ).toHaveLength(0);
   });
 
   it("reports the blocks that are complete during a stream", () => {
     const partial = `${ONE_FILE}\n<file path="app.js">\nconsole.log("partial");`;
 
-    expect(parseFiles(partial)).toHaveLength(1);
-    expect(parseFiles(`${partial}\n</file>`)).toHaveLength(2);
+    expect(parseFiles(partial, { allowUnterminatedLast: false })).toHaveLength(1);
+    expect(parseFiles(`${partial}\n</file>`, { allowUnterminatedLast: false })).toHaveLength(2);
   });
 
   it("recovers a final block whose closing tag never arrived", () => {
@@ -35,10 +45,10 @@ describe("parseFiles", () => {
     // parsed to nothing and the UI reported no file blocks at all.
     const unclosed = '<file path="index.html">\n<!doctype html><html><body>hi</body></html>';
 
-    expect(parseFiles(unclosed)).toHaveLength(0);
-    expect(parseFiles(unclosed, { allowUnterminatedLast: true })).toEqual([
+    expect(parseFiles(unclosed)).toEqual([
       { path: "index.html", contents: "<!doctype html><html><body>hi</body></html>" },
     ]);
+    expect(parseFiles(unclosed, { allowUnterminatedLast: true })).toEqual(parseFiles(unclosed));
   });
 
   it("recovers only the final block when earlier ones are closed", () => {
@@ -59,13 +69,11 @@ describe("parseFiles", () => {
     expect(files[0].contents).toBe("A");
   });
 
-  it("still ignores an unterminated block during a stream", () => {
+  it("shows the in-progress file during a stream with its partial contents", () => {
     const streaming = `${ONE_FILE}\n<file path="app.js">\nconsole.log("half writ`;
 
-    expect(parseFiles(streaming)).toHaveLength(1);
-    expect(parseFiles(streaming, { allowUnterminatedLast: true }).at(-1)?.contents).toBe(
-      'console.log("half writ',
-    );
+    expect(parseFiles(streaming).at(-1)?.contents).toBe('console.log("half writ');
+    expect(parseFiles(streaming, { allowUnterminatedLast: false })).toHaveLength(1);
   });
 
   it("extracts multiple files in order", () => {
@@ -85,6 +93,38 @@ describe("parseFiles", () => {
   it("tolerates extra whitespace inside the tag", () => {
     const files = parseFiles('<file  path="styles.css"  >\nbody { color: red; }\n</file>');
     expect(files[0].path).toBe("styles.css");
+  });
+});
+
+describe("currentFileFrom", () => {
+  it("reports the open block and how much of it has arrived", () => {
+    const body = "<!doctype html><html><body>hi";
+    // The byte count spans from the tag's end (including its newline) to the
+    // end of the buffer.
+    const raw = `<file path="index.html">\n${body}`;
+    const current = currentFileFrom(raw);
+
+    expect(current?.path).toBe("index.html");
+    expect(current?.bytes).toBe(body.length + 1);
+  });
+
+  it("returns null once the block is closed", () => {
+    expect(currentFileFrom(ONE_FILE)).toBeNull();
+  });
+
+  it("returns null before any block has opened", () => {
+    expect(currentFileFrom("")).toBeNull();
+    expect(currentFileFrom("prose only")).toBeNull();
+  });
+
+  it("follows the stream to the newest open block", () => {
+    const raw = `${ONE_FILE}\n<file path="app.js">\nconsole.log("wri`;
+    expect(currentFileFrom(raw)?.path).toBe("app.js");
+  });
+
+  it("returns null when only completed blocks precede the buffer end", () => {
+    const closed = `${ONE_FILE}\n<file path="app.js">\nconsole.log("x");\n</file>`;
+    expect(currentFileFrom(closed)).toBeNull();
   });
 });
 

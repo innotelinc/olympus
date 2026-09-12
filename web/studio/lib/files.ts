@@ -24,11 +24,16 @@ export type ParseOptions = {
    * Accept a block that never received its closing tag when only the end of the
    * input follows it.
    *
-   * This is off while a stream is running, where an unterminated block is
-   * indistinguishable from a file still being written, and on for the final
-   * parse once the stream has ended. It is needed in practice: the gateway
-   * drops the trailing `</file>` on an ordinary one-file prompt, so without it
-   * a completed build parses to nothing at all.
+   * **On by default.** The trailing `</file>` is the tag a model is most likely
+   * to drop — the gateway has been observed cutting it on ordinary one-file
+   * prompts — and treating that as "not a file yet" has a cost beyond the final
+   * parse: while the first (largest) file is still streaming, *every* file is
+   * unterminated, so a strict mid-stream parse returns nothing and the preview
+   * sits blank until the stream ends. An unterminated trailing block that
+   * genuinely is still being written is recovered on the next render tick:
+   * the parse reruns over the grown buffer, so the preview fills progressively
+   * rather than appearing all at once. Pass `false` where a half-written file
+   * must not be consumed (nothing in Studio does).
    */
   allowUnterminatedLast?: boolean;
 };
@@ -68,6 +73,7 @@ export const EMPTY_DOCUMENT = `<!doctype html>
 </html>`;
 
 export function parseFiles(raw: string, options: ParseOptions = {}): GeneratedFile[] {
+  const allowUnterminatedLast = options.allowUnterminatedLast !== false;
   const files: GeneratedFile[] = [];
   const seen = new Set<string>();
 
@@ -96,7 +102,7 @@ export function parseFiles(raw: string, options: ParseOptions = {}): GeneratedFi
     const closeAt = segment.indexOf(FILE_CLOSE);
     const terminated = closeAt !== -1;
 
-    if (!terminated && isLast && !options.allowUnterminatedLast) continue;
+    if (!terminated && isLast && !allowUnterminatedLast) continue;
 
     const body = terminated ? segment.slice(0, closeAt) : segment;
     const contents = body.replace(/^\r?\n/, "").replace(/\s+$/, "");
@@ -108,6 +114,22 @@ export function parseFiles(raw: string, options: ParseOptions = {}): GeneratedFi
   }
 
   return files;
+}
+
+/**
+ * The file block a stream is currently inside, with how much of it has
+ * arrived — the live-progress readout. Null when the stream is between blocks
+ * or has produced nothing yet; the completed set speaks for itself then.
+ */
+export function currentFileFrom(raw: string): { path: string; bytes: number } | null {
+  const openers = [...raw.matchAll(/<file\s+path="([^"]+)"\s*>/g)];
+  const last = openers[openers.length - 1];
+  if (!last) return null;
+
+  const bodyStart = (last.index ?? 0) + last[0].length;
+  if (raw.indexOf(FILE_CLOSE, bodyStart) !== -1) return null;
+
+  return { path: (last[1] ?? "").trim(), bytes: Math.max(0, raw.length - bodyStart) };
 }
 
 function escapeRegExp(value: string): string {
