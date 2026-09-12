@@ -1,0 +1,19 @@
+# Dependencies and build output are produced inside the image.
+node_modules
+.next
+out
+
+# Test scratch space
+tests/.tmp
+
+# Never ship local env or logs
+.env
+.env.local
+*.log
+npm-debug.log*
+
+# Repo metadata
+.git
+.gitignore
+Dockerfile
+.dockerignore
