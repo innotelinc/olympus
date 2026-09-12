@@ -10,8 +10,9 @@
 #
 # and reference secrets as `vault://<mount>/<path>#<key>` — the same convention
 # Cerulean resolves at startup, so the stack and the platform agree on one
-# format. Point VAULT_TOKEN at a token scoped to that prefix in production;
-# never use the root token, which lives in ./data/vault/init/init.json (0600).
+# format. Point VAULT_TOKEN at a token scoped to this stack's own path under
+# that prefix (the `olympus` policy, never the platform's mount-wide one); never
+# use the root token, which lives in ./data/vault/init/init.json (0600).
 #
 # This file is the fallback for a checkout with no platform Vault:
 #

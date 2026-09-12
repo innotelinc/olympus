@@ -73,16 +73,46 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 ## Secrets (Cerulean Vault)
 
 Secrets for this platform live in **Cerulean Vault** — HashiCorp Vault with KV v2
-mounted at `VAULT_PREFIX` (default `cerulean`) and a periodic token scoped to
-that prefix. Olympus does **not** run its own store; it consumes the platform's,
-so there is one place credentials live rather than one per service.
+mounted at `VAULT_PREFIX` (default `cerulean`). Olympus does **not** run its own
+store; it consumes the platform's, so there is one place credentials live rather
+than one per service.
+
+The token is scoped to **this stack's own path**, not to the whole mount.
+Cerulean's default `cerulean` policy grants `<prefix>/data/*`, which every
+product sharing the mount can use to read and overwrite the others' secrets.
+Olympus holds a narrower `olympus` policy instead:
+
+| Policy | Grants | Reaches |
+| --- | --- | --- |
+| `cerulean` (platform default) | `<prefix>/data/*` | every product in the mount |
+| `olympus` (used here) | `cerulean/data/olympus*` + its metadata | Olympus only |
+
+Written with `vault policy write olympus -` (KV v2 addresses data and metadata
+under separate paths, and there is deliberately no `list` on the mount root —
+that would disclose every sibling key's name):
+
+```hcl
+path "cerulean/data/olympus"       { capabilities = ["create", "read", "update", "delete", "list"] }
+path "cerulean/data/olympus/*"     { capabilities = ["create", "read", "update", "delete", "list"] }
+path "cerulean/metadata/olympus"   { capabilities = ["read", "list"] }
+path "cerulean/metadata/olympus/*" { capabilities = ["read", "list"] }
+```
+
+It is a *periodic* token, so a renewal resets its TTL to the full period (32
+days) and it can live indefinitely — but only if something renews it inside that
+window. `scripts/vault-renew.sh` is that renewer; `--check` reports without
+renewing and exits non-zero once the token stops being renewable, so it is safe
+to wire into monitoring.
 
 ```bash
 # Consume the platform Vault (Cerulean already runs it as `cerulean-vault`).
 export VAULT_ADDR=http://vault:8200
-export VAULT_TOKEN_FILE=./data/vault/token/cerulean.token   # scoped, never root
+export VAULT_TOKEN_FILE=./data/vault/token/cerulean.token   # `olympus` policy, never root
 export VAULT_PREFIX=cerulean
 python3 scripts/vault-bootstrap.py
+
+# Keep the periodic token from lapsing (or `make vault-renew`).
+bash scripts/vault-renew.sh
 ```
 
 `scripts/vault-bootstrap.py` takes every address and credential from the
@@ -105,7 +135,11 @@ one — in-memory and auto-unsealed, which is fine for local iteration and **not
 for anything whose secrets must survive a restart.
 
 Never use the root token: it sits in `./data/vault/init/init.json` (0600) beside
-the unseal key, and a prefix-scoped token is enough for everything here.
+the unseal key, and the path-scoped `olympus` token above is enough for
+everything here. Re-minting it needs that root token, which stays on the Vault
+host:
+
+    vault token create -orphan -policy=olympus -period=768h
 
 ## Golden rules
 
