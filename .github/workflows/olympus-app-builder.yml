@@ -1,5 +1,9 @@
 name: 🏭 Olympus App Manufacturing Engine
 
+# Only a genuinely new spec should manufacture an app. Note that `paths` alone is
+# not enough: a force-push (e.g. a history rewrite) re-presents the whole tree, so
+# this workflow runs even when no spec was added. The resolve step below decides,
+# and every later step is gated on its output.
 on:
   push:
     paths:
@@ -11,42 +15,97 @@ permissions:
 jobs:
   build-new-app:
     runs-on: ubuntu-latest
+    outputs:
+      found: ${{ steps.spec.outputs.found }}
     steps:
       - name: 📁 Checkout Olympus Workspace
         uses: actions/checkout@v4
+        with:
+          # Need history to diff the pushed range, not just the tip.
+          fetch-depth: 0
+
+      - name: 🔎 Resolve the spec this push actually adds
+        id: spec
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          head_sha="${AFTER:-$GITHUB_SHA}"
+
+          # `before` is all-zeros on a new branch, and unreachable after a
+          # force-push. Neither means "a new spec was written", so skip rather
+          # than manufacture from a rewrite.
+          if [ -z "${BEFORE:-}" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No usable previous commit (new branch or rewritten history) — nothing to manufacture."
+            exit 0
+          fi
+
+          mapfile -t specs < <(
+            git diff --name-only --diff-filter=A "$BEFORE..$head_sha" -- 'build-requests/*.md' \
+              | grep -v 'README.md' || true
+          )
+
+          if [ "${#specs[@]}" -eq 0 ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No new build-requests/*.md in $BEFORE..$head_sha — nothing to manufacture."
+            exit 0
+          fi
+
+          printf 'specs=%s\n' "${specs[*]}" >> "$GITHUB_OUTPUT"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          printf '  %s\n' "${specs[@]}"
 
       - name: ⚙️ Setup Monolithic Runtimes (Node & Python)
+        if: steps.spec.outputs.found == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 20
       - name: 🍞 Setup Bun
+        if: steps.spec.outputs.found == 'true'
         uses: oven-sh/setup-bun@v2
       - name: 🐍 Setup Python
+        if: steps.spec.outputs.found == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: 🏗️ Run Monolithic Setup
+        if: steps.spec.outputs.found == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           echo "$TELEGRAM_BOT_TOKEN" | ./setup.sh
 
+      # Without this the factory aborts with "Integration pin required", which is
+      # what every previous run did. The revision is read from the factory's own
+      # manifest by the script, so there is no second copy to drift.
+      - name: 📌 Pin the Archon Integration
+        if: steps.spec.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          ./scripts/factory-pin.sh
+
       - name: 🌐 Initialize Background Cloud Gateway (OmniRoute)
+        if: steps.spec.outputs.found == 'true'
         run: |
           cd core-modules/omniroute
           npm run start &
           sleep 5
 
       - name: 🚀 Manufacture Standalone App from Specification
+        if: steps.spec.outputs.found == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPECS: ${{ steps.spec.outputs.specs }}
         run: |
-          # Identify the newly added spec file in the build-requests folder
-          SPEC_FILE=$(git diff-tree --no-commit-id --name-only -r HEAD | grep 'build-requests/' | head -n 1)
-          
-          # Force the software factory execution block to generate a new app tree
-          python3 core-modules/ai-software-factory/bin/factory.py run archon-greenfield \
-            --input spec="$SPEC_FILE" \
-            --output="./builds" \
-            --detach --json
+          set -euo pipefail
+          for spec in $SPECS; do
+            echo "Manufacturing from $spec"
+            python3 core-modules/ai-software-factory/bin/factory.py run archon-greenfield \
+              --input spec="$spec" \
+              --output="./builds" \
+              --detach --json
+          done

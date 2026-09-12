@@ -33,6 +33,17 @@ fi
 # Prefer the CI's argv contract if factory binary exists; otherwise fail clearly.
 FACTORY_BIN="$ROOT_DIR/core-modules/ai-software-factory/bin/factory.py"
 if [ -f "$FACTORY_BIN" ]; then
+  # The factory refuses to run until its Archon integration is pinned. Pin it
+  # from the factory's own manifest (scripts/factory-pin.sh) rather than letting
+  # the run fail with "Integration pin required". That script refuses on a dirty
+  # tree, because init installs managed files over this checkout — including
+  # factory/doctor.py, which the compose healthcheck depends on.
+  if [ -x "$ROOT_DIR/scripts/factory-pin.sh" ]; then
+    "$ROOT_DIR/scripts/factory-pin.sh" || {
+      echo "manufacture: could not pin the factory's Archon integration — see above" >&2
+      exit 1
+    }
+  fi
   python3 "$FACTORY_BIN" run archon-greenfield \
     --input spec="$SPEC" \
     --output="$ROOT_DIR/builds" \

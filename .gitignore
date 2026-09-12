@@ -26,22 +26,27 @@ web/studio/tests/.tmp/
 data/vault/token/
 data/vault/init/
 
-# Factory runtime state, never committed
-.factory/runs/
-.factory/ledger.jsonl
-.factory/locks-runtime/
-.factory/findings/
-.factory/needs-human.md
-.factory/escalations.log
-.factory/trigger.json
-.factory/deployed.json
-.factory/deploy-history.log
-.factory/STOP
-.factory/loop.pid
-.factory/assumptions/
-.factory/followups/
-harness/.results/
-.factory/holdout/.results/
+# Factory runtime state, never committed. All of it is machine-local: the pin
+# (`consumer.json`) records an absolute cache path, the rest is loop/ledger/state
+# and per-run evidence. Nothing under .factory/ is tracked, so ignore the tree
+# rather than listing each artifact and missing the next one.
+.factory/
+
+# AI Software Factory — installed runtime. `scripts/factory-pin.sh` runs the
+# factory's own installer, which copies its managed files into this checkout.
+# They are deployment artifacts, not source, so keep them out of commits.
+FACTORY.md
+FACTORY_RULES.md
+MISSION.md
+harness/
+# ...but factory/ is shared: APP_SPEC_TEMPLATE.md, doctor.py and trigger.py are
+# Olympus's own. Note the installer REPLACES doctor.py and trigger.py with its
+# parallel set — doctor.py backs the compose healthcheck — so factory-pin.sh
+# refuses to run on a dirty tree and reports what it changed.
+factory/*
+!factory/APP_SPEC_TEMPLATE.md
+!factory/doctor.py
+!factory/trigger.py
 
 # Generated apps — factory output (./builds per .archon/config.yaml)
 builds/
