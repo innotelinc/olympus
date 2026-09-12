@@ -333,6 +333,7 @@
         <a href="#features">Features</a>
         <a href="#stack">Stack</a>
         <a href="#platform">Factory</a>
+        <a href="#studio">Studio</a>
         <a href="#roadmap">Roadmap</a>
         <a href="https://github.com/innotelinc/olympus/blob/main/docs/stack.md">Stack doc</a>
         <a class="gh" href="https://github.com/innotelinc/olympus">
@@ -477,6 +478,48 @@ $ <span class="p">archon</span> <span class="o">workflow run factory-validate</s
       </div>
     </section>
 
+    <!-- Studio -->
+    <section id="studio">
+      <div class="wrap">
+        <h2>Describe it, and it builds<span class="accent">.</span></h2>
+        <p class="section-sub">
+          Studio is the browser front door to the same gateway — prompt in, a running app out, iterated in plain language.
+        </p>
+        <div class="split">
+          <div>
+            <div class="grid" style="gap:14px">
+              <div class="card">
+                <h3>Prompt → preview <span style="color:var(--p-text-muted);font-weight:400">· live</span></h3>
+                <p>The model answers with complete files as <code>&lt;file path="…"&gt;</code> blocks. Studio parses them as they stream and renders the result immediately — partial blocks are simply ignored until they close.</p>
+              </div>
+              <div class="card">
+                <h3>Sandboxed <span style="color:var(--p-text-muted);font-weight:400">· untrusted output</span></h3>
+                <p>App output runs in an iframe with <code>allow-scripts</code> and no same-origin, so it cannot reach Studio's DOM, cookies, or storage. It has no network access either.</p>
+              </div>
+              <div class="card">
+                <h3>Authentik OIDC <span style="color:var(--p-text-muted);font-weight:400">· identity</span></h3>
+                <p>Authorization Code + PKCE, <code>id_token</code> verified against the provider JWKS, signed session cookie — no server-side session store. Auth stays off until it is configured.</p>
+              </div>
+              <div class="card">
+                <h3>Key stays server-side <span style="color:var(--p-text-muted);font-weight:400">· by construction</span></h3>
+                <p>The gateway credential is read inside the route handler only. It is never sent to, or bundled for, the browser.</p>
+              </div>
+            </div>
+          </div>
+          <pre class="terminal"><span class="cmt"># run Studio</span>
+$ <span class="p">make</span> <span class="o">studio-install</span> &amp;&amp; <span class="p">make</span> <span class="o">studio-dev</span>
+<span class="ok">listening on http://localhost:3001</span>
+
+<span class="cmt"># or bring up the stack</span>
+$ <span class="p">docker</span> <span class="o">compose up -d</span> studio
+
+<span class="cmt"># prove it still works</span>
+$ <span class="p">make</span> <span class="o">studio-test</span>
+<span class="ok">100 passing</span></pre>
+        </div>
+      </div>
+    </section>
+
     <!-- Roadmap -->
     <section id="roadmap">
       <div class="wrap">
@@ -515,6 +558,7 @@ $ <span class="p">archon</span> <span class="o">workflow run factory-validate</s
         <a href="https://github.com/innotelinc/olympus">GitHub</a>
         <a href="https://innotelinc.github.io/olympus">Pages</a>
         <a href="https://github.com/innotelinc/olympus/blob/main/docs/stack.md">Stack doc</a>
+        <a href="https://github.com/innotelinc/olympus/blob/main/web/studio/README.md">Studio</a>
         <a href="https://github.com/innotelinc/innotel-platform-stack">Innotel Platform Stack</a>
       </span>
     </div>

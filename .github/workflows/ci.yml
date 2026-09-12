@@ -45,6 +45,111 @@ jobs:
           if [ -f scripts/omniroute-infisical.sh ]; then bash -n scripts/omniroute-infisical.sh; fi
           python3 -m compileall -q factory harness 2>/dev/null || echo "nothing to compile — ok"
 
+  secrets:
+    name: Credential scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No literal credentials in tracked files
+        run: python3 scripts/secret-scan.py
+
+  studio:
+    name: Studio (web/studio)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web/studio
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/studio/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  # Drives the real authorization-code + PKCE handshake against a live Authentik.
+  #
+  # Off by default. To switch it on, set the repository variable AUTHENTIK_E2E to
+  # "true" plus these secrets:
+  #   E2E_OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET,
+  #   E2E_AUTHENTIK_URL, E2E_USERNAME, E2E_PASSWORD
+  # A lab provider with a self-signed certificate also needs the repository
+  # variable E2E_INSECURE=1.
+  #
+  # Two prerequisites, both outside this repo:
+  #   * the identity provider must have http://localhost:3001/api/auth/callback
+  #     registered as a redirect URI for this client;
+  #   * the runner must be able to reach the provider, which for a LAN-only
+  #     Authentik means a self-hosted runner — set AUTHENTIK_E2E_RUNNER to its
+  #     label. A GitHub-hosted runner cannot route to a private address.
+  authentik-e2e:
+    name: Live Authentik handshake
+    if: ${{ vars.AUTHENTIK_E2E == 'true' }}
+    runs-on: ${{ vars.AUTHENTIK_E2E_RUNNER || 'ubuntu-latest' }}
+    defaults:
+      run:
+        working-directory: web/studio
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/studio/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Start Studio
+        env:
+          OIDC_ISSUER_URL: ${{ secrets.E2E_OIDC_ISSUER_URL }}
+          OIDC_CLIENT_ID: ${{ secrets.OIDC_CLIENT_ID }}
+          OIDC_CLIENT_SECRET: ${{ secrets.OIDC_CLIENT_SECRET }}
+          OIDC_REDIRECT_URI: http://localhost:3001/api/auth/callback
+        run: |
+          set -euo pipefail
+          nohup npm run start > /tmp/studio-e2e.log 2>&1 &
+          for _ in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:3001/ || true)
+            # 307 means auth is on and the root bounces to sign-in.
+            if [ "$code" = "307" ]; then echo "studio: ready"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::Studio never became ready"
+          tail -40 /tmp/studio-e2e.log
+          exit 1
+
+      - name: Handshake against the provider
+        env:
+          STUDIO_E2E_BASE_URL: http://localhost:3001
+          STUDIO_E2E_AUTHENTIK_URL: ${{ secrets.E2E_AUTHENTIK_URL }}
+          STUDIO_E2E_USERNAME: ${{ secrets.E2E_USERNAME }}
+          STUDIO_E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          STUDIO_E2E_INSECURE: ${{ vars.E2E_INSECURE || '0' }}
+        run: npm run test:integration
+
+      - name: Studio log
+        if: failure()
+        run: tail -60 /tmp/studio-e2e.log
+
   landing:
     name: Landing page sanity
     runs-on: ubuntu-latest

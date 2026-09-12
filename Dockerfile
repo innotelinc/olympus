@@ -60,7 +60,7 @@ EXPOSE 20128
 VOLUME ["/app/builds"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD curl -fsS http://localhost:20128/health >/dev/null 2>&1 || python3 factory/doctor.py 2>/dev/null | grep -qi "ready\|ok" || exit 1
+  CMD python3 factory/doctor.py 2>/dev/null | grep -q "Status: READY" || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bash", "scripts/docker-entrypoint.sh"]

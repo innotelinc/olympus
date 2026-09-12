@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check check-commits check-compose factory-doctor factory-trigger app new-request builds docker-build docker-up docker-down docker-logs docker-ps docker-shell docker-app docker-clean
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds studio-install studio-dev studio-build studio studio-test studio-check docker-build docker-up docker-down docker-logs docker-ps docker-shell docker-app docker-clean
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -85,11 +85,41 @@ docker-app: ## Manufacture inside the container (SPEC= or newest build-request)
 docker-clean: ## Remove container + builds volume (irreversible)
 	docker compose down -v
 
+## ---- Studio (vibe-coding web UI — web/studio) -----------------------------
+
+studio-install: ## Install Studio dependencies (web/studio)
+	cd web/studio && npm ci
+
+studio-dev: ## Run the Studio dev server (default http://localhost:3001)
+	cd web/studio && npm run dev
+
+studio-build: ## Production build of Studio
+	cd web/studio && npm run build
+
+studio: ## Run the built Studio server
+	cd web/studio && npm run start
+
+studio-test: ## Run the Studio test suite (vitest — parser, gateway route, OIDC flow)
+	cd web/studio && npm test
+
+studio-check: ## Typecheck + test Studio (run make studio-install first)
+	cd web/studio && npx tsc --noEmit && npm test
+
+studio-e2e: ## Drive the real Authentik handshake (needs STUDIO_E2E_* vars; see web/studio/README.md)
+	cd web/studio && npm run test:integration
+
 ## ---- Conformity -----------------------------------------------------------
 
-check: ## Run attribution guard + structure checks
+check: ## Run attribution guard + credential scan + structure checks
 	bash .githooks/commit-msg .git/COMMIT_EDITMSG 2>/dev/null || true
 	python3 -m compileall -q factory harness 2>/dev/null || true
+	python3 scripts/secret-scan.py
+
+secret-scan: ## Fail on literal credentials in tracked files
+	python3 scripts/secret-scan.py
+
+secret-scan-history: ## Scan every blob in git history (post-purge verification)
+	python3 scripts/secret-scan.py --history
 
 check-commits: ## Run the attribution guard over recent commit messages
 	bash .githooks/commit-msg .git/COMMIT_EDITMSG 2>/dev/null || true

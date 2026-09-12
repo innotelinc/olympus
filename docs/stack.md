@@ -45,6 +45,15 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 | `scripts/bootstrap.sh` + `scripts/omniroute-infisical.sh` | bash + OmniRoute CLI | One-command clone-to-ready and gateway launcher |
 | Telegram interface | Hermes 3 via OpenRouter Free through OmniRoute | Interactive bot that parses intent into Archon DAG runs |
 | Coding brain | Codex (`auto/coding`) via OmniRoute Responses API (`wire_api = "responses"`) | Repository code modifications dispatched by the factory consumer + harness E2E (`omniroute launch-codex -p auto-coding`) |
+| `web/studio/` | Next.js (App Router) + Authentik OIDC | Browser vibe-coding surface — prompt in, runnable app out, gateway key held server-side |
+
+> **Scope of this checkout.** This repository is the deployment surface. The
+> factory state machine, the harness, and the Archon workflow definitions
+> (`factory/**` beyond `doctor.py`/`trigger.py`, `harness/**`,
+> `.archon/workflows/factory/**`) live in the source repo, not here, and
+> `core-modules/` is cloned on demand by `setup.sh`. Run
+> `python3 factory/doctor.py` to see what this checkout has and what it is
+> missing.
 
 ## In the ecosystem
 
@@ -71,12 +80,21 @@ openssl rand -base64 32   # INFISICAL_ENCRYPTION_KEY
 openssl rand -hex 16      # INFISICAL_AUTH_SECRET
 openssl rand -hex 16      # INFISICAL_DB_PASSWORD
 
-# start the profile and provision the workspace + import .env secrets
-docker compose -f compose.infisical.yml --profile infisical up -d 2>/dev/null || true
-bash scripts/infisical-setup.sh 2>/dev/null || bash factory/infisical-setup.sh 2>/dev/null || echo "see INFISICAL.md"
+# start the SecretOps store (opt-in profile)
+make up    # wraps: docker compose -f compose.infisical.yml --profile infisical up -d
+
+# create the workspace, the machine identity, and a token — then write .env
+export INFISICAL_ADDR=http://localhost:8088 \
+       INFISICAL_ADMIN_EMAIL=you@example.com \
+       INFISICAL_ADMIN_PASSWORD=... \
+       INFISICAL_ORG_ID=...
+python3 scripts/infisical-bootstrap.py
 ```
 
-With `INFISICAL_ADDR` / `INFISICAL_TOKEN` / `INFISICAL_WORKSPACE_ID` in `.env` (written back by `infisical-setup.py`), env values may be `infisical://<name>` references resolved at startup.
+`scripts/infisical-bootstrap.py` takes every credential from the environment
+(nothing is hardcoded, because this repo is public) and writes `.env` at mode
+0600. With `INFISICAL_ADDR` / `INFISICAL_TOKEN` / `INFISICAL_PROJECT_ID` in
+`.env`, env values may be `infisical://<name>` references resolved at startup.
 
 ## Golden rules
 
