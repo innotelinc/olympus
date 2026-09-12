@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds studio-install studio-dev studio-build studio studio-test studio-check docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds studio-install studio-dev studio-build studio studio-test studio-check studio-e2e docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -95,6 +95,9 @@ docker-app: ## Manufacture inside the container (SPEC= or newest build-request)
 
 docker-clean: ## Remove container + builds volume (irreversible)
 	docker compose down -v
+
+docker-studio: ## Build the Studio image (ghcr.io/innotelinc/olympus-studio:local)
+	docker compose build studio
 
 ## ---- Studio (vibe-coding web UI — web/studio) -----------------------------
 
