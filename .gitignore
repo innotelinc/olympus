@@ -5,10 +5,21 @@
 .archon/cache/
 *.log
 
+# Vendored upstreams — cloned by setup.sh at runtime, never committed
+core-modules/*
+!core-modules/README.md
+
 # Toolchain + deps
 node_modules/
 .bun/
 .uv/
+
+# Next.js (web/studio) — build output + incremental TS cache
+.next/
+out/
+*.tsbuildinfo
+# Studio test fixtures (created and removed per run)
+web/studio/tests/.tmp/
 
 # Factory runtime state, never committed
 .factory/runs/
