@@ -26,6 +26,10 @@ import { buildPreviewDocument, parseFiles } from "@/lib/files";
  *
  * The Studio instance under test must have its redirect URI registered on the
  * provider. Note it performs a real sign-in, so the account's last-login moves.
+ *
+ * The saved-app round-trip also needs the instance to have a writable library
+ * (STUDIO_DATA_DIR / the `studio-data` volume); it deletes the app it creates,
+ * so the live library is left as it was found.
  */
 
 const BASE = (process.env.STUDIO_E2E_BASE_URL ?? "").replace(/\/+$/, "");
@@ -345,6 +349,73 @@ describe.skipIf(missing.length > 0)("live provider integration", () => {
     expect(document).toMatch(/<html[\s>]/i);
     expect(document).not.toContain("Nothing rendered yet");
   }, 180_000);
+
+  it.skipIf(EXPECT_DENIED)("saves and reopens an app under the real identity", async () => {
+    const cookie = `studio_session=${flow.sessionHeader.split("=").slice(1).join("=")}`;
+    const title = `e2e ${Date.now()}`;
+
+    // Anonymous callers have no library, and no parameter with which to name
+    // someone else's — the namespace comes from the session's own subject.
+    const anonymous = await request(`${BASE}/api/projects`, null);
+    expect(anonymous.status).toBe(401);
+
+    const created = await request(`${BASE}/api/projects`, null, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({
+        title,
+        prompt: "a page that shows the word hi",
+        files: [{ path: "index.html", contents: "<h1>hi</h1>" }],
+      }),
+    });
+
+    if (created.status !== 201) {
+      throw new Error(`POST /api/projects answered ${created.status}: ${await bounded(created)}`);
+    }
+
+    const saved = (await created.json()) as { project: { id: string; title: string } };
+    expect(saved.project.title).toBe(title);
+    expect(saved.project.id).toMatch(/^[A-Za-z0-9_-]{6,64}$/);
+
+    try {
+      const listed = await request(`${BASE}/api/projects`, null, { headers: { cookie } });
+      expect(listed.status).toBe(200);
+
+      const { projects } = (await listed.json()) as {
+        projects: Array<{ id: string; title: string; fileCount: number }>;
+      };
+
+      // The subject the provider actually released is what scopes this, so the
+      // app has to come back under the same session that saved it — not under a
+      // shared fallback, which is what an absent claim would silently give.
+      const found = projects.find((entry) => entry.id === saved.project.id);
+      expect(found, `saved app ${saved.project.id} is missing from the library`).toBeTruthy();
+      expect(found?.fileCount).toBe(1);
+
+      const reopened = await request(`${BASE}/api/projects/${saved.project.id}`, null, {
+        headers: { cookie },
+      });
+      expect(reopened.status).toBe(200);
+
+      const { project } = (await reopened.json()) as {
+        project: { files: Array<{ path: string; contents: string }>; prompt: string };
+      };
+      expect(project.files).toEqual([{ path: "index.html", contents: "<h1>hi</h1>" }]);
+      expect(project.prompt).toBe("a page that shows the word hi");
+    } finally {
+      // Leave the live library exactly as it was found, pass or fail.
+      const removed = await request(`${BASE}/api/projects/${saved.project.id}`, null, {
+        method: "DELETE",
+        headers: { cookie },
+      });
+      expect(removed.status).toBe(200);
+    }
+
+    const gone = await request(`${BASE}/api/projects/${saved.project.id}`, null, {
+      headers: { cookie },
+    });
+    expect(gone.status).toBe(404);
+  }, 60_000);
 });
 
 describe("live provider integration (configuration)", () => {
