@@ -11,7 +11,27 @@ export type GeneratedFile = {
   contents: string;
 };
 
-const FILE_BLOCK = /<file\s+path="([^"]+)"\s*>\n?([\s\S]*?)<\/file>/g;
+/**
+ * Openers only. The closing tag is matched separately rather than being baked
+ * into one regex, because the closing tag is the part a model is most likely to
+ * drop — and losing it must not lose the file.
+ */
+const FILE_OPEN = /<file\s+path="([^"]+)"\s*>/g;
+const FILE_CLOSE = "</file>";
+
+export type ParseOptions = {
+  /**
+   * Accept a block that never received its closing tag when only the end of the
+   * input follows it.
+   *
+   * This is off while a stream is running, where an unterminated block is
+   * indistinguishable from a file still being written, and on for the final
+   * parse once the stream has ended. It is needed in practice: the gateway
+   * drops the trailing `</file>` on an ordinary one-file prompt, so without it
+   * a completed build parses to nothing at all.
+   */
+  allowUnterminatedLast?: boolean;
+};
 
 export const EMPTY_DOCUMENT = `<!doctype html>
 <html lang="en">
@@ -47,23 +67,44 @@ export const EMPTY_DOCUMENT = `<!doctype html>
   </body>
 </html>`;
 
-export function parseFiles(raw: string): GeneratedFile[] {
+export function parseFiles(raw: string, options: ParseOptions = {}): GeneratedFile[] {
   const files: GeneratedFile[] = [];
   const seen = new Set<string>();
 
-  FILE_BLOCK.lastIndex = 0;
-  let match = FILE_BLOCK.exec(raw);
+  FILE_OPEN.lastIndex = 0;
+  const openers: Array<{ path: string; bodyStart: number; blockStart: number }> = [];
+  let match = FILE_OPEN.exec(raw);
 
   while (match !== null) {
-    const path = match[1].trim();
-    const contents = match[2].replace(/\s+$/, "");
+    openers.push({
+      path: match[1].trim(),
+      bodyStart: FILE_OPEN.lastIndex,
+      blockStart: match.index,
+    });
 
-    if (path && !seen.has(path)) {
-      seen.add(path);
-      files.push({ path, contents });
+    match = FILE_OPEN.exec(raw);
+  }
+
+  for (let index = 0; index < openers.length; index += 1) {
+    const opener = openers[index];
+    const next = openers[index + 1];
+    const isLast = next === undefined;
+
+    // A block ends at its closing tag, or at the next opener when the model
+    // omitted the tag and simply moved on, or at the end of the input.
+    const segment = raw.slice(opener.bodyStart, isLast ? raw.length : next.blockStart);
+    const closeAt = segment.indexOf(FILE_CLOSE);
+    const terminated = closeAt !== -1;
+
+    if (!terminated && isLast && !options.allowUnterminatedLast) continue;
+
+    const body = terminated ? segment.slice(0, closeAt) : segment;
+    const contents = body.replace(/^\r?\n/, "").replace(/\s+$/, "");
+
+    if (opener.path && !seen.has(opener.path)) {
+      seen.add(opener.path);
+      files.push({ path: opener.path, contents });
     }
-
-    match = FILE_BLOCK.exec(raw);
   }
 
   return files;

@@ -121,7 +121,10 @@ export default function Studio({ user = null }: { user?: string | null }) {
       }
       accumulated += decoder.decode();
 
-      const produced = parseFiles(accumulated);
+      // The stream has ended, so recover a final block whose closing tag the
+      // model never sent. Mid-stream this stays strict (see `streamedFiles`),
+      // which is what keeps half-written files out of the preview.
+      const produced = parseFiles(accumulated, { allowUnterminatedLast: true });
       if (produced.length === 0) {
         setRaw("");
         throw new Error("The model replied without any file blocks. Try rephrasing the request.");

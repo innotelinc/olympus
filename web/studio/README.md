@@ -94,6 +94,15 @@ but file blocks:
 The parser tolerates streamed fragments — an unterminated block simply does not
 match yet, so the preview only updates once a file is complete.
 
+It is also forgiving at the end of a stream, because the model does not always
+close the last block. The gateway drops the trailing `</file>` on an ordinary
+one-file prompt often enough that a completed build parsed to an empty file set
+and the UI reported that the model had produced no file blocks at all. So the
+final parse (`allowUnterminatedLast`) accepts a last block that was never closed,
+and a block followed by another opener counts as complete even with no closing
+tag — the writer has clearly moved on. Mid-stream parsing stays strict, which is
+what keeps half-written files out of the preview.
+
 ## Authentication — Authentik OIDC
 
 Identity belongs to Authentik (TrustOps). When it is configured, every request
@@ -229,11 +238,11 @@ sitting wedged. Docker never restarts an unhealthy container on its own.
 make studio-test      # or: cd web/studio && npm test
 ```
 
-110 tests across five files, no network required:
+115 tests across five files, no network required:
 
 | File | Covers |
 | --- | --- |
-| `tests/files.test.ts` | Parsing, streamed fragments, duplicate paths, asset inlining, orphaned assets, no-HTML fallback, traversal, listing escaping |
+| `tests/files.test.ts` | Parsing, streamed fragments, a missing closing tag, duplicate paths, asset inlining, orphaned assets, no-HTML fallback, traversal, listing escaping |
 | `tests/omniroute.test.ts` | Config defaults, placeholder keys, the prompt contract, SSE parsing (both API shapes, split frames, `[DONE]`, malformed frames) |
 | `tests/env.test.ts` | Repo `.env` discovery, nearest-file precedence, boundary stop, quoting, malformed lines, idempotence |
 | `tests/route.test.ts` | Every `/api/generate` path: 400/413/503/401/502, auth gating, streaming, bearer header, prior-file forwarding |
@@ -279,7 +288,7 @@ test ran. It passes both on a fully configured `.env` and with no `.env` at all.
 Checked on the current tree:
 
 - `npx tsc --noEmit` — clean. `next build` — clean, no tracer warnings.
-- `npm test` — 100 passing.
+- `npm test` — 115 passing.
 - `GET /` — `200`; `/api/generate` — `400` empty prompt, `400` malformed body,
   `413` oversized prompt, `503` no gateway key, `401` unauthenticated/unauthorized.
 - **Full OIDC flow against live Authentik**, driven both by the local server and
@@ -288,7 +297,15 @@ Checked on the current tree:
   replayed code `401` (`invalid_grant`), tampered `state` `401`, missing flow
   cookie `401`, unauthenticated `/api/generate` `401`.
 - **Authenticated generate through the container** — `200`, streaming a real
-  `<file path="index.html">` block back from the gateway.
+  `<file path="index.html">` block back from the gateway. The integration test
+  now feeds that response back through `parseFiles`/`buildPreviewDocument` and
+  asserts an `index.html` and a real document come out, rather than just that
+  the text contains an opener.
+- **Gateway round-trip without an identity provider** — the same pipeline driven
+  against the live gateway locally: a real prompt streamed back a complete
+  `index.html` (682 B) that parsed and rendered. Run three times, the model
+  closed the block once and omitted `</file>` twice, which is why the
+  end-of-stream parse exists.
 - **Group policy, verified against the live provider in both directions.** With
   `OIDC_ALLOWED_GROUPS=Cerulean` (a group the test account is in) the sign-in
   completes and the app renders. With the allow-list switched to a group it is
@@ -307,5 +324,8 @@ Checked on the current tree:
   redirect with PKCE, code exchange carrying the verifier and client auth, and a
   session cookie that then unlocks `/api/generate`.
 
-Not verified: a handshake against a live Authentik instance (none has an OIDC
-application registered for Studio yet).
+The one thing `npm test` cannot cover is a live sign-in: it needs credentials and
+a provider with the redirect URI registered. That path is `npm run test:integration`
+above — 8 assertions — and it is how the live Authentik results in this list were
+produced. With no `STUDIO_E2E_*` variables set, every test in that file skips, so
+the default suite stays offline and never signs in anywhere.

@@ -29,6 +29,45 @@ describe("parseFiles", () => {
     expect(parseFiles(`${partial}\n</file>`)).toHaveLength(2);
   });
 
+  it("recovers a final block whose closing tag never arrived", () => {
+    // Not hypothetical: the gateway drops the trailing </file> on an ordinary
+    // one-file prompt. Without the end-of-stream parse a completed build
+    // parsed to nothing and the UI reported no file blocks at all.
+    const unclosed = '<file path="index.html">\n<!doctype html><html><body>hi</body></html>';
+
+    expect(parseFiles(unclosed)).toHaveLength(0);
+    expect(parseFiles(unclosed, { allowUnterminatedLast: true })).toEqual([
+      { path: "index.html", contents: "<!doctype html><html><body>hi</body></html>" },
+    ]);
+  });
+
+  it("recovers only the final block when earlier ones are closed", () => {
+    const files = parseFiles(
+      `${ONE_FILE}\n<file path="app.js">\nconsole.log("hi");`,
+      { allowUnterminatedLast: true },
+    );
+
+    expect(files.map((file) => file.path)).toEqual(["index.html", "app.js"]);
+    expect(files[1].contents).toBe('console.log("hi");');
+  });
+
+  it("treats a block the model moved on from as complete", () => {
+    // No closing tag anywhere, but a second opener proves the first is done.
+    const files = parseFiles('<file path="index.html">\nA\n<file path="app.js">\nB\n</file>');
+
+    expect(files.map((file) => file.path)).toEqual(["index.html", "app.js"]);
+    expect(files[0].contents).toBe("A");
+  });
+
+  it("still ignores an unterminated block during a stream", () => {
+    const streaming = `${ONE_FILE}\n<file path="app.js">\nconsole.log("half writ`;
+
+    expect(parseFiles(streaming)).toHaveLength(1);
+    expect(parseFiles(streaming, { allowUnterminatedLast: true }).at(-1)?.contents).toBe(
+      'console.log("half writ',
+    );
+  });
+
   it("extracts multiple files in order", () => {
     const files = parseFiles(`${ONE_FILE}\n<file path="app.js">\nconsole.log("hi");\n</file>`);
     expect(files.map((file) => file.path)).toEqual(["index.html", "app.js"]);
@@ -118,6 +157,17 @@ document.getElementById("app").textContent = "ready";
     const document = buildPreviewDocument(parseFiles('<file path="data.json">\n{"a":1}\n</file>'));
     expect(document).toContain("No HTML entry point");
     expect(document).toContain("data.json");
+  });
+
+  it("renders a recovered block instead of the empty placeholder", () => {
+    const document = buildPreviewDocument(
+      parseFiles('<file path="index.html">\n<html><body>RECOVERED</body></html>', {
+        allowUnterminatedLast: true,
+      }),
+    );
+
+    expect(document).toContain("RECOVERED");
+    expect(document).not.toContain("Nothing rendered yet");
   });
 
   it("returns the placeholder for an empty file set", () => {
