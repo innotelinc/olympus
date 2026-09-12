@@ -153,6 +153,22 @@ make studio-token-check                          # remaining days; exit 2 once l
 make studio-token-rotate AUTHENTIK_HOST=<host>   # rebuild and re-date it
 ```
 
+On the deployment host the check runs daily without anyone remembering it:
+
+```bash
+scripts/install-token-check-timer.sh             # systemd timer, 06:17 UTC + after boot
+systemctl start olympus-studio-token-check.service   # run it now
+```
+
+It alerts through Telegram when the credential is inside its warning window
+(`--warn-days`, 14 by default) or unusable, and repeats daily while it lapses —
+a credential gating registration should nag, not hope one message lands. Set
+`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` in `.env` (placeholder values are
+ignored) and prove the channel with `scripts/studio-token-alert.sh
+--test-telegram`; until then the journal and `systemctl --failed` are the
+signal. The service runs hardened and read-only, and delivery failure never
+changes the verdict — the exit code is always the check's.
+
 It **expires** (180 days by default, `ARGS="--ttl-days 90"` to change that), so a
 leaked copy stops working on its own, and `make studio-oidc-check` reports the
 credential alongside the discovery probe. `make vault-bootstrap` writes the same
@@ -165,6 +181,16 @@ exec -i cerulean-authentik ak shell`) on the host you name, and pipes its output
 into a second step that writes Vault and then exercises the result: it will not
 report success unless the new credential can read OAuth2 providers, *cannot* read
 users, and still belongs to the service account.
+
+It needs to reach that host as root without a password, so give the operator
+account a key there once (this repo stores no key of its own; `AUTHENTIK_SSH_KEY`
+points at one if it is not the default identity):
+
+```bash
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519   # if you have not already
+ssh-copy-id root@<host>                            # or append to authorized_keys there
+ssh -o BatchMode=yes root@<host> true              # proves it needs no prompt
+```
 
 Two behaviours of Authentik 2026.8 are why that credential is minted in the
 shell instead of over the REST API, and both were read out of the running
