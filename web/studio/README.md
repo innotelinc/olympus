@@ -74,6 +74,7 @@ failing obscurely.
 | `STUDIO_ACCESS_TOKEN` | — | When set, every route requires an `x-studio-token` header. Empty = open. |
 | `STUDIO_PUBLIC_HOST` | — | Public host the edge serves Studio on. Read by `make studio-oidc`, which registers `https://<host>/api/auth/callback` as a redirect URI; Studio itself derives the callback from the request. |
 | `STUDIO_DATA_DIR` | `<repo>/data/studio` | Where saved apps live. The compose service points it at a named volume. |
+| `STUDIO_RATE_LIMIT_PER_MIN` | `20` | Generations per minute per signed-in identity on `/api/generate` (hard cap 600). Exceeding it answers `429` with `retry-after`; rejected requests consume no budget. |
 
 Placeholders from `.env.example` (`change-me…`) count as unset, so an unedited
 template fails loudly instead of sending a bogus key.
@@ -294,6 +295,12 @@ In the container the library is the `studio-data` named volume, mounted at
 - **Bounded input.** Prompt length, prior-file count, and per-file size are
   capped in the route handler; upstream error text is truncated before it is
   echoed back.
+- **Bounded spend.** Every generation bills the shared model pool, so each
+  identity gets a fixed one-minute window of attempts (`lib/ratelimit.ts`): OIDC
+  callers are keyed by their session subject, token callers by a hash of the
+  token — never an IP, so the limit follows the account. The counters are
+  in-memory on purpose; one Studio process, and a restart re-opens the window a
+  few minutes early.
 - **Identity.** Authentik OIDC when configured (see above); otherwise the
   optional `STUDIO_ACCESS_TOKEN` shared gate protects the generate route.
 

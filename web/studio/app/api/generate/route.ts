@@ -7,6 +7,8 @@ import {
   type PriorFile,
 } from "@/lib/omniroute";
 import { authorizeRequest } from "@/lib/auth";
+import { createHash } from "node:crypto";
+import { checkRateLimit } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -68,6 +70,31 @@ export async function POST(request: Request): Promise<Response> {
     return fail(
       "No gateway key is configured. Set OMNIROUTE_API_KEY in the repo .env and restart Studio.",
       503,
+    );
+  }
+
+  // Every generation bills the shared model pool, so each identity gets a
+  // bounded number of attempts per minute. OIDC callers are keyed by their
+  // verified session subject; token callers by a hash of the token, so two
+  // operators with different tokens get separate budgets without the secret
+  // ever becoming a map key. Input and auth are already checked; this is the
+  // last gate before the only request that costs money.
+  const identity = gate.session?.sub
+    ? `oidc:${gate.session.sub}`
+    : `token:${createHash("sha256").update(process.env.STUDIO_ACCESS_TOKEN ?? "").digest("hex").slice(0, 16)}`;
+  const rate = checkRateLimit(identity);
+  if (!rate.ok) {
+    return Response.json(
+      {
+        error: `Too many generations from this account — try again in ${rate.retryAfterSeconds}s.`,
+      },
+      {
+        status: 429,
+        headers: {
+          "retry-after": String(rate.retryAfterSeconds),
+          "cache-control": "no-store",
+        },
+      },
     );
   }
 
