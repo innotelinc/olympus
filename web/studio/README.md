@@ -131,7 +131,8 @@ Set these (all present in `.env.example`) to switch it on:
 
 Register the redirect URI in Authentik as `<host>/api/auth/callback` with the
 **Authorization Code + PKCE** flow enabled — `make studio-oidc` does both (it
-reads `.env` and registers the local callback plus `STUDIO_PUBLIC_HOST`).
+reads `.env` and registers the local callback plus `STUDIO_PUBLIC_HOST` and
+`BASE_DOMAIN`, so sign-in works from either public name).
 `make studio-oidc-check` then confirms the configured issuer answers discovery.
 
 What the implementation does:
@@ -334,9 +335,9 @@ end from inside the container:
 ## Deploying behind Cerulean + NPM Edge
 
 Cerulean owns DNS and TLS and NPM Edge fronts the host; set
-`STUDIO_PUBLIC_HOST` to the host the edge serves Studio on and run
-`make studio-oidc` once so that host's callback is registered, then let the edge
-terminate TLS. Studio emits a standalone build, so it needs no Node toolchain on
+`STUDIO_PUBLIC_HOST` to the host the edge serves Studio on (and `BASE_DOMAIN` to
+the root host, if the front door is served too) and run `make studio-oidc` once
+so both callbacks are registered, then let the edge terminate TLS. Studio emits a standalone build, so it needs no Node toolchain on
 the host.
 
 The `studio` compose service is wired up. Because Studio derives the callback
