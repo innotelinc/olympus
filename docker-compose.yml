@@ -92,9 +92,16 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
+      # Liveness only: assert Studio answers its own root and never follow the
+      # redirect. Following it walks straight into the OIDC login chain, so the
+      # check would then depend on Authentik being up AND on the loopback
+      # callback URI being registered in the provider — neither of which should
+      # decide whether this container is healthy. It did report unhealthy for
+      # exactly that reason once Studio began deriving the callback per host.
+      # 2xx = running with auth disabled; 3xx = running, redirecting to login.
       test:
         - CMD-SHELL
-        - node -e "fetch('http://127.0.0.1:3001/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        - node -e "fetch('http://127.0.0.1:3001/',{redirect:'manual'}).then(r=>process.exit(r.status>=200&&r.status<400?0:1)).catch(()=>process.exit(1))"
       interval: 30s
       timeout: 5s
       retries: 3
