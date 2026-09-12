@@ -121,7 +121,7 @@ Set these (all present in `.env.example`) to switch it on:
 | `OIDC_CLIENT_ID` | The Authentik application's client ID (`studio`) |
 | `OIDC_CLIENT_SECRET` | Leave as the `change-me` placeholder and auth stays disabled |
 | `AUTHENTIK_URL` | Registration only — Authentik's base URL. Not read by Studio at runtime |
-| `AUTHENTIK_TOKEN` | Registration only — least-privilege service-account token for `make studio-oidc`. May be a `vault://` reference, which the script resolves through Cerulean Vault |
+| `AUTHENTIK_TOKEN` | Registration only — least-privilege, expiring service-account token for `make studio-oidc`. May be a `vault://` reference, which the script resolves through Cerulean Vault. Rebuilt by `make studio-token-rotate` |
 | `OIDC_REDIRECT_URI` | Optional — derived from the request (honors `x-forwarded-proto`/`-host`) when unset |
 | `OIDC_SCOPES` | Default `openid email profile` |
 | `OIDC_ALLOWED_GROUPS` | Comma-separated group allow-list. Empty = any authenticated user |
@@ -175,6 +175,19 @@ make studio-oidc ARGS=--dry-run   # show what would change
 make studio-oidc                 # create or repair
 ```
 
+The credential that step authenticates with is managed separately, and it
+expires — `make studio-token-check` reports the remaining days and exits
+non-zero once it is lapsing, and `make studio-token-rotate
+AUTHENTIK_HOST=<host running cerulean-authentik>` rebuilds the service account,
+its role, its permissions and the token, then proves all four by exercising the
+result. It is minted in that container's shell rather than over the REST API
+because Authentik 2026.8 forces api-intent tokens to the tenant's
+`default_token_duration` (`minutes=30` here) whatever you request, and because a
+`PATCH` that does not mention `user` re-parents a token to the caller — a footgun
+that turned this credential into an administrator token once, while it was being
+built. `make studio-oidc-check` covers both the discovery probe and the
+credential's expiry.
+
 It takes the Authentik base URL and API token from `AUTHENTIK_URL` /
 `AUTHENTIK_TOKEN` in `.env` (real environment wins over the file, so CI can drive
 it), derives the application slug and client ID from `OIDC_ISSUER_URL` /
@@ -199,7 +212,9 @@ The credential itself is a service account, not an administrator: role
 this script calls. Verified against the live instance: it can PATCH the Studio
 provider and create one, while `/core/users/`, `/rbac/roles/`, `/core/groups/`,
 `/outposts/instances/` and application deletion all answer `403`, and its token
-list contains only itself.
+list contains only itself. `make studio-token-rotate` re-checks the last two of
+those on every run, so a credential that drifted wider than the role fails the
+rotation instead of being stored.
 
 - **`grant_types` is not defaulted.** An omitted `grant_types` lands as `[]`,
   and `/authorize` then fails with `Invalid grant_type for provider`. The script

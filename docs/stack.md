@@ -142,12 +142,47 @@ this stack's own path, and `.env` carries the reference rather than the value:
 
     AUTHENTIK_TOKEN=vault://cerulean/olympus/authentik#AUTHENTIK_TOKEN
 
-`make vault-bootstrap` writes it there when `AUTHENTIK_URL` and
-`AUTHENTIK_TOKEN` are set, and `scripts/authentik-studio-app.py` resolves the
-reference before it calls Authentik. The credential is a service account
-(`olympus-studio`), not an administrator: the `olympus-studio-registration` role
-grants exactly the reads and the provider/application writes that registration
-needs — no users, groups, roles, outposts, and no deletes.
+`scripts/authentik-studio-app.py` resolves the reference before it calls
+Authentik. The credential is a service account (`olympus-studio`), not an
+administrator: the `olympus-studio-registration` role grants exactly the reads
+and the provider/application writes that registration needs — no users, groups,
+roles, outposts, and no deletes.
+
+```bash
+make studio-token-check                          # remaining days; exit 2 once lapsing
+make studio-token-rotate AUTHENTIK_HOST=<host>   # rebuild and re-date it
+```
+
+It **expires** (180 days by default, `ARGS="--ttl-days 90"` to change that), so a
+leaked copy stops working on its own, and `make studio-oidc-check` reports the
+credential alongside the discovery probe. `make vault-bootstrap` writes the same
+path from `AUTHENTIK_*` in the environment, which is how a fresh checkout seeds a
+value before any credential exists; a `vault://` value there is left alone rather
+than copied, so rotation owns the secret once there is one to rotate.
+
+Rotation runs a program in the `cerulean-authentik` container's shell (`docker
+exec -i cerulean-authentik ak shell`) on the host you name, and pipes its output
+into a second step that writes Vault and then exercises the result: it will not
+report success unless the new credential can read OAuth2 providers, *cannot* read
+users, and still belongs to the service account.
+
+Two behaviours of Authentik 2026.8 are why that credential is minted in the
+shell instead of over the REST API, and both were read out of the running
+instance rather than assumed:
+
+- `TokenSerializer.validate()` ends with `attrs["expires"] =
+  default_token_duration()` for api-intent tokens, so a REST-created token gets
+  the tenant's `default_token_duration` whatever you request — `minutes=30` on
+  Cerulean. A credential that dies every half hour is not usable, so asking for
+  a longer one is not a shortcut that merely fails; it silently becomes a
+  useless token that still looks fine when you print it.
+- `validate()` also runs `attrs.setdefault("user", request.user)`, while DRF only
+  calls `validate_user` for fields *present in the payload*. A `PATCH` that never
+  mentions `user` therefore re-parents the token to whoever authenticated the
+  request: setting an expiry on this stack's credential through the API turned a
+  service-account token into an administrator one. Nothing here PATCHes a token,
+  and `--store-stdin` refuses a credential whose owner is not the service
+  account.
 
 For a checkout with no platform Vault, `compose.vault.yml` provides a dev-mode
 one — in-memory and auto-unsealed, which is fine for local iteration and **not**
@@ -159,6 +194,16 @@ everything here. Re-minting it needs that root token, which stays on the Vault
 host:
 
     vault token create -orphan -policy=olympus -period=768h
+
+The `olympus` policy grants `read`/`list` on this path's metadata and nothing
+more, so the scoped token can soft-delete a secret but cannot destroy the version
+behind it — a deleted value stays readable to anyone holding the mount-wide
+`cerulean` policy. Emptying a path is therefore root work on the Vault host:
+
+```bash
+vault kv destroy -versions=<n> cerulean/olympus/<path>   # burn the value(s)
+vault kv metadata delete cerulean/olympus/<path>         # then the path itself
+```
 
 ## Golden rules
 
