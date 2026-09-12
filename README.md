@@ -20,7 +20,7 @@ Olympus is a deterministic issue → PR factory for the repo it lives in: Archon
 
 | Area | Change |
 | --- | --- |
-| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files → live preview, Authentik OIDC sign-in, sandboxed output. Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
+| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files → live preview, Authentik OIDC sign-in, sandboxed output, saved apps scoped to the signed-in identity. Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
 | **SecretOps** | Infisical is **replaced by Cerulean Vault** (KV v2). The `infisical://` reference convention becomes `vault://`, and the bootstrap helper is now `scripts/omniroute-vault.sh` (was `scripts/omniroute-infisical.sh`). |
 | **Compose** | `compose.vault.yml` runs Vault locally; `compose.host-gateway.yml` is a host-network override for when the gateway is published on loopback only. |
 | **Factory** | `factory/doctor.py` and `factory/trigger.py` are published and report the factory's **real** state (no simulated poll loop); CI pins the Archon integration and only manufactures a real new spec. |
@@ -81,15 +81,17 @@ make docker-logs                   # tail factory + gateway logs
 ### 3. Studio (the web UI)
 
 ```bash
-make studio-install                # install web/studio dependencies (Bun)
+make studio-install                # install web/studio dependencies (npm ci)
 make studio-dev                    # dev server → http://localhost:3001
-make studio-test                   # vitest: file parser, gateway route, OIDC flow
+make studio-test                   # vitest: parser, gateway route, OIDC flow, saved apps
 
 # or inside the stack
 docker compose up -d studio
 ```
 
-Studio needs a gateway and (optionally) OIDC. `make setup` scaffolds `.env`; the keys that matter are `OMNIROUTE_BASE_URL` + `OMNIROUTE_API_KEY` for generation, and `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URI` / `STUDIO_SESSION_SECRET` for sign-in. **Auth stays off until it is configured** — run `python3 scripts/authentik-studio-app.py` to create the Cerulean Authentik application and provider for it. See [web/studio/README.md](web/studio/README.md) for the full contract.
+Studio needs a gateway and (optionally) OIDC. `make setup` scaffolds `.env`; the keys that matter are `OMNIROUTE_BASE_URL` + `OMNIROUTE_API_KEY` for generation, and `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URI` / `STUDIO_SESSION_SECRET` for sign-in. **Auth stays off until it is configured** — run `make studio-oidc` (or `python3 scripts/authentik-studio-app.py`) to create or repair the Cerulean Authentik application and provider for it. See [web/studio/README.md](web/studio/README.md) for the full contract.
+
+Generated apps are saved per signed-in identity: the OIDC subject decides whose library a build lands in, so a reload or a rebuild no longer loses it. In the stack the library is the `studio-data` volume (`STUDIO_DATA_DIR` points at it).
 
 Then manufacture an app from a spec:
 
