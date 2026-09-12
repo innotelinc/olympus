@@ -371,6 +371,113 @@ kbd {
   font-size: 12.5px;
 }
 
+/* ---- saved apps -------------------------------------------------------- */
+
+.library {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.library-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.library-save {
+  display: flex;
+  gap: 8px;
+}
+
+.library-save input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.library-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.library-item {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+}
+
+.library-item.current {
+  background: var(--accent-soft);
+  border-color: var(--line-strong);
+}
+
+.library-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 9px;
+}
+
+.library-open:hover:not(:disabled) {
+  background: var(--panel-2);
+}
+
+.library-open strong {
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--text);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-open em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.library-delete {
+  flex: 0 0 auto;
+  width: 30px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.library-delete:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
 /* ---- preview ----------------------------------------------------------- */
 
 .preview-shell {

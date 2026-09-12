@@ -26,6 +26,10 @@ web/studio/tests/.tmp/
 data/vault/token/
 data/vault/init/
 
+# Studio's saved-app library (STUDIO_DATA_DIR default). Operator content, not
+# source — the container keeps it on a named volume instead.
+data/studio/
+
 # Factory runtime state, never committed. All of it is machine-local: the pin
 # (`consumer.json`) records an absolute cache path, the rest is loop/ledger/state
 # and per-run evidence. Nothing under .factory/ is tracked, so ignore the tree

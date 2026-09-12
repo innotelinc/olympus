@@ -39,6 +39,12 @@ RUN groupadd --system --gid 1001 nodejs \
 COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# The saved-app library (STUDIO_DATA_DIR). Created here, owned by the runtime
+# user, because a fresh named volume inherits the ownership of the image path it
+# mounts over — without this the volume is root-owned and every save answers
+# 500. `docker run` without a volume still works; the data is just ephemeral.
+RUN mkdir -p /app/data/studio && chown -R nextjs:nodejs /app/data
+
 USER nextjs
 EXPOSE 3001
 

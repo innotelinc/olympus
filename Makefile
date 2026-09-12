@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds studio-install studio-dev studio-build studio studio-test studio-check studio-e2e docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -122,6 +122,22 @@ studio-check: ## Typecheck + test Studio (run make studio-install first)
 studio-e2e: ## Drive the real Authentik handshake (needs STUDIO_E2E_* vars; see web/studio/README.md)
 	cd web/studio && npm run test:integration
 
+# Registers Studio's OIDC application on Cerulean's Authentik and registers the
+# local + public callbacks as redirect URIs. Idempotent: a re-run repairs an
+# existing provider (grant_types, missing redirect URIs) instead of skipping it.
+# Needs AUTHENTIK_URL/AUTHENTIK_TOKEN in .env — a token from Directory -> Tokens.
+studio-oidc: ## Register/repair Studio's OIDC app in Cerulean Authentik (ARGS="--dry-run" to preview)
+	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi
+	python3 scripts/authentik-studio-app.py $(ARGS)
+
+studio-oidc-check: ## Confirm the OIDC issuer in .env answers discovery
+	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi; \
+	issuer=$$(sed -n 's/^OIDC_ISSUER_URL=//p' .env | tail -1 | tr -d '"' | tr -d "'" | tr -d '[:space:]'); \
+	if [[ -z "$$issuer" ]]; then echo "OIDC_ISSUER_URL is not set in .env" >&2; exit 2; fi; \
+	url="$${issuer%/}/.well-known/openid-configuration"; \
+	code=$$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$$url" || true); \
+	if [[ "$$code" == "200" ]]; then echo "discovery: ok — $$url"; else echo "discovery: HTTP $$code from $$url" >&2; exit 1; fi
+
 vault-bootstrap: ## Store this stack's secret in Cerulean Vault (needs VAULT_ADDR + VAULT_TOKEN)
 	python3 scripts/vault-bootstrap.py
 
@@ -145,12 +161,22 @@ check-commits: ## Run the attribution guard over recent commit messages
 	bash .githooks/commit-msg .git/COMMIT_EDITMSG 2>/dev/null || true
 	git log --oneline -5 2>/dev/null | head -5
 
-check-compose: ## Validate compose files (rendered against .env.example, never touching .env)
-	@tmp_env=$$(mktemp); \
+check-compose: ## Validate every compose file (rendered against .env.example, never touching .env)
+	@if ! command -v docker >/dev/null 2>&1; then echo "compose config: skipped (no docker)"; exit 0; fi; \
+	tmp_env=$$(mktemp); \
 	cp .env.example "$$tmp_env" 2>/dev/null || true; \
-	if docker compose --env-file "$$tmp_env" -f compose.vault.yml config --quiet 2>/dev/null; then \
-		echo "compose config: ok (compose.vault.yml)"; \
+	status=0; \
+	for f in docker-compose.yml compose.vault.yml; do \
+		if docker compose --env-file "$$tmp_env" -f "$$f" config --quiet 2>/dev/null; then \
+			echo "compose config: ok ($$f)"; \
+		else \
+			echo "compose config: FAILED ($$f)" >&2; status=1; \
+		fi; \
+	done; \
+	if docker compose --env-file "$$tmp_env" -f docker-compose.yml -f compose.host-gateway.yml config --quiet 2>/dev/null; then \
+		echo "compose config: ok (docker-compose.yml + compose.host-gateway.yml)"; \
 	else \
-		echo "compose config: not applicable"; \
+		echo "compose config: FAILED (host-gateway overlay)" >&2; status=1; \
 	fi; \
-	rm -f "$$tmp_env"
+	rm -f "$$tmp_env"; \
+	exit $$status

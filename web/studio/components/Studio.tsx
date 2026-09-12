@@ -17,6 +17,24 @@ const EXAMPLES = [
 
 const STORAGE_KEY = "studio.token";
 
+type SavedApp = {
+  id: string;
+  title: string;
+  updatedAt: string;
+  fileCount: number;
+};
+
+/** Fixed-width UTC, so server-rendered markup matches the client hydration pass. */
+function timestampLabel(value: string): string {
+  return value.slice(0, 16).replace("T", " ");
+}
+
+/** A default app title from the instruction that produced it. */
+function titleFromPrompt(prompt: string): string {
+  const line = prompt.trim().split(/\n/)[0] ?? "";
+  return line.trim().slice(0, 60);
+}
+
 async function readFailure(response: Response): Promise<string> {
   try {
     const payload = (await response.json()) as { error?: unknown };
@@ -38,6 +56,15 @@ export default function Studio({ user = null }: { user?: string | null }) {
   const [token, setToken] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [previewDoc, setPreviewDoc] = useState(EMPTY_DOCUMENT);
+
+  // Saved-app library. Kept server-side under the signed-in identity, so the
+  // same account gets the same apps on any browser.
+  const [savedApps, setSavedApps] = useState<SavedApp[]>([]);
+  const [activeAppId, setActiveAppId] = useState<string | null>(null);
+  const [appTitle, setAppTitle] = useState("");
+  const [libraryBusy, setLibraryBusy] = useState(false);
+  const [libraryNote, setLibraryNote] = useState<string | null>(null);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -73,6 +100,136 @@ export default function Studio({ user = null }: { user?: string | null }) {
     } catch {
       /* ignore */
     }
+  }, []);
+
+  /** fetch carrying the access-token header the server expects, when one is set. */
+  const request = useCallback(
+    async (path: string, init: RequestInit = {}): Promise<Response> => {
+      const headers: Record<string, string> = {
+        ...((init.headers as Record<string, string> | undefined) ?? {}),
+      };
+      if (token) headers["x-studio-token"] = token;
+
+      const response = await fetch(path, { ...init, headers });
+      if (!response.ok) throw new Error(await readFailure(response));
+      return response;
+    },
+    [token],
+  );
+
+  const listSavedApps = useCallback(async () => {
+    try {
+      const payload = (await (await request("/api/projects")).json()) as { projects?: SavedApp[] };
+      setSavedApps(Array.isArray(payload.projects) ? payload.projects : []);
+      setLibraryError(null);
+    } catch (thrown) {
+      setLibraryError(thrown instanceof Error ? thrown.message : "Could not load saved apps.");
+    }
+  }, [request]);
+
+  useEffect(() => {
+    void listSavedApps();
+  }, [listSavedApps]);
+
+  const persistApp = useCallback(
+    async (input: { id?: string | null; title?: string; prompt?: string; files: GeneratedFile[] }) => {
+      const response = await request("/api/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: input.id ?? undefined,
+          title: input.title ?? "",
+          prompt: input.prompt ?? "",
+          files: input.files.map((file) => ({ path: file.path, contents: file.contents })),
+        }),
+      });
+      const payload = (await response.json()) as { project: SavedApp };
+      return payload.project;
+    },
+    [request],
+  );
+
+  const saveApp = useCallback(async () => {
+    if (activeFiles.length === 0 || status === "streaming") return;
+
+    setLibraryBusy(true);
+    setLibraryError(null);
+    try {
+      const app = await persistApp({
+        id: activeAppId,
+        title: appTitle || titleFromPrompt(prompt),
+        prompt,
+        files: activeFiles,
+      });
+      setActiveAppId(app.id);
+      setAppTitle(app.title);
+      setLibraryNote(`Saved “${app.title}”.`);
+      await listSavedApps();
+    } catch (thrown) {
+      setLibraryError(thrown instanceof Error ? thrown.message : "Could not save this app.");
+    } finally {
+      setLibraryBusy(false);
+    }
+  }, [activeAppId, activeFiles, appTitle, listSavedApps, persistApp, prompt, status]);
+
+  const openApp = useCallback(
+    async (id: string) => {
+      setLibraryBusy(true);
+      setLibraryError(null);
+      try {
+        const payload = (await (await request(`/api/projects/${id}`)).json()) as {
+          project: { id: string; title: string; prompt: string; files: GeneratedFile[] };
+        };
+        setFiles(payload.project.files);
+        setPrompt(payload.project.prompt);
+        setAppTitle(payload.project.title);
+        setActiveAppId(payload.project.id);
+        setRaw("");
+        setTurns(1);
+        setStatus("idle");
+        setError(null);
+        setLibraryNote(`Opened “${payload.project.title}”.`);
+      } catch (thrown) {
+        setLibraryError(thrown instanceof Error ? thrown.message : "Could not open that app.");
+      } finally {
+        setLibraryBusy(false);
+      }
+    },
+    [request],
+  );
+
+  const deleteApp = useCallback(
+    async (id: string, title: string) => {
+      setLibraryBusy(true);
+      setLibraryError(null);
+      try {
+        await request(`/api/projects/${id}`, { method: "DELETE" });
+        if (activeAppId === id) {
+          // Only the saved copy goes; the build stays on screen.
+          setActiveAppId(null);
+          setLibraryNote(`Deleted the saved copy of “${title}”. The build is still open.`);
+        } else {
+          setLibraryNote(`Deleted “${title}”.`);
+        }
+        await listSavedApps();
+      } catch (thrown) {
+        setLibraryError(thrown instanceof Error ? thrown.message : "Could not delete that app.");
+      } finally {
+        setLibraryBusy(false);
+      }
+    },
+    [activeAppId, listSavedApps, request],
+  );
+
+  const newApp = useCallback(() => {
+    setActiveAppId(null);
+    setAppTitle("");
+    setFiles([]);
+    setRaw("");
+    setTurns(0);
+    setError(null);
+    setLibraryNote(null);
+    setLibraryError(null);
   }, []);
 
   const stop = useCallback(() => {
@@ -134,6 +291,24 @@ export default function Studio({ user = null }: { user?: string | null }) {
       setRaw("");
       setTurns((count) => count + 1);
       setStatus("idle");
+
+      // Editing a saved app keeps its saved copy current, so reopening it never
+      // silently reverts the last revision. Best-effort: the build already
+      // succeeded, so a failed save is reported and must not fail the build.
+      if (activeAppId) {
+        try {
+          const app = await persistApp({
+            id: activeAppId,
+            title: appTitle,
+            prompt: instruction,
+            files: produced,
+          });
+          setAppTitle(app.title);
+          await listSavedApps();
+        } catch {
+          setLibraryError("The build succeeded, but saving it failed. Use Save to retry.");
+        }
+      }
     } catch (thrown) {
       if (controller.signal.aborted) return;
       setError(thrown instanceof Error ? thrown.message : "Generation failed.");
@@ -141,7 +316,16 @@ export default function Studio({ user = null }: { user?: string | null }) {
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
     }
-  }, [files, prompt, status, token]);
+  }, [
+    activeAppId,
+    appTitle,
+    files,
+    listSavedApps,
+    persistApp,
+    prompt,
+    status,
+    token,
+  ]);
 
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -239,6 +423,91 @@ export default function Studio({ user = null }: { user?: string | null }) {
               />
             </div>
           ) : null}
+
+          <div className="library">
+            <div className="library-head">
+              <span className="produced-head">Saved apps</span>
+              <span className="topbar-spacer" />
+              <span className="hint">
+                {activeAppId ? "Editing a saved app" : hasFiles ? "Unsaved build" : "Nothing yet"}
+              </span>
+              {activeAppId ? (
+                <button type="button" className="ghost" onClick={newApp} disabled={libraryBusy}>
+                  New
+                </button>
+              ) : null}
+            </div>
+
+            <div className="library-save">
+              <input
+                value={appTitle}
+                onChange={(event) => setAppTitle(event.target.value)}
+                placeholder="app title"
+                aria-label="Saved app title"
+                maxLength={120}
+                spellCheck={false}
+                disabled={libraryBusy}
+              />
+              <button
+                type="button"
+                className="primary"
+                onClick={() => void saveApp()}
+                disabled={!hasFiles || busy || libraryBusy}
+              >
+                {activeAppId ? "Update" : "Save"}
+              </button>
+            </div>
+
+            {savedApps.length > 0 ? (
+              <ul className="library-list">
+                {savedApps.map((app) => (
+                  <li
+                    key={app.id}
+                    className={app.id === activeAppId ? "library-item current" : "library-item"}
+                  >
+                    <button
+                      type="button"
+                      className="library-open"
+                      onClick={() => void openApp(app.id)}
+                      disabled={libraryBusy}
+                      title={`Open ${app.title}`}
+                    >
+                      <strong>{app.title}</strong>
+                      <em>
+                        {app.fileCount} {app.fileCount === 1 ? "file" : "files"} ·{" "}
+                        {timestampLabel(app.updatedAt)}
+                      </em>
+                    </button>
+                    <button
+                      type="button"
+                      className="library-delete"
+                      onClick={() => void deleteApp(app.id, app.title)}
+                      disabled={libraryBusy}
+                      aria-label={`Delete ${app.title}`}
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <span className="hint">
+                Build something, then Save it — it comes back with your sign-in, on any browser.
+              </span>
+            )}
+
+            {libraryError ? (
+              <div className="alert error" role="alert">
+                <span>{libraryError}</span>
+              </div>
+            ) : null}
+
+            {libraryNote ? (
+              <div className="alert note">
+                <span>{libraryNote}</span>
+              </div>
+            ) : null}
+          </div>
 
           {turns === 0 ? (
             <div className="field">

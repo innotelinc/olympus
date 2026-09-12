@@ -51,6 +51,26 @@ function parseEnvFile(text: string): Record<string, string> {
 }
 
 /**
+ * The repository root — the nearest ancestor holding `.git`, or `start` when
+ * there is none. The same boundary `loadRepoEnv` stops at, exported so callers
+ * that need a default path (the saved-app store) agree with the loader instead
+ * of re-implementing the walk.
+ */
+export function repoRoot(start: string = process.cwd()): string {
+  let dir = start;
+
+  for (let depth = 0; depth <= MAX_WALK_UP; depth += 1) {
+    if (existsSync(join(dir, ".git"))) return dir;
+
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  return start;
+}
+
+/**
  * Merge the nearest env files into process.env without overwriting anything
  * already set. Idempotent and cheap; safe to call per request.
  */

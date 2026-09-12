@@ -247,6 +247,57 @@ export function isSecureRequestOrigin(request: Request): boolean {
   return (forwardedProto || new URL(request.url).protocol.replace(":", "")) === "https";
 }
 
+/* ---- request gate ------------------------------------------------------- */
+
+/**
+ * The single access gate for every Studio route.
+ *
+ * Both checks live here rather than in each handler: identity first (when OIDC
+ * is configured, only a signed-in, allowed user gets through), then the
+ * optional shared `STUDIO_ACCESS_TOKEN` for deployments without an IdP. A new
+ * route that forgets one of them would silently widen access — so routes ask
+ * this, and there is one place to audit.
+ */
+export type GateResult =
+  | { ok: true; session: Session | null }
+  | { ok: false; response: Response };
+
+function deny(message: string, status: number): Response {
+  return Response.json({ error: message }, { status, headers: { "cache-control": "no-store" } });
+}
+
+export function authorizeRequest(request: Request): GateResult {
+  const config = readAuthConfig();
+  let session: Session | null = null;
+
+  if (config) {
+    session = readSession(request.headers.get("cookie"), config);
+    if (!session) return { ok: false, response: deny("Sign in to use Studio.", 401) };
+
+    // Re-checked per request from the session's own groups, so tightening
+    // OIDC_ALLOWED_GROUPS applies at once rather than at session expiry.
+    if (!isAuthorized(session, config)) {
+      return {
+        ok: false,
+        response: deny("Your account is not in a group allowed to use Studio.", 403),
+      };
+    }
+  }
+
+  // Optional shared gate. Set STUDIO_ACCESS_TOKEN to require a header; leave it
+  // unset on a trusted network or behind an identity-aware proxy.
+  loadRepoEnv();
+  const accessToken = process.env.STUDIO_ACCESS_TOKEN?.trim();
+  if (accessToken && request.headers.get("x-studio-token") !== accessToken) {
+    return {
+      ok: false,
+      response: deny("Studio requires an access token. Add it under Settings.", 401),
+    };
+  }
+
+  return { ok: true, session };
+}
+
 /* ---- discovery + jwks --------------------------------------------------- */
 
 let discoveryCache: { url: string; document: DiscoveryDocument; at: number } | null = null;
