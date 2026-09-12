@@ -11,12 +11,12 @@
 #                 Authentik or Vault at all
 #   other      — the check itself broke
 #
-# Delivery is Telegram (the platform's channel): TELEGRAM_BOT_TOKEN plus
-# TELEGRAM_CHAT_ID, from the environment or the repo .env. Until both are real
-# the script does not alert anywhere — it says so in the journal and keeps
-# exiting non-zero, so `systemctl --failed` and the timer's state are the
-# fallback signal. Delivery failure never changes the exit code: the check's
-# verdict is the signal, not the notification.
+# Delivery is Telegram (the platform's channel) via scripts/notify-telegram.sh:
+# TELEGRAM_BOT_TOKEN plus TELEGRAM_CHAT_ID, from the environment or the repo
+# .env. Until both are real the script does not alert anywhere — it says so in
+# the journal and keeps exiting non-zero, so `systemctl --failed` and the
+# timer's state are the fallback signal. Delivery failure never changes the
+# exit code: the check's verdict is the signal, not the notification.
 #
 # Alerts repeat on every run while the credential is lapsing. That is the point
 # — a credential gating registration should nag daily for the last two weeks,
@@ -28,86 +28,12 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=notify-telegram.sh
+source "$REPO_ROOT/scripts/notify-telegram.sh"
 HOST="$(hostname)"
 FIX_HINT="fix: make studio-token-rotate AUTHENTIK_HOST=<host running cerulean-authentik>"
 
 say() { printf '%s studio-token-alert: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
-
-env_value() {
-    # Last assignment wins, matching how the Python tooling reads the file.
-    local value
-    value="$(grep -E "^$1=" "$REPO_ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\"' | tr -d "'")"
-    printf '%s' "$value"
-}
-
-is_placeholder() {
-    # The same shapes the Python tooling treats as unset. `.env.example` ships
-    # placeholders, and an export can carry one too — so a value counts only if
-    # it is non-empty and looks real, whichever layer it came from.
-    local lowered="${1,,}"
-    case "$lowered" in
-        *change-me*|*change_me*|*changeme*|*paste_your*|*placeholder*|*your-*|*xxx*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-credential_value() {
-    # $1 = variable name. Process env wins over .env — unless it is empty or a
-    # placeholder, in which case the file is consulted. A `change-me` export
-    # must not shadow a real value in .env, and a real export must win over a
-    # stale file.
-    local env_val="${!1:-}"
-    if [[ -n "$env_val" ]] && ! is_placeholder "$env_val"; then
-        printf '%s' "$env_val"
-        return
-    fi
-    local file_val
-    file_val="$(env_value "$1")"
-    if [[ -n "$file_val" ]] && ! is_placeholder "$file_val"; then
-        printf '%s' "$file_val"
-    fi
-}
-
-telegram_configured() {
-    [[ -n "$(credential_value TELEGRAM_BOT_TOKEN)" && -n "$(credential_value TELEGRAM_CHAT_ID)" ]]
-}
-
-send_telegram() {
-    # $1 = message. Uses python for the JSON so arbitrary text is safe, and
-    # honours TELEGRAM_API_BASE so the send path can be tested against a local
-    # receiver without touching the real bot.
-    local base token chat
-    base="${TELEGRAM_API_BASE:-https://api.telegram.org}"
-    token="$(credential_value TELEGRAM_BOT_TOKEN)"
-    chat="$(credential_value TELEGRAM_CHAT_ID)"
-
-    ALERT_TEXT="$1" ALERT_BASE="$base" ALERT_TOKEN="$token" ALERT_CHAT="$chat" python3 - <<'PY'
-import json
-import os
-import sys
-import urllib.request
-
-text = os.environ["ALERT_TEXT"]
-base = os.environ["ALERT_BASE"].rstrip("/")
-payload = json.dumps(
-    {"chat_id": os.environ["ALERT_CHAT"], "text": text, "disable_web_page_preview": True}
-).encode()
-request = urllib.request.Request(
-    f"{base}/bot{os.environ['ALERT_TOKEN']}/sendMessage",
-    data=payload,
-    headers={"Content-Type": "application/json"},
-)
-try:
-    with urllib.request.urlopen(request, timeout=15) as response:
-        body = json.loads(response.read() or b"{}")
-        if not body.get("ok"):
-            sys.exit(f"telegram answered not-ok: {json.dumps(body)[:200]}")
-except urllib.error.HTTPError as error:
-    sys.exit(f"telegram send failed: HTTP {error.code} — {error.read().decode(errors='replace')[:200]}")
-except (urllib.error.URLError, OSError) as error:
-    sys.exit(f"telegram send failed: {getattr(error, 'reason', error)}")
-PY
-}
 
 alert() {
     # $1 = verdict, $2 = check output, $3 = exit code to preserve

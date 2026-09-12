@@ -102,7 +102,11 @@ It is a *periodic* token, so a renewal resets its TTL to the full period (32
 days) and it can live indefinitely — but only if something renews it inside that
 window. `scripts/vault-renew.sh` is that renewer; `--check` reports without
 renewing and exits non-zero once the token stops being renewable, so it is safe
-to wire into monitoring.
+to wire into monitoring. On the deployment host a systemd timer renews it daily
+so nobody has to remember (`scripts/install-token-check-timer.sh` installs both
+this stack's timers), and `scripts/vault-renew-alert.sh` wraps it with the same
+Telegram alerting as the credential check — a renewal failure means every
+`vault://` reference in `.env` stops resolving, so it is not left silent.
 
 ```bash
 # Consume the platform Vault (Cerulean already runs it as `cerulean-vault`).
@@ -156,8 +160,9 @@ make studio-token-rotate AUTHENTIK_HOST=<host>   # rebuild and re-date it
 On the deployment host the check runs daily without anyone remembering it:
 
 ```bash
-scripts/install-token-check-timer.sh             # systemd timer, 06:17 UTC + after boot
-systemctl start olympus-studio-token-check.service   # run it now
+scripts/install-token-check-timer.sh             # both timers: 06:17 UTC + after boot
+systemctl start olympus-studio-token-check.service   # run the credential check now
+systemctl start olympus-vault-renew-check.service    # renew the Vault token now
 ```
 
 It alerts through Telegram when the credential is inside its warning window
@@ -167,7 +172,10 @@ a credential gating registration should nag, not hope one message lands. Set
 ignored) and prove the channel with `scripts/studio-token-alert.sh
 --test-telegram`; until then the journal and `systemctl --failed` are the
 signal. The service runs hardened and read-only, and delivery failure never
-changes the verdict — the exit code is always the check's.
+changes the verdict — the exit code is always the check's. Both wrappers share
+`scripts/notify-telegram.sh`, which sends only — it never polls `getUpdates`, so
+an alert can share the bot with the factory's Telegram interface without the two
+fighting over updates.
 
 It **expires** (180 days by default, `ARGS="--ttl-days 90"` to change that), so a
 leaked copy stops working on its own, and `make studio-oidc-check` reports the
