@@ -148,7 +148,9 @@ studio-token-check: ## Report the registration credential's expiry (exit 2 once 
 # every api-intent token (minutes=30 on Cerulean), so a REST-created credential
 # would die every half hour; and PATCHing a token re-parents it to the caller,
 # which is how an administrator credential gets mistaken for this one. The host
-# is a parameter because this repository stores neither its name nor a key.
+# is a parameter because this repository stores neither its name nor a key; the
+# key is the operator's own, in their ssh agent or the default identity, with
+# AUTHENTIK_SSH_KEY to point somewhere else.
 studio-token-rotate: ## Rotate the registration credential (needs AUTHENTIK_HOST=<host running cerulean-authentik>)
 	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi; \
 	if [[ -z "$(AUTHENTIK_HOST)" ]]; then \
@@ -157,7 +159,7 @@ studio-token-rotate: ## Rotate the registration credential (needs AUTHENTIK_HOST
 		exit 2; \
 	fi
 	python3 scripts/authentik-studio-token.py --snippet $(ARGS) \
-		| ssh $${AUTHENTIK_SSH_USER:-root}@$(AUTHENTIK_HOST) 'docker exec -i cerulean-authentik ak shell' \
+		| ssh $(if $(AUTHENTIK_SSH_KEY),-i $(AUTHENTIK_SSH_KEY)) $${AUTHENTIK_SSH_USER:-root}@$(AUTHENTIK_HOST) 'docker exec -i cerulean-authentik ak shell' \
 		| python3 scripts/authentik-studio-token.py --store-stdin $(ARGS)
 
 vault-bootstrap: ## Store this stack's password in Cerulean Vault (AUTHENTIK_* are written too when set)
