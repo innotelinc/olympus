@@ -1,5 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 
+import { buildPreviewDocument, parseFiles } from "@/lib/files";
+
 /**
  * Drives the real authorization-code + PKCE handshake against a LIVE Authentik.
  *
@@ -327,6 +329,21 @@ describe.skipIf(missing.length > 0)("live provider integration", () => {
     const body = await response.text();
     expect(response.status, body.slice(0, MAX_BODY)).toBe(200);
     expect(body).toMatch(/<file path=/);
+
+    // The route streams the model's raw text, so assert on what the *pipeline*
+    // makes of it. Matching the opener alone passes on output that renders
+    // nothing: the model routinely drops the closing tag, and a block without
+    // one used to parse to an empty file set.
+    const files = parseFiles(body, { allowUnterminatedLast: true });
+    const document = buildPreviewDocument(files);
+
+    expect(files.map((file) => file.path), "no files parsed from the stream").not.toHaveLength(0);
+    expect(
+      files.some((file) => /(^|\/)index\.html$/i.test(file.path)),
+      `no index.html in ${JSON.stringify(files.map((file) => file.path))}`,
+    ).toBe(true);
+    expect(document).toMatch(/<html[\s>]/i);
+    expect(document).not.toContain("Nothing rendered yet");
   }, 180_000);
 });
 
