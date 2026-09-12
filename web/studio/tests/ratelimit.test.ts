@@ -92,6 +92,21 @@ describe("rate limit configuration", () => {
     process.env[RATE_LIMIT_ENV] = "999999";
     expect(readRateLimitConfig()).toBe(MAX_RATE_LIMIT_PER_MIN);
   });
+
+  it("disables the limit on 0, off, false, disabled, no, or unlimited", () => {
+    for (const value of ["0", "off", "OFF", "false", "disabled", "no", "unlimited"]) {
+      process.env[RATE_LIMIT_ENV] = value;
+      expect(readRateLimitConfig()).toBeNull();
+    }
+  });
+
+  it("treats a typo as the default rather than as unlimited", () => {
+    // A misconfigured value must not silently remove the only spend cap.
+    process.env[RATE_LIMIT_ENV] = " of ";
+    expect(readRateLimitConfig()).toBe(DEFAULT_RATE_LIMIT_PER_MIN);
+    process.env[RATE_LIMIT_ENV] = "-1";
+    expect(readRateLimitConfig()).toBe(DEFAULT_RATE_LIMIT_PER_MIN);
+  });
 });
 
 describe("rate limit accounting", () => {
@@ -129,6 +144,36 @@ describe("rate limit accounting", () => {
     expect(checkRateLimit("identity-a").ok).toBe(true);
     expect(checkRateLimit("identity-a").ok).toBe(false);
     expect(checkRateLimit("identity-b").ok).toBe(true);
+  });
+
+  it("never counts anything while the limit is disabled", () => {
+    process.env[RATE_LIMIT_ENV] = "0";
+    const identity = `acct-${Math.random()}`;
+
+    for (let index = 0; index < 50; index += 1) {
+      const result = checkRateLimit(identity);
+      expect(result.ok).toBe(true);
+      expect(result.limit).toBe(0);
+    }
+
+    // Re-enabling starts from a clean window: the disabled period consumed
+    // nothing.
+    process.env[RATE_LIMIT_ENV] = "1";
+    expect(checkRateLimit(identity).ok).toBe(true);
+    expect(checkRateLimit(identity).ok).toBe(false);
+  });
+
+  it("does not reject a route request when the limit is disabled", async () => {
+    process.env[RATE_LIMIT_ENV] = "off";
+    process.env.STUDIO_ACCESS_TOKEN = "shared-secret";
+    const fetchMock = stubFetch(async () => sseResponse(OK_STREAM));
+    const headers = { "x-studio-token": "shared-secret" };
+
+    for (let index = 0; index < 3; index += 1) {
+      const response = await post(JSON.stringify({ prompt: "a counter" }), headers);
+      expect(response.status).toBe(200);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
 
