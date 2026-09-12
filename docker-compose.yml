@@ -92,6 +92,13 @@ services:
       STUDIO_DATA_DIR: ${STUDIO_DATA_DIR:-/app/data/studio}
     volumes:
       - studio-data:/app/data
+      # The factory handoff. "Export to factory" writes a spec into this
+      # directory, which is the repo's build-requests/ — the same place
+      # `make app SPEC=…` reads and the CI builder watches on push. Studio runs
+      # as uid 1001 (the image drops privileges), so the host directory has to
+      # be writable by that uid: `chown 1001:1001 build-requests` once. If it is
+      # not, the export fails with a message naming the fix rather than a 500.
+      - ./build-requests:/app/build-requests
     ports:
       - "${STUDIO_PORT:-3001}:3001"
     extra_hosts:
