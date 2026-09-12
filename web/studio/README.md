@@ -75,10 +75,42 @@ failing obscurely.
 | `STUDIO_PUBLIC_HOST` | — | Public host the edge serves Studio on. Read by `make studio-oidc`, which registers `https://<host>/api/auth/callback` as a redirect URI; Studio itself derives the callback from the request. |
 | `BASE_DOMAIN` | — | The stack's root host. Read by `make studio-oidc` too: the root name serves a landing screen with a sign-in button, so its callback is registered alongside the studio host's — sign-in works from whichever host the visitor arrived on. |
 | `STUDIO_DATA_DIR` | `<repo>/data/studio` | Where saved apps live. The compose service points it at a named volume. |
-| `STUDIO_RATE_LIMIT_PER_MIN` | `20` | Generations per minute per signed-in identity on `/api/generate` (hard cap 600). Exceeding it answers `429` with `retry-after`; rejected requests consume no budget. `0` (or `off`) disables the limit — for a single-operator deployment behind the IdP; a typo falls back to the default, never to unlimited. |
+| `STUDIO_RATE_LIMIT_PER_MIN` | `20` | Generations per minute per signed-in identity on `/api/generate` (hard cap 600). Exceeding it answers `429` with `retry-after`; rejected requests consume no budget. `0` (or `off`) disables the limit — for a single-operator deployment behind the IdP; a typo falls back to the default, never to unlimited. The **deployment default**; the operator can override it at runtime (next section). |
 
 Placeholders from `.env.example` (`change-me…`) count as unset, so an unedited
 template fails loudly instead of sending a bogus key.
+
+### Changing the rate limit without a redeploy
+
+Settings → **Generation rate limit** toggles the limit off and on, and sets the
+number when it is on. It is stored beside the saved apps
+(`$STUDIO_DATA_DIR/rate-limit.json`), so it survives a restart, and it can be
+returned to the `.env` value with *Use the deployment default* — the deployment
+default is never lost, only outranked.
+
+| Layer | Wins when | Ends up as |
+| --- | --- | --- |
+| Runtime override | a file exists in the data dir | `source: "override"` |
+| `STUDIO_RATE_LIMIT_PER_MIN` | no override is stored | `source: "env"` |
+| Built-in default (`20`) | nothing is set anywhere | `source: "default"` |
+
+The override file is read on each evaluation rather than cached, so it cannot go
+stale in a long-lived process or disagree between two processes. An unreadable
+or malformed file reads as "no override" — a corrupt settings file must never
+take generation down — and switching the limit off consumes no counters, so
+re-enabling later starts everyone in a clean window.
+
+`/api/settings/ratelimit` is the endpoint behind it: `GET` reports the effective
+limit and its `source`; `PUT` takes `{ disabled: true }`, `{ disabled: false,
+perMinute: n }` or `{ reset: true }`. It is gated exactly like `/api/generate`
+(the same `authorizeRequest` gate), so behind OIDC it needs a session in
+`OIDC_ALLOWED_GROUPS`.
+
+> **It is deployment-wide, not per-identity.** Anyone who can build here can
+already spend the shared model pool, and Studio is an operator tool behind an
+identity-aware proxy — so this adds no new trust boundary. A deployment that
+hands Studio accounts to untrusted users should leave the limit in `.env` and
+treat the toggle as an operator control.
 
 ## The output contract
 
@@ -303,7 +335,9 @@ In the container the library is the `studio-data` named volume, mounted at
   callers are keyed by their session subject, token callers by a hash of the
   token — never an IP, so the limit follows the account. The counters are
   in-memory on purpose; one Studio process, and a restart re-opens the window a
-  few minutes early.
+  few  minutes early. The limit can be switched off or changed at runtime by an
+  authenticated operator (see above); that control is deployment-wide and sits
+  behind the same check every other route uses.
 - **Identity.** Authentik OIDC when configured (see above); otherwise the
   optional `STUDIO_ACCESS_TOKEN` shared gate protects the generate route.
 
@@ -355,7 +389,7 @@ sitting wedged. Docker never restarts an unhealthy container on its own.
 make studio-test      # or: cd web/studio && npm test
 ```
 
-143 tests across seven files, no network required:
+190 tests across ten files, no network required:
 
 | File | Covers |
 | --- | --- |
@@ -366,6 +400,9 @@ make studio-test      # or: cd web/studio && npm test
 | `tests/auth.test.ts` | Full OIDC flow against a mock Authentik — PKCE, state, nonce, JWKS signature verification (RS256 + ES256), claim rejection, session cookies, login/callback routes, and the group policy (allow, deny, no-`groups` claim, per-request re-check) |
 | `tests/projects.test.ts` | The library store: subject hashing and hostile subjects, create/update/list/delete, cross-identity isolation, traversal-shaped ids and file paths, size caps, corrupt files |
 | `tests/projects-route.test.ts` | The library routes: session and access-token gating, per-identity separation through real signed cookies, round-trip, `404` for unknown/hostile ids, `400`/`413`, `no-store` |
+| `tests/ratelimit.test.ts` | Env parsing (junk and odd values, the disabled set, the hard cap), fixed-window accounting, identity isolation, and the route's `429` + `retry-after` — including that a rejected request consumes no budget |
+| `tests/ratelimit-settings.test.ts` | The runtime override: disk round-trip, precedence over `.env`, disable/reset, corrupt files reading as "no override", and the settings endpoint's gating and validation |
+| `tests/page.test.ts` | The host split: the root host shows the landing screen, the studio host redirects to the provider, a session gets the builder on either host, and an unconfigured deployment gates nothing |
 
 The mock provider (`tests/helpers/mock-oidc.ts`) serves a real discovery
 document, JWKS, and token endpoint over localhost and mints genuinely signed
