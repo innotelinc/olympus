@@ -121,7 +121,7 @@ Set these (all present in `.env.example`) to switch it on:
 | `OIDC_CLIENT_ID` | The Authentik application's client ID (`studio`) |
 | `OIDC_CLIENT_SECRET` | Leave as the `change-me` placeholder and auth stays disabled |
 | `AUTHENTIK_URL` | Registration only — Authentik's base URL. Not read by Studio at runtime |
-| `AUTHENTIK_TOKEN` | Registration only — Authentik API token (Directory → Tokens) for `make studio-oidc` |
+| `AUTHENTIK_TOKEN` | Registration only — least-privilege service-account token for `make studio-oidc`. May be a `vault://` reference, which the script resolves through Cerulean Vault |
 | `OIDC_REDIRECT_URI` | Optional — derived from the request (honors `x-forwarded-proto`/`-host`) when unset |
 | `OIDC_SCOPES` | Default `openid email profile` |
 | `OIDC_ALLOWED_GROUPS` | Comma-separated group allow-list. Empty = any authenticated user |
@@ -183,6 +183,23 @@ it), derives the application slug and client ID from `OIDC_ISSUER_URL` /
 rather than skipping: it adds a redirect URI that was never registered and
 PATCHes `grant_types` if it is empty. Three details it exists to get right, all
 learned against Authentik 2026.8:
+
+`AUTHENTIK_TOKEN` may be a `vault://<mount>/<path>#<key>` reference instead of a
+value — on the Cerulean platform that is the norm, with the credential stored by
+`make vault-bootstrap` and `.env` carrying only
+`vault://cerulean/olympus/authentik#AUTHENTIK_TOKEN`. The script resolves it with
+`VAULT_ADDR` plus `VAULT_TOKEN`/`VAULT_TOKEN_FILE`, the same way
+`scripts/omniroute-vault.sh` does for the gateway. A plain value still works, so
+a checkout with no Vault is unaffected.
+
+The credential itself is a service account, not an administrator: role
+`olympus-studio-registration` grants `view_flow`, `view_scopemapping`,
+`view_certificatekeypair`, `view_oauth2provider`, `add_oauth2provider`,
+`change_oauth2provider`, `view_application` and `add_application` — exactly what
+this script calls. Verified against the live instance: it can PATCH the Studio
+provider and create one, while `/core/users/`, `/rbac/roles/`, `/core/groups/`,
+`/outposts/instances/` and application deletion all answer `403`, and its token
+list contains only itself.
 
 - **`grant_types` is not defaulted.** An omitted `grant_types` lands as `[]`,
   and `/authorize` then fails with `Invalid grant_type for provider`. The script
@@ -345,7 +362,9 @@ STUDIO_E2E_INSECURE=1 STUDIO_E2E_GENERATE=1 \
 
 It performs a real sign-in (so the account's last-login moves) and asserts the
 handshake, the session, and the negative paths — replayed code, tampered `state`,
-missing flow cookie, anonymous generate. Set `STUDIO_E2E_EXPECT_DENIED=1` when
+missing flow cookie, anonymous generate, and a save/list/reopen/delete round-trip
+through the library under the identity the provider actually released (it deletes
+what it creates). Set `STUDIO_E2E_EXPECT_DENIED=1` when
 Studio's `OIDC_ALLOWED_GROUPS` excludes the account and the same run asserts the
 `403` lockdown instead. Without the opt-in variables every test skips.
 
@@ -385,8 +404,9 @@ Checked on the current tree:
   `OIDC_ALLOWED_GROUPS=Cerulean` (a group the test account is in) the sign-in
   completes and the app renders. With the allow-list switched to a group it is
   *not* in, the callback answers `403` and issues **no** session.
-- The live handshake is now a repeatable test — `npm run test:integration`, 8
-  assertions — instead of a one-off script.
+- The live handshake is now a repeatable test — `npm run test:integration`,
+  including a saved-app round-trip through the real identity — instead of a
+  one-off script.
 - Container image: builds, runs as non-root `nextjs` (uid 1001), ~230 MB, PID 1
   is `next-server`, healthcheck reaches `healthy`.
 - The `autoheal` service was verified against a deliberately unhealthy labelled
@@ -401,6 +421,5 @@ Checked on the current tree:
 
 The one thing `npm test` cannot cover is a live sign-in: it needs credentials and
 a provider with the redirect URI registered. That path is `npm run test:integration`
-above — 8 assertions — and it is how the live Authentik results in this list were
-produced. With no `STUDIO_E2E_*` variables set, every test in that file skips, so
+above, and it is how the live Authentik results in this list were produced. With no `STUDIO_E2E_*` variables set, every test in that file skips, so
 the default suite stays offline and never signs in anywhere.
