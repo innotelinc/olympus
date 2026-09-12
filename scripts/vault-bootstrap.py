@@ -78,7 +78,7 @@ def read_token() -> str:
         fail(
             "No Vault token. Set VAULT_TOKEN, or VAULT_TOKEN_FILE to a file containing one.\n"
             "On the Cerulean platform this stack's path-scoped token lives at\n"
-            "./data/vault/token/cerulean.token (the `olympus` policy); see the\n"
+            "./data/vault/token/olympus.token (the `olympus` policy); see the\n"
             "Secrets section of docs/stack.md for how it is minted and renewed."
         )
 

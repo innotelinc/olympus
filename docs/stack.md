@@ -107,13 +107,20 @@ to wire into monitoring.
 ```bash
 # Consume the platform Vault (Cerulean already runs it as `cerulean-vault`).
 export VAULT_ADDR=http://vault:8200
-export VAULT_TOKEN_FILE=./data/vault/token/cerulean.token   # `olympus` policy, never root
+export VAULT_TOKEN_FILE=./data/vault/token/olympus.token   # `olympus` policy, never root
 export VAULT_PREFIX=cerulean
 python3 scripts/vault-bootstrap.py
 
 # Keep the periodic token from lapsing (or `make vault-renew`).
 bash scripts/vault-renew.sh
 ```
+
+The platform **mints and renews** that token: `cerulean-vault` writes
+`data/vault/token/olympus.token` on the Vault host (named by
+`VAULT_PRODUCT_TOKENS=olympus` there), which is the file to copy here when it is
+created or re-minted. Because renewal keeps the value stable, a copy taken once
+stays valid for as long as the platform keeps running — this side only needs to
+renew it if the platform stops.
 
 `scripts/vault-bootstrap.py` takes every address and credential from the
 environment (nothing is hardcoded, because this repo is public), creates the KV
