@@ -21,6 +21,11 @@ out/
 # Studio test fixtures (created and removed per run)
 web/studio/tests/.tmp/
 
+# Local SecretOps state: the scoped Cerulean Vault token this stack reads.
+# Credential material — the equivalent of .env for the Vault integration.
+data/vault/token/
+data/vault/init/
+
 # Factory runtime state, never committed
 .factory/runs/
 .factory/ledger.jsonl

@@ -76,7 +76,7 @@ Docker also runs the same `push` manufacture trigger in CI: `.github/workflows/o
 The bootstrap is idempotent and does, in order:
 
 1. Installs what is missing: the OmniRoute CLI, the Codex CLI, the Claude Code CLI, and the Archon CLI.
-2. Checks that an OmniRoute server is reachable (`http://localhost:20128`; override with `OMNIROUTE_BASE_URL`). If not, tries `scripts/omniroute-infisical.sh`; otherwise prints how to start it and continues.
+2. Checks that an OmniRoute server is reachable (`http://localhost:20128`; override with `OMNIROUTE_BASE_URL`). If not, tries `scripts/omniroute-vault.sh` (Vault-backed); otherwise prints how to start it and continues.
 3. Creates an OmniRoute API key and stores it in `~/.omniroute/.env` (never in the repo).
 4. Wires both agents to OmniRoute: Codex → `~/.codex/config.toml` + `~/.codex/auth.json`, Claude Code → `~/.claude/settings.json` (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`).
 5. Runs `python3 factory/doctor.py` so you can see readiness at a glance.
@@ -111,7 +111,7 @@ See `MISSION.md`, `FACTORY.md`, and `FACTORY_RULES.md` in the source repo for sc
 | `AGENTS.md` | Conventions for agents working in this repo (in the source repo) |
 | `harness/END-TO-END.md` | Journeys that must pass (in the source repo) |
 | `.factory/holdout/HOLDOUT.md` | Holdout the auto-merge rests on (in the source repo) |
-| `INFISICAL.md` | Infisical setup for OmniRoute credentials |
+| `docs/stack.md` | SecretOps via Cerulean Vault (KV v2), and the `vault://` reference convention |
 
 ---
 

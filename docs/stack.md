@@ -25,14 +25,14 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 
 - OmniRoute — model gateway (Codex `auto/coding` + Hermes 3 via OpenRouter/DeepInfra)
 - Authentik — identity, SSO (Cerulean's Authentik; optional: local/OIDC mode where applicable)
-- Infisical — secrets, credentials (gateway keys, tokens)
+- Cerulean Vault — secrets, credentials (gateway keys, tokens)
 - Cerulean — trust (DNS/TLS for the operator surfaces where exposed)
 - NPM Edge — public routing, TLS termination at the edge (where the operating host is fronted)
 
 ## Explicitly does NOT own
 
 - Application business logic — Olympus is factory machinery, not a product domain; it does not ship a user app, media library, billing products, or storage promises
-- Identity (Authentik), Secrets (Infisical), Trust/DNS/PKI (Cerulean), Storage (ONYX), or Revenue/Billing (Magnate) — the factory integrates with those instead of re-implementing them
+- Identity (Authentik), Secrets (Cerulean Vault), Trust/DNS/PKI (Cerulean), Storage (ONYX), or Revenue/Billing (Magnate) — the factory integrates with those instead of re-implementing them
 - Its own governance as ordinary issue work — `MISSION.md`, `FACTORY_RULES.md`, `AGENTS.md`, `factory/**`, `.archon/workflows/factory/**`, `harness/**`, `.factory/locks/**`, `.factory/holdout/**`, CI config, and secret-shaped files are protected
 
 ## Service map
@@ -42,7 +42,7 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 | `factory/` machinery | Python (gate, guard, merge, state, doctor, trigger) | State machine, safety gates, merging, visibility, scheduler control |
 | `harness/` | `ci.py`, `harness.config.json`, journeys, holdout | Definition of “working” — never edited to make a check pass |
 | `.archon/workflows/factory/` | Archon YAML workflows | Prime → implement → validate, plus regress and triage |
-| `scripts/bootstrap.sh` + `scripts/omniroute-infisical.sh` | bash + OmniRoute CLI | One-command clone-to-ready and gateway launcher |
+| `scripts/bootstrap.sh` + `scripts/omniroute-vault.sh` | bash + curl + OmniRoute CLI | One-command clone-to-ready and Vault-backed gateway launcher |
 | Telegram interface | Hermes 3 via OpenRouter Free through OmniRoute | Interactive bot that parses intent into Archon DAG runs |
 | Coding brain | Codex (`auto/coding`) via OmniRoute Responses API (`wire_api = "responses"`) | Repository code modifications dispatched by the factory consumer + harness E2E (`omniroute launch-codex -p auto-coding`) |
 | `web/studio/` | Next.js (App Router) + Authentik OIDC | Browser vibe-coding surface — prompt in, runnable app out, gateway key held server-side |
@@ -61,7 +61,7 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 |---|---|
 | Definition source | [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) is canonical; this page is the product's link to it |
 | Identity | Cerulean's Authentik at `https://auth.cerulean.innotel.us` (platform alias `auth.olympus.innotel.us` where wired) — OIDC provider per service |
-| Secrets | Cerulean's Infisical — credentials live in Infisical; `.env` is derived and gitignored |
+| Secrets | Cerulean Vault (KV v2) — credentials live in Vault; `.env` carries `vault://` references and is gitignored |
 | Trust / Edge | Cerulean (DNS/certs) and NPM Edge where the hosting host is fronted — managed by Cerulean |
 | AI plane | OmniRoute gateway in front of upstream models — Codex via `wire_api = "responses"` (primary), one key per user |
 
@@ -70,35 +70,46 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 - **Atlas (CodeOps)** — Olympus is the factory that Atlases the ecosystem's code lives in; Atlas owns the canonical git remote + CI for platform code, while Olympus owns the factory loop inside a given repo.
 - **Distro (BuilderOps)** — Distro builds apps in the browser; Atlas ships them; both sit behind OmniRoute + Authentik + Magnate. Olympus is the repo-bound automation that validates those outputs.
 
-## Secrets (Infisical)
+## Secrets (Cerulean Vault)
 
-Secrets for this platform live in **Infisical** (SecretOps): credentials are imported into an Infisical workspace and the stack's `.env` is derived from it. Enable it with:
+Secrets for this platform live in **Cerulean Vault** — HashiCorp Vault with KV v2
+mounted at `VAULT_PREFIX` (default `cerulean`) and a periodic token scoped to
+that prefix. Olympus does **not** run its own store; it consumes the platform's,
+so there is one place credentials live rather than one per service.
 
 ```bash
-# generate the required keys and add them to .env
-openssl rand -base64 32   # INFISICAL_ENCRYPTION_KEY
-openssl rand -hex 16      # INFISICAL_AUTH_SECRET
-openssl rand -hex 16      # INFISICAL_DB_PASSWORD
-
-# start the SecretOps store (opt-in profile)
-make up    # wraps: docker compose -f compose.infisical.yml --profile infisical up -d
-
-# create the workspace, the machine identity, and a token — then write .env
-export INFISICAL_ADDR=http://localhost:8088 \
-       INFISICAL_ADMIN_EMAIL=you@example.com \
-       INFISICAL_ADMIN_PASSWORD=... \
-       INFISICAL_ORG_ID=...
-python3 scripts/infisical-bootstrap.py
+# Consume the platform Vault (Cerulean already runs it as `cerulean-vault`).
+export VAULT_ADDR=http://vault:8200
+export VAULT_TOKEN_FILE=./data/vault/token/cerulean.token   # scoped, never root
+export VAULT_PREFIX=cerulean
+python3 scripts/vault-bootstrap.py
 ```
 
-`scripts/infisical-bootstrap.py` takes every credential from the environment
-(nothing is hardcoded, because this repo is public) and writes `.env` at mode
-0600. With `INFISICAL_ADDR` / `INFISICAL_TOKEN` / `INFISICAL_PROJECT_ID` in
-`.env`, env values may be `infisical://<name>` references resolved at startup.
+`scripts/vault-bootstrap.py` takes every address and credential from the
+environment (nothing is hardcoded, because this repo is public), creates the KV
+v2 mount if it is absent, refuses a KV **v1** mount rather than silently writing
+unversioned data, and reads the secret back to confirm it round-trips before
+reporting success. Values are never printed.
+
+With `VAULT_ADDR` / `VAULT_TOKEN` / `VAULT_PREFIX` in `.env`, any env value may
+be a `vault://<mount>/<path>#<key>` reference resolved at startup — the same
+convention Cerulean uses, so the stack and the platform agree on one format:
+
+    OMNIROUTE_INITIAL_PASSWORD=vault://cerulean/olympus#INITIAL_PASSWORD
+
+`scripts/omniroute-vault.sh` resolves that secret with `curl` and starts the
+gateway with it, so no Vault CLI has to exist on the host.
+
+For a checkout with no platform Vault, `compose.vault.yml` provides a dev-mode
+one — in-memory and auto-unsealed, which is fine for local iteration and **not**
+for anything whose secrets must survive a restart.
+
+Never use the root token: it sits in `./data/vault/init/init.json` (0600) beside
+the unseal key, and a prefix-scoped token is enough for everything here.
 
 ## Golden rules
 
-- **Authentik = Identity** · **Infisical = Secrets** · **Cerulean = Trust** · **ONYX = Storage** · **Magnate = Revenue** · **NPM Edge = Edge** — everything else is a business function.
+- **Authentik = Identity** · **Cerulean Vault = Secrets** · **Cerulean = Trust** · **ONYX = Storage** · **Magnate = Revenue** · **NPM Edge = Edge** — everything else is a business function.
 - No platform duplicates another's responsibility.
 - No credit in commits, footers, or headers to anyone but the project owner.
 

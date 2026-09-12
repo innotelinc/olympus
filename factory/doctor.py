@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 REQUIRED_FILES = ["README.md", ".env.example", "Makefile", "docker-compose.yml"]
-OPTIONAL_FILES = ["compose.infisical.yml", "UPSTREAMS.md", "docs/stack.md", "web/studio/package.json"]
+OPTIONAL_FILES = ["compose.vault.yml", "UPSTREAMS.md", "docs/stack.md", "web/studio/package.json"]
 VENDOR_DIRS = ["omniroute", "archon", "ai-software-factory"]
 
 PLACEHOLDER_PREFIXES = ("change-me", "changeme", "your-", "xxx", "todo", "paste_")

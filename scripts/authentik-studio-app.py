@@ -215,7 +215,7 @@ def main() -> int:
         print(f"\n  created provider (pk {provider.get('pk')})")
         print(f"  client_id:     {args.client_id}")
         print(f"  client_secret: {client_secret}")
-        print("  ^ store this in Infisical / .env now — Authentik will not show it again.")
+        print("  ^ store this in Cerulean Vault / .env now — Authentik will not show it again.")
 
     if existing_apps:
         print(f"  application already exists (slug {args.slug}) — leaving it untouched")
