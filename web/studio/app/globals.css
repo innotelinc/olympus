@@ -395,6 +395,86 @@ kbd {
   opacity: 0.75;
 }
 
+/* A real ratio (files written vs. files written plus the one in flight), so the
+   bar stops sliding and reports an actual width — see the component. */
+.progress-fill.determinate {
+  animation: none;
+  margin-left: 0;
+  transition: width 0.35s ease-out;
+}
+
+.progress-clock {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The build's steps: each one is read off the stream, never a timer. */
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.step-mark {
+  width: 12px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.step.done {
+  color: #8ea3c2;
+}
+
+.step.done .step-mark {
+  color: var(--ok);
+}
+
+.step.active {
+  color: #dce4f2;
+}
+
+.step.active .step-mark {
+  color: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.step.todo {
+  opacity: 0.55;
+}
+
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.file-chip em {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.file-chip.done {
+  color: #b7e2c4;
+}
+
+.file-chip.writing {
+  color: #dce4f2;
+  border-color: var(--line-strong);
+  background: var(--accent-soft);
+}
+
 @keyframes progress-slide {
   0% {
     margin-left: -40%;
@@ -488,6 +568,49 @@ kbd {
   border-radius: 8px;
   font-family: var(--mono);
   font-size: 12.5px;
+}
+
+/* ---- the rate-limit toggle --------------------------------------------- */
+
+.settings-block {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-inline input {
+  width: 88px;
+}
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 /* ---- saved apps -------------------------------------------------------- */

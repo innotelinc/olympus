@@ -55,6 +55,57 @@ async function readFailure(response: Response): Promise<string> {
   return `Request failed with status ${response.status}.`;
 }
 
+/**
+ * The rate limit as `/api/settings/ratelimit` reports it.
+ *
+ * Declared here rather than imported from `lib/ratelimit`, which reads the
+ * filesystem on the server — the client bundle must not pull node:fs in for a
+ * type.
+ */
+type RateLimitView = {
+  /** Effective limit; null means switched off. */
+  limit: number | null;
+  source: "override" | "env" | "default";
+  envLimit: number | null;
+  envRaw: string;
+  override: number | null;
+  max: number;
+};
+
+/** One line saying what the limit is right now and which layer decided it. */
+function describeRateLimit(state: RateLimitView): string {
+  const effective = state.limit === null ? "Off" : `${state.limit}/min`;
+  const from =
+    state.source === "override"
+      ? "set here"
+      : state.source === "env"
+        ? "from .env"
+        : "the deployment default";
+  const envNote = state.source === "override" && state.envRaw ? ` (.env says ${state.envRaw})` : "";
+  return `Effective: ${effective} — ${from}${envNote}`;
+}
+
+/**
+ * Where a build is, derived from what the stream has actually produced rather
+ * than from a timer: nothing is invented, so the steps are all real.
+ */
+type BuildPhase = "connecting" | "thinking" | "writing" | "finalizing";
+
+function phaseOf(input: { opened: boolean; bytes: number; writing: boolean }): BuildPhase {
+  if (!input.opened) return "connecting";
+  if (input.writing) return "writing";
+  return input.bytes === 0 ? "thinking" : "finalizing";
+}
+
+const PHASE_LABEL: Record<BuildPhase, string> = {
+  connecting: "Sending the instruction",
+  thinking: "Model is responding",
+  writing: "Writing files",
+  finalizing: "Finishing files",
+};
+
+const PHASE_ORDER: BuildPhase[] = ["connecting", "thinking", "writing", "finalizing"];
+
 export default function Studio({ user = null }: { user?: string | null }) {
   const [prompt, setPrompt] = useState("");
   const [files, setFiles] = useState<GeneratedFile[]>([]);
@@ -72,8 +123,16 @@ export default function Studio({ user = null }: { user?: string | null }) {
   const [currentFile, setCurrentFile] = useState<{ path: string; bytes: number } | null>(null);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [lastChunkAt, setLastChunkAt] = useState<number | null>(null);
+  const [streamOpened, setStreamOpened] = useState(false);
+  const [byteCount, setByteCount] = useState(0);
   const [queued, setQueued] = useState(false);
   const [nowTick, setNowTick] = useState(0);
+
+  // The generation rate limit, as an operator setting (deployment-wide).
+  const [rateLimit, setRateLimit] = useState<RateLimitView | null>(null);
+  const [rateLimitDraft, setRateLimitDraft] = useState("");
+  const [rateLimitBusy, setRateLimitBusy] = useState(false);
+  const [rateLimitError, setRateLimitError] = useState<string | null>(null);
 
   // Saved-app library. Kept server-side under the signed-in identity, so the
   // same account gets the same apps on any browser.
@@ -187,6 +246,54 @@ export default function Studio({ user = null }: { user?: string | null }) {
     void listSavedApps();
   }, [listSavedApps]);
 
+  // ---- rate limit (operator setting) ------------------------------------
+
+  const loadRateLimit = useCallback(async () => {
+    try {
+      const payload = (await (await request("/api/settings/ratelimit")).json()) as {
+        rateLimit?: RateLimitView;
+      };
+      if (!payload.rateLimit) throw new Error("Studio returned an unexpected settings payload.");
+      setRateLimit(payload.rateLimit);
+      setRateLimitError(null);
+    } catch (thrown) {
+      // Not fatal: the toggle simply stays hidden rather than blocking a build.
+      setRateLimitError(thrown instanceof Error ? thrown.message : "Could not read the rate limit.");
+    }
+  }, [request]);
+
+  useEffect(() => {
+    void loadRateLimit();
+  }, [loadRateLimit]);
+
+  // The draft mirrors the live limit until the operator edits it.
+  useEffect(() => {
+    if (rateLimit && rateLimit.limit !== null) setRateLimitDraft(String(rateLimit.limit));
+  }, [rateLimit]);
+
+  const applyRateLimit = useCallback(
+    async (body: { disabled: boolean; perMinute?: number } | { reset: true }) => {
+      setRateLimitBusy(true);
+      setRateLimitError(null);
+      try {
+        const payload = (await (
+          await request("/api/settings/ratelimit", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          })
+        ).json()) as { rateLimit?: RateLimitView };
+        if (!payload.rateLimit) throw new Error("Studio returned an unexpected settings payload.");
+        setRateLimit(payload.rateLimit);
+      } catch (thrown) {
+        setRateLimitError(thrown instanceof Error ? thrown.message : "Could not change the rate limit.");
+      } finally {
+        setRateLimitBusy(false);
+      }
+    },
+    [request],
+  );
+
   const persistApp = useCallback(
     async (input: { id?: string | null; title?: string; prompt?: string; files: GeneratedFile[] }) => {
       const response = await request("/api/projects", {
@@ -293,6 +400,8 @@ export default function Studio({ user = null }: { user?: string | null }) {
     setQueued(false);
     abortRef.current?.abort();
     abortRef.current = null;
+    setStreamOpened(false);
+    setByteCount(0);
     setStatus("idle");
   }, []);
 
@@ -310,6 +419,8 @@ export default function Studio({ user = null }: { user?: string | null }) {
     setRaw("");
     setQueued(false);
     setCurrentFile(null);
+    setStreamOpened(false);
+    setByteCount(0);
     setStartedAt(Date.now());
     setLastChunkAt(Date.now());
 
@@ -337,6 +448,10 @@ export default function Studio({ user = null }: { user?: string | null }) {
         }
         if (!response.body) throw new Error("The gateway returned an empty stream.");
 
+        // Headers are in and the body is about to stream: the wait for the
+        // model's first token is a real, visible step from here on.
+        setStreamOpened(true);
+
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let accumulated = "";
@@ -346,6 +461,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
           if (done) break;
           accumulated += decoder.decode(value, { stream: true });
           setRaw(accumulated);
+          setByteCount(accumulated.length);
           setCurrentFile(currentFileFrom(accumulated));
           setLastChunkAt(Date.now());
         }
@@ -399,6 +515,8 @@ export default function Studio({ user = null }: { user?: string | null }) {
 
         setError(null);
         setRaw("");
+        setStreamOpened(false);
+        setByteCount(0);
         setStartedAt(Date.now());
         setLastChunkAt(Date.now());
       }
@@ -448,9 +566,39 @@ export default function Studio({ user = null }: { user?: string | null }) {
   const busy = status === "streaming";
   const hasFiles = activeFiles.length > 0;
   // Recomputed each render; the 1-second interval (and every chunk) re-renders
-  // while streaming, so both move live.
+  // while streaming, so all of these move live.
   const elapsedSeconds = busy && startedAt !== null ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
+  const stallSeconds = lastChunkAt !== null ? Math.max(0, Math.floor((Date.now() - lastChunkAt) / 1000)) : 0;
   const waiting = busy && lastChunkAt !== null && Date.now() - lastChunkAt > 4000;
+
+  // Which step the build is on — read off the stream, never guessed.
+  const phase = phaseOf({ opened: streamOpened, bytes: byteCount, writing: currentFile !== null });
+  const phaseIndex = PHASE_ORDER.indexOf(phase);
+
+  // Files whose closing tag has arrived. `streamedFiles` deliberately includes
+  // the block still being written (so the preview fills as it grows), which is
+  // why completion is tracked separately rather than reusing `activeFiles`.
+  const completedFiles = useMemo(() => parseFiles(raw, { allowUnterminatedLast: false }), [raw]);
+
+  // The bar turns determinate once there is a real ratio to show — files
+  // finished against the files finished so far plus the one in flight. Before
+  // the first file lands there is no ratio, so it stays the honest "data is
+  // flowing" slide rather than inventing a percentage.
+  const barDeterminate = currentFile !== null && completedFiles.length > 0;
+  const barPercent = barDeterminate
+    ? Math.round((completedFiles.length / (completedFiles.length + 1)) * 100)
+    : 0;
+
+  const rateLimitOn = rateLimit !== null && rateLimit.limit !== null;
+
+  /** The limit the input asks for, clamped to what the API accepts. */
+  const draftLimit = (): number => {
+    const max = rateLimit?.max ?? 600;
+    const parsed = Number.parseInt(rateLimitDraft, 10);
+    if (!Number.isNaN(parsed) && parsed >= 1) return Math.min(parsed, max);
+    const fallback = rateLimit?.envLimit ?? rateLimit?.limit ?? 20;
+    return Math.min(Math.max(fallback, 1), max);
+  };
 
   return (
     <div className="shell">
@@ -556,6 +704,80 @@ export default function Studio({ user = null }: { user?: string | null }) {
                 aria-label="Studio access token"
                 onChange={(event) => saveToken(event.target.value)}
               />
+
+              <div className="settings-block">
+                <div className="settings-head">
+                  <span className="produced-head">Generation rate limit</span>
+                  <span className="topbar-spacer" />
+                  <label className="switch">
+                    <input
+                      type="checkbox"
+                      checked={rateLimitOn}
+                      disabled={!rateLimit || rateLimitBusy}
+                      aria-label="Limit generations per minute"
+                      onChange={(event) =>
+                        void applyRateLimit(
+                          event.target.checked
+                            ? { disabled: false, perMinute: draftLimit() }
+                            : { disabled: true },
+                        )
+                      }
+                    />
+                    <span>{rateLimit === null ? "…" : rateLimitOn ? "On" : "Off"}</span>
+                  </label>
+                </div>
+
+                <span className="hint">
+                  {rateLimit ? describeRateLimit(rateLimit) : "Reading the current setting…"}
+                </span>
+
+                {rateLimitOn && rateLimit ? (
+                  <div className="settings-inline">
+                    <input
+                      type="number"
+                      min={1}
+                      max={rateLimit.max}
+                      value={rateLimitDraft}
+                      spellCheck={false}
+                      disabled={rateLimitBusy}
+                      aria-label="Generations per minute"
+                      onChange={(event) => setRateLimitDraft(event.target.value)}
+                    />
+                    <span className="hint">per minute · max {rateLimit.max}</span>
+                    <span className="topbar-spacer" />
+                    <button
+                      type="button"
+                      className="ghost"
+                      disabled={rateLimitBusy || String(rateLimit.limit) === rateLimitDraft.trim()}
+                      onClick={() => void applyRateLimit({ disabled: false, perMinute: draftLimit() })}
+                    >
+                      Set
+                    </button>
+                  </div>
+                ) : null}
+
+                {rateLimit && rateLimit.override !== null ? (
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={rateLimitBusy}
+                    onClick={() => void applyRateLimit({ reset: true })}
+                  >
+                    Use the deployment default
+                  </button>
+                ) : null}
+
+                <span className="hint">
+                  Applies to every caller of this deployment. Off means no cap on how often an
+                  account may start a generation.
+                </span>
+
+                {rateLimitError ? (
+                  <div className="alert error" role="alert">
+                    <span>{rateLimitError}</span>
+                  </div>
+                ) : null}
+              </div>
             </div>
           ) : null}
 
@@ -661,28 +883,71 @@ export default function Studio({ user = null }: { user?: string | null }) {
             <div className="produced progress">
               <span className="produced-head">
                 <span className={`dot ${waiting ? "wait" : "live"}`} />
-                {currentFile
-                  ? `Writing ${currentFile.path} · ${kilobytes(currentFile.bytes)}`
-                  : hasFiles
-                    ? "Finishing files"
-                    : "Waiting for the first file block"}
+                {PHASE_LABEL[phase]}
+                {currentFile ? ` — ${currentFile.path} · ${kilobytes(currentFile.bytes)}` : ""}
                 <span className="topbar-spacer" />
-                <span className={waiting ? "progress-wait" : undefined}>
-                  {waiting ? `no data for ${clock(Math.floor((Date.now() - (lastChunkAt ?? 0)) / 1000))}` : "streaming"}
+                <span className={waiting ? "progress-wait" : "progress-clock"}>
+                  {waiting ? `no data for ${clock(stallSeconds)}` : `${clock(elapsedSeconds)} elapsed`}
                 </span>
               </span>
-              <div className="progress-bar" aria-hidden="true">
-                <div className={`progress-fill ${waiting ? "stalled" : ""}`} />
+
+              {/* Every step is a fact about the stream, not a timer. */}
+              <ol className="steps">
+                {PHASE_ORDER.map((step, index) => (
+                  <li
+                    key={step}
+                    className={`step ${
+                      index < phaseIndex ? "done" : index === phaseIndex ? "active" : "todo"
+                    }`}
+                  >
+                    <span className="step-mark">
+                      {index < phaseIndex ? "✓" : index === phaseIndex ? "•" : "·"}
+                    </span>
+                    {PHASE_LABEL[step]}
+                  </li>
+                ))}
+              </ol>
+
+              <div
+                className="progress-bar"
+                role="progressbar"
+                aria-label="Build progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={barDeterminate ? barPercent : undefined}
+              >
+                <div
+                  className={`progress-fill ${waiting ? "stalled" : ""} ${
+                    barDeterminate ? "determinate" : ""
+                  }`}
+                  style={barDeterminate ? { width: `${barPercent}%` } : undefined}
+                />
               </div>
-              {activeFiles.length > 0 ? (
+
+              {completedFiles.length > 0 || currentFile ? (
                 <div className="produced-list">
-                  {activeFiles.map((file) => (
-                    <span key={file.path} className="file-chip">
-                      {file.path}
+                  {completedFiles.map((file) => (
+                    <span key={file.path} className="file-chip done">
+                      ✓ {file.path}
+                      <em>{kilobytes(file.contents.length)}</em>
                     </span>
                   ))}
+                  {currentFile ? (
+                    <span className="file-chip writing">
+                      <span className={`dot ${waiting ? "wait" : "live"}`} />
+                      {currentFile.path}
+                      <em>{kilobytes(currentFile.bytes)}</em>
+                    </span>
+                  ) : null}
                 </div>
               ) : null}
+
+              <span className="hint">
+                {completedFiles.length > 0
+                  ? `${completedFiles.length} ${completedFiles.length === 1 ? "file" : "files"} written · `
+                  : ""}
+                {kilobytes(byteCount)} received
+              </span>
             </div>
           ) : hasFiles ? (
             <div className="produced">
