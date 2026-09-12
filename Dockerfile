@@ -12,10 +12,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     NPM_CONFIG_UPDATE_NOTIFIER=false
 
-# System deps: python3 + git for setup.sh cloning, curl for OmniRoute health.
+# System deps: python3 + git for setup.sh cloning, curl for OmniRoute health,
+# unzip for the Bun installer below (it decompresses the release archive and
+# aborts the build with "unzip is required to install bun" without it).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-pip python3-venv \
-      git curl ca-certificates tini bash \
+      git curl ca-certificates tini bash unzip \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && python3 -m pip install --no-cache-dir --upgrade pip --break-system-packages 2>/dev/null || python3 -m pip install --no-cache-dir --upgrade pip
