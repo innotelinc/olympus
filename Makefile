@@ -116,6 +116,9 @@ studio: ## Run the built Studio server
 studio-test: ## Run the Studio test suite (vitest — parser, gateway route, OIDC flow)
 	cd web/studio && npm test
 
+studio-export-dir: ## Make build-requests/ writable by the Studio container (Export to factory)
+	bash scripts/studio-export-dir.sh
+
 studio-check: ## Typecheck + test Studio (run make studio-install first)
 	cd web/studio && npx tsc --noEmit && npm test
 

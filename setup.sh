@@ -402,6 +402,31 @@ EOF
 }
 
 # ──────────────────────────────────────────────
+# 8. Studio's factory-export directory
+# ──────────────────────────────────────────────
+# "Export to factory" writes a spec into build-requests/ from inside the studio
+# container, which runs as uid 1001. The bind mount keeps host ownership, so a
+# root-owned directory answers 503 on every export. Settled here so a fresh
+# install never needs the manual chown — and reported rather than fatal when the
+# operator is not root, because the rest of setup is still useful to them.
+prepare_studio_export_dir() {
+  local script="$ROOT_DIR/scripts/studio-export-dir.sh"
+
+  if [[ ! -x "$script" ]]; then
+    info "scripts/studio-export-dir.sh not found — skipping Studio's factory-export directory"
+    return 0
+  fi
+
+  header "Studio Factory Export"
+  if "$script"; then
+    success "build-requests/ is writable by the Studio container"
+  else
+    warn "build-requests/ is not writable by the Studio container yet — see above;"
+    warn "exports will answer 503 until it is"
+  fi
+}
+
+# ──────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────
 main() {
@@ -422,6 +447,7 @@ main() {
   install_dependencies
   init_factory_wizard
   configure_telegram_token
+  prepare_studio_export_dir
   print_summary
 }
 
