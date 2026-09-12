@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -125,20 +125,42 @@ studio-e2e: ## Drive the real Authentik handshake (needs STUDIO_E2E_* vars; see 
 # Registers Studio's OIDC application on Cerulean's Authentik and registers the
 # local + public callbacks as redirect URIs. Idempotent: a re-run repairs an
 # existing provider (grant_types, missing redirect URIs) instead of skipping it.
-# Needs AUTHENTIK_URL/AUTHENTIK_TOKEN in .env — a token from Directory -> Tokens.
+# Needs AUTHENTIK_URL/AUTHENTIK_TOKEN in .env — see `make studio-token-rotate`.
 studio-oidc: ## Register/repair Studio's OIDC app in Cerulean Authentik (ARGS="--dry-run" to preview)
 	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi
 	python3 scripts/authentik-studio-app.py $(ARGS)
 
-studio-oidc-check: ## Confirm the OIDC issuer in .env answers discovery
+studio-oidc-check: ## Confirm the issuer answers discovery, and the credential is not lapsing
 	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi; \
 	issuer=$$(sed -n 's/^OIDC_ISSUER_URL=//p' .env | tail -1 | tr -d '"' | tr -d "'" | tr -d '[:space:]'); \
 	if [[ -z "$$issuer" ]]; then echo "OIDC_ISSUER_URL is not set in .env" >&2; exit 2; fi; \
 	url="$${issuer%/}/.well-known/openid-configuration"; \
 	code=$$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$$url" || true); \
 	if [[ "$$code" == "200" ]]; then echo "discovery: ok — $$url"; else echo "discovery: HTTP $$code from $$url" >&2; exit 1; fi
+	@python3 scripts/authentik-studio-token.py --check $(ARGS)
 
-vault-bootstrap: ## Store this stack's secret in Cerulean Vault (needs VAULT_ADDR + VAULT_TOKEN)
+studio-token-check: ## Report the registration credential's expiry (exit 2 once it is lapsing)
+	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi
+	python3 scripts/authentik-studio-token.py --check $(ARGS)
+
+# Mints the credential in the Authentik shell rather than through the REST API.
+# Authentik 2026.8 forces `expires` to the tenant's default_token_duration for
+# every api-intent token (minutes=30 on Cerulean), so a REST-created credential
+# would die every half hour; and PATCHing a token re-parents it to the caller,
+# which is how an administrator credential gets mistaken for this one. The host
+# is a parameter because this repository stores neither its name nor a key.
+studio-token-rotate: ## Rotate the registration credential (needs AUTHENTIK_HOST=<host running cerulean-authentik>)
+	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi; \
+	if [[ -z "$(AUTHENTIK_HOST)" ]]; then \
+		echo "set AUTHENTIK_HOST=<host running cerulean-authentik>, e.g. make studio-token-rotate AUTHENTIK_HOST=10.0.0.5" >&2; \
+		echo "the credential is rebuilt by running a program in that container's shell; see docs/stack.md" >&2; \
+		exit 2; \
+	fi
+	python3 scripts/authentik-studio-token.py --snippet $(ARGS) \
+		| ssh $${AUTHENTIK_SSH_USER:-root}@$(AUTHENTIK_HOST) 'docker exec -i cerulean-authentik ak shell' \
+		| python3 scripts/authentik-studio-token.py --store-stdin $(ARGS)
+
+vault-bootstrap: ## Store this stack's password in Cerulean Vault (AUTHENTIK_* are written too when set)
 	python3 scripts/vault-bootstrap.py
 
 vault-renew: ## Renew this stack's scoped Vault token so it cannot lapse (--check to report only)
