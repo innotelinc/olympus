@@ -87,6 +87,11 @@ services:
       # listed group only, everyone else gets 403.
       OIDC_ALLOWED_GROUPS: ${OIDC_ALLOWED_GROUPS:-}
       STUDIO_SESSION_SECRET: ${STUDIO_SESSION_SECRET:-}
+      # Saved-app library. Without this volume the store lives in the container
+      # and every app disappears on the next image build.
+      STUDIO_DATA_DIR: ${STUDIO_DATA_DIR:-/app/data/studio}
+    volumes:
+      - studio-data:/app/data
     ports:
       - "${STUDIO_PORT:-3001}:3001"
     extra_hosts:
@@ -170,6 +175,8 @@ services:
 volumes:
   olympus-builds:
   omniroute-node-modules:
+  # Studio's saved apps — per Authentik identity, one JSON file each.
+  studio-data:
 
 networks:
   default:

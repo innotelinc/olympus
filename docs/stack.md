@@ -45,7 +45,7 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 | `scripts/bootstrap.sh` + `scripts/omniroute-vault.sh` | bash + curl + OmniRoute CLI | One-command clone-to-ready and Vault-backed gateway launcher |
 | Telegram interface | Hermes 3 via OpenRouter Free through OmniRoute | Interactive bot that parses intent into Archon DAG runs |
 | Coding brain | Codex (`auto/coding`) via OmniRoute Responses API (`wire_api = "responses"`) | Repository code modifications dispatched by the factory consumer + harness E2E (`omniroute launch-codex -p auto-coding`) |
-| `web/studio/` | Next.js (App Router) + Authentik OIDC | Browser vibe-coding surface — prompt in, runnable app out, gateway key held server-side |
+| `web/studio/` | Next.js (App Router) + Authentik OIDC | Browser vibe-coding surface — prompt in, runnable app out, gateway key held server-side; saved apps are scoped per identity (OIDC subject) on the stack's own volume |
 
 > **Scope of this checkout.** This repository is the deployment surface. The
 > factory state machine, the harness, and the Archon workflow definitions

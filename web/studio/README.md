@@ -31,8 +31,10 @@ and never appears in the client bundle.
 | Gateway config, prompt contract, SSE parsing | `lib/omniroute.ts` |
 | File-block parsing, asset inlining | `lib/files.ts` |
 | Repo `.env` discovery | `lib/env.ts` |
-| OIDC: PKCE, id_token verification, sessions | `lib/auth.ts` |
+| OIDC: PKCE, id_token verification, sessions, the shared request gate | `lib/auth.ts` |
 | Sign-in / callback / sign-out routes | `app/api/auth/{login,callback,logout}/route.ts` |
+| Saved-app library (per identity, on disk) | `lib/projects.ts` |
+| Library routes | `app/api/projects/route.ts`, `app/api/projects/[id]/route.ts` |
 | Test suite + mock Authentik | `tests/` |
 | Container image | `Dockerfile` |
 
@@ -69,8 +71,9 @@ failing obscurely.
 | `OMNIROUTE_MODEL` | `auto/coding` | Model routed through the gateway. |
 | `OMNIROUTE_CHAT_PATH` | `/chat/completions` | Override only if the gateway exposes the route elsewhere. |
 | `STUDIO_PORT` | `3001` | Host port for the dev server. |
-| `STUDIO_ACCESS_TOKEN` | — | When set, `/api/generate` requires an `x-studio-token` header. Empty = open. |
-| `STUDIO_PUBLIC_HOST` | — | The hostname Cerulean points at the edge. |
+| `STUDIO_ACCESS_TOKEN` | — | When set, every route requires an `x-studio-token` header. Empty = open. |
+| `STUDIO_PUBLIC_HOST` | — | Public host the edge serves Studio on. Read by `make studio-oidc`, which registers `https://<host>/api/auth/callback` as a redirect URI; Studio itself derives the callback from the request. |
+| `STUDIO_DATA_DIR` | `<repo>/data/studio` | Where saved apps live. The compose service points it at a named volume. |
 
 Placeholders from `.env.example` (`change-me…`) count as unset, so an unedited
 template fails loudly instead of sending a bogus key.
@@ -107,22 +110,27 @@ what keeps half-written files out of the preview.
 
 Identity belongs to Authentik (TrustOps). When it is configured, every request
 must carry a valid session; when it is not, Studio runs as a single-operator
-tool. Nothing is stored server-side.
+tool. The only thing Studio keeps is the saved-app library, and it is scoped to
+whoever is signed in — see [Saved apps](#saved-apps).
 
 Set these (all present in `.env.example`) to switch it on:
 
 | Variable | Notes |
 | --- | --- |
-| `OIDC_ISSUER_URL` | e.g. `https://auth.cerulean.innotel.us/application/o/studio/` |
-| `OIDC_CLIENT_ID` | The Authentik application's client ID |
+| `OIDC_ISSUER_URL` | Studio's application on the shared Cerulean Authentik — the path is the application slug: `https://auth.cerulean.innotel.us/application/o/studio/` |
+| `OIDC_CLIENT_ID` | The Authentik application's client ID (`studio`) |
 | `OIDC_CLIENT_SECRET` | Leave as the `change-me` placeholder and auth stays disabled |
+| `AUTHENTIK_URL` | Registration only — Authentik's base URL. Not read by Studio at runtime |
+| `AUTHENTIK_TOKEN` | Registration only — Authentik API token (Directory → Tokens) for `make studio-oidc` |
 | `OIDC_REDIRECT_URI` | Optional — derived from the request (honors `x-forwarded-proto`/`-host`) when unset |
 | `OIDC_SCOPES` | Default `openid email profile` |
 | `OIDC_ALLOWED_GROUPS` | Comma-separated group allow-list. Empty = any authenticated user |
 | `STUDIO_SESSION_SECRET` | Signs the session + flow cookies. Empty = derived from the client secret |
 
-Register the redirect URI in Authentik as `<host>/api/auth/callback`, and enable
-the **Authorization Code + PKCE** flow.
+Register the redirect URI in Authentik as `<host>/api/auth/callback` with the
+**Authorization Code + PKCE** flow enabled — `make studio-oidc` does both (it
+reads `.env` and registers the local callback plus `STUDIO_PUBLIC_HOST`).
+`make studio-oidc-check` then confirms the configured issuer answers discovery.
 
 What the implementation does:
 
@@ -161,10 +169,20 @@ OIDC_ALLOWED_GROUPS=Cerulean,authentik Agent-Users
 
 Registering an application and provider changes your identity provider, so it is
 a deliberate, explicit step: `scripts/authentik-studio-app.py` does it for you.
-It takes an Authentik API token from `AUTHENTIK_TOKEN`, supports `--dry-run`,
-and is idempotent — a re-run repairs an existing provider rather than
-duplicating it. Two details it exists to get right, both learned against
-Authentik 2026.8:
+
+```bash
+make studio-oidc ARGS=--dry-run   # show what would change
+make studio-oidc                 # create or repair
+```
+
+It takes the Authentik base URL and API token from `AUTHENTIK_URL` /
+`AUTHENTIK_TOKEN` in `.env` (real environment wins over the file, so CI can drive
+it), derives the application slug and client ID from `OIDC_ISSUER_URL` /
+`OIDC_CLIENT_ID`, and registers the local callback plus
+`STUDIO_PUBLIC_HOST`'s HTTPS callback. It is idempotent, and a re-run *repairs*
+rather than skipping: it adds a redirect URI that was never registered and
+PATCHes `grant_types` if it is empty. Three details it exists to get right, all
+learned against Authentik 2026.8:
 
 - **`grant_types` is not defaulted.** An omitted `grant_types` lands as `[]`,
   and `/authorize` then fails with `Invalid grant_type for provider`. The script
@@ -173,11 +191,61 @@ Authentik 2026.8:
 - **The signing-key endpoint moved** from `/api/v3/core/certificatekeypairs/` to
   `/api/v3/crypto/certificatekeypairs/`. The script tries both, and treats an
   absent keypair as non-fatal.
+- **A redirect URI that was never registered fails only at `/authorize`**, when
+  someone actually tries to sign in — and every name Studio answers on needs its
+  own entry, because the app derives the callback per request instead of pinning
+  one host. So the script unions the configured URIs into the provider rather
+  than creating them once and forgetting them.
 
 Verified end to end against the live Authentik at `auth.cerulean.innotel.us`
 (application `studio`, provider pk 25): the full authorization-code + PKCE
 handshake completes, `id_token` verification passes, and a replayed code, a
 tampered `state`, and a missing flow cookie are each rejected with `401`.
+
+## Saved apps
+
+Generating used to be browser-only: the files lived in React state, so a reload
+lost the app. Studio now keeps a library, and who can see what is the identity's
+job — the same Cerulean Authentik subject that gates the request decides which
+directory the app is written to.
+
+```
+session cookie ──▶ authorizeRequest ──▶ session.sub ──▶ sha256 ──▶ u-<32 hex>/
+                        │                                            │
+                        └─ no OIDC configured ──▶ single-operator/  └─▶ <id>.json
+```
+
+- **Keyed by the subject, not by a client input.** `sub` is hashed to a fixed
+  length hex name before it is ever joined onto a path, so a claim can never
+  become `../` — the route resolves the namespace from the session and there is
+  no parameter by which one identity could ask for another's library.
+- **No database.** One JSON file per app, written to a temp file and renamed, so
+  a crash mid-write cannot truncate the previous version. A corrupt file is
+  skipped instead of breaking the list.
+- **Bounded.** 200 apps per identity, 40 files and 2 MB per app, 200 KB per file.
+  Over the cap is a `413`, not a silent truncation.
+- **When OIDC is off** there is no identity, so there is exactly one shared
+  library — the same single-operator posture as the rest of the app.
+
+| Route | Does |
+| --- | --- |
+| `GET /api/projects` | List this identity's apps, newest first |
+| `POST /api/projects` | Create, or update in place when `id` is supplied |
+| `GET /api/projects/<id>` | The app, with its files and the prompt that produced it |
+| `DELETE /api/projects/<id>` | Remove it |
+
+Every one of those goes through the same `authorizeRequest` gate as
+`/api/generate` — identity first, then the optional `STUDIO_ACCESS_TOKEN`. The
+gate lives in `lib/auth.ts` rather than in each handler precisely so a new route
+cannot forget half of it.
+
+In the UI the composer carries a **Saved apps** panel: Save (or Update) with a
+title, click an app to reopen it, `×` to delete. Revising a saved app re-saves
+it automatically, so reopening never silently reverts the last change.
+
+In the container the library is the `studio-data` named volume, mounted at
+`/app/data` and pointed at by `STUDIO_DATA_DIR`. `docker compose down` keeps it;
+`down -v` removes it.
 
 ## Security posture
 
@@ -186,6 +254,9 @@ tampered `state`, and a missing flow cookie are each rejected with `401`.
   Studio's DOM, cookies, or storage. Requests are sent with
   `referrerPolicy="no-referrer"`.
 - **Server-side credentials.** The gateway key never reaches the browser.
+- **Per-identity storage.** Saved apps are reachable only through the session's
+  own subject, and the routes answer `cache-control: no-store` so an edge cannot
+  serve one identity's library to another.
 - **Bounded input.** Prompt length, prior-file count, and per-file size are
   capped in the route handler; upstream error text is truncated before it is
   echoed back.
@@ -219,9 +290,11 @@ end from inside the container:
 
 ## Deploying behind Cerulean + NPM Edge
 
-Cerulean owns DNS and TLS and NPM Edge fronts the host; point
-`STUDIO_PUBLIC_HOST` at the Studio service and let the edge terminate TLS. Studio
-emits a standalone build, so it needs no Node toolchain on the host.
+Cerulean owns DNS and TLS and NPM Edge fronts the host; set
+`STUDIO_PUBLIC_HOST` to the host the edge serves Studio on and run
+`make studio-oidc` once so that host's callback is registered, then let the edge
+terminate TLS. Studio emits a standalone build, so it needs no Node toolchain on
+the host.
 
 The `studio` compose service is wired up. Because Studio derives the callback
 from the request when `OIDC_REDIRECT_URI` is unset, the hostname the edge
@@ -238,7 +311,7 @@ sitting wedged. Docker never restarts an unhealthy container on its own.
 make studio-test      # or: cd web/studio && npm test
 ```
 
-115 tests across five files, no network required:
+143 tests across seven files, no network required:
 
 | File | Covers |
 | --- | --- |
@@ -247,6 +320,8 @@ make studio-test      # or: cd web/studio && npm test
 | `tests/env.test.ts` | Repo `.env` discovery, nearest-file precedence, boundary stop, quoting, malformed lines, idempotence |
 | `tests/route.test.ts` | Every `/api/generate` path: 400/413/503/401/502, auth gating, streaming, bearer header, prior-file forwarding |
 | `tests/auth.test.ts` | Full OIDC flow against a mock Authentik — PKCE, state, nonce, JWKS signature verification (RS256 + ES256), claim rejection, session cookies, login/callback routes, and the group policy (allow, deny, no-`groups` claim, per-request re-check) |
+| `tests/projects.test.ts` | The library store: subject hashing and hostile subjects, create/update/list/delete, cross-identity isolation, traversal-shaped ids and file paths, size caps, corrupt files |
+| `tests/projects-route.test.ts` | The library routes: session and access-token gating, per-identity separation through real signed cookies, round-trip, `404` for unknown/hostile ids, `400`/`413`, `no-store` |
 
 The mock provider (`tests/helpers/mock-oidc.ts`) serves a real discovery
 document, JWKS, and token endpoint over localhost and mints genuinely signed
@@ -288,7 +363,7 @@ test ran. It passes both on a fully configured `.env` and with no `.env` at all.
 Checked on the current tree:
 
 - `npx tsc --noEmit` — clean. `next build` — clean, no tracer warnings.
-- `npm test` — 115 passing.
+- `npm test` — 143 passing.
 - `GET /` — `200`; `/api/generate` — `400` empty prompt, `400` malformed body,
   `413` oversized prompt, `503` no gateway key, `401` unauthenticated/unauthorized.
 - **Full OIDC flow against live Authentik**, driven both by the local server and

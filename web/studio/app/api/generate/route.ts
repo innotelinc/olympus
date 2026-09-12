@@ -6,8 +6,7 @@ import {
   sseToTextStream,
   type PriorFile,
 } from "@/lib/omniroute";
-import { loadRepoEnv } from "@/lib/env";
-import { isAuthorized, readAuthConfig, readSession } from "@/lib/auth";
+import { authorizeRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,26 +58,10 @@ export async function POST(request: Request): Promise<Response> {
     return fail(`That instruction is too long (${prompt.length} characters, limit ${MAX_PROMPT_CHARS}).`, 413);
   }
 
-  // Identity first: when OIDC is configured, only a signed-in operator builds.
-  const authConfig = readAuthConfig();
-  if (authConfig) {
-    const session = readSession(request.headers.get("cookie"), authConfig);
-    if (!session) return fail("Sign in to build with Studio.", 401);
-
-    // Re-checked per request from the session's own groups, so tightening
-    // OIDC_ALLOWED_GROUPS applies at once rather than at session expiry.
-    if (!isAuthorized(session, authConfig)) {
-      return fail("Your account is not in a group allowed to use Studio.", 403);
-    }
-  }
-
-  // Optional shared gate. Set STUDIO_ACCESS_TOKEN to require a header; leave it
-  // unset on a trusted network or behind an identity-aware proxy.
-  loadRepoEnv();
-  const accessToken = process.env.STUDIO_ACCESS_TOKEN?.trim();
-  if (accessToken && request.headers.get("x-studio-token") !== accessToken) {
-    return fail("Studio requires an access token. Add it under Settings.", 401);
-  }
+  // Identity first, then the optional shared token — one gate, shared with the
+  // saved-app routes so the two cannot drift apart.
+  const gate = authorizeRequest(request);
+  if (!gate.ok) return gate.response;
 
   const config = readConfig();
   if (isPlaceholderSecret(config.apiKey)) {

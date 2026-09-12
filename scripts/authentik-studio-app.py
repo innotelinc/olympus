@@ -12,15 +12,27 @@ Directory -> Tokens (or via the `ak` CLI), then:
 
 Options:
     --redirect-uri URL   what Studio will be reachable at (repeatable)
-    --client-id ID       default: studio
-    --name NAME          provider + application name (default: Studio)
-    --slug SLUG          application slug (default: studio)
+    --client-id ID       default: OIDC_CLIENT_ID from .env, else the slug
+    --name NAME          provider + application name (default: capitalised slug)
+    --slug SLUG          application slug (default: from OIDC_ISSUER_URL, else studio)
+    --env-file PATH      configuration to read (default: repo-root .env)
     --insecure           skip TLS verification (self-signed lab certificates)
 
+Configuration falls back to the repo-root `.env` — the same file Studio reads —
+so `make studio-oidc` needs no exports. Real process env wins over the file, so
+CI can drive it without a file on disk.
+
+The default redirect URIs are the local dev callback plus, when
+`STUDIO_PUBLIC_HOST` is set, that host's HTTPS callback. Studio derives its
+callback from the incoming request, so every name it is served on has to be
+registered here or `/authorize` rejects the sign-in.
+
 The script is idempotent: if the provider or application already exists it
-reports that instead of creating a duplicate. It resolves the authorization
-flow, invalidation flow, scope mappings, and signing key from the instance
-rather than assuming fixed identifiers.
+reports that instead of creating a duplicate, and it PATCHes what is missing —
+an empty `grant_types` and any unregistered redirect URI — rather than skipping
+a provider that is not actually usable. It resolves the authorization flow,
+invalidation flow, scope mappings, and signing key from the instance rather than
+assuming fixed identifiers.
 """
 from __future__ import annotations
 
@@ -32,14 +44,49 @@ import ssl
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 from urllib.parse import urlencode
 
 DEFAULT_SCOPES = ["openid", "email", "profile"]
+DEFAULT_STUDIO_PORT = "3001"
 AUTHORIZATION_FLOW_SLUGS = [
     "default-provider-authorization-implicit-consent",
     "default-provider-authorization-explicit-consent",
 ]
 INVALIDATION_FLOW_SLUGS = ["default-provider-invalidation-flow", "default-invalidation-flow"]
+
+
+def load_env_file(path: Path) -> dict[str, str]:
+    """Read `KEY=value` pairs from a .env, skipping comments and blank lines."""
+    values: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return values
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        values[key] = value.strip().strip('"').strip("'")
+
+    return values
+
+
+def default_redirect_uris(setting) -> list[str]:
+    """Local callback always; the public host's callback when one is configured."""
+    port = setting("STUDIO_PORT", DEFAULT_STUDIO_PORT)
+    uris = [f"http://localhost:{port}/api/auth/callback"]
+
+    host = setting("STUDIO_PUBLIC_HOST")
+    if host:
+        uris.append(f"https://{host}/api/auth/callback")
+
+    return uris
 
 
 class Api:
@@ -128,25 +175,50 @@ def pick_signing_key(api: Api) -> dict | None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Register the Studio OIDC provider in Authentik.")
     parser.add_argument("--redirect-uri", action="append", default=[], help="repeatable")
-    parser.add_argument("--client-id", default="studio")
-    parser.add_argument("--name", default="Studio")
-    parser.add_argument("--slug", default="studio")
+    parser.add_argument("--client-id", default="")
+    parser.add_argument("--name", default="")
+    parser.add_argument("--slug", default="")
     parser.add_argument("--insecure", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--api-base", default=os.environ.get("AUTHENTIK_URL", ""))
-    parser.add_argument("--token", default=os.environ.get("AUTHENTIK_TOKEN", ""))
+    parser.add_argument("--api-base", default="")
+    parser.add_argument("--token", default="")
+    parser.add_argument("--env-file", default="")
     args = parser.parse_args()
 
-    if not args.api_base:
+    env_path = Path(args.env_file) if args.env_file else Path(__file__).resolve().parent.parent / ".env"
+    file_values = load_env_file(env_path)
+
+    def setting(name: str, fallback: str = "") -> str:
+        return os.environ.get(name) or file_values.get(name) or fallback
+
+    api_base = args.api_base or setting("AUTHENTIK_URL")
+    token = args.token or setting("AUTHENTIK_TOKEN")
+
+    if not api_base:
         sys.exit("Set AUTHENTIK_URL (e.g. https://auth.cerulean.innotel.us) or pass --api-base.")
-    if not args.token:
+    if not token:
         sys.exit("Set AUTHENTIK_TOKEN or pass --token. Create it in Authentik: Directory -> Tokens.")
 
-    redirect_uris = args.redirect_uri or ["http://localhost:3001/api/auth/callback"]
-    api = Api(args.api_base, args.token, args.insecure)
+    # The issuer path IS the application slug, so it is the honest default, and
+    # the client id defaults to the slug too — that is how the app is registered
+    # for a fresh deployment. These are resolved back onto `args` because the
+    # rest of this function reads them by that name.
+    configured_issuer = setting("OIDC_ISSUER_URL").rstrip("/")
+    args.slug = args.slug or (configured_issuer.rsplit("/", 1)[-1] if configured_issuer else "studio")
+    args.client_id = args.client_id or setting("OIDC_CLIENT_ID", args.slug)
+    args.name = args.name or args.slug.capitalize()
+
+    redirect_uris = args.redirect_uri or default_redirect_uris(setting)
+    api = Api(api_base, token, args.insecure)
 
     print(f"Authentik: {api.base}")
+    if file_values:
+        print(f"  env file:  {env_path}")
     print(f"  provider/application name: {args.name} (slug: {args.slug})")
+    print(f"  client id: {args.client_id}")
+    print("  redirect URIs:")
+    for uri in redirect_uris:
+        print(f"    {uri}")
 
     existing_providers = [p for p in api.results("/providers/oauth2/") if p.get("name") == args.name]
     existing_apps = [a for a in api.results("/core/applications/", slug=args.slug) if a.get("slug") == args.slug]
@@ -187,24 +259,42 @@ def main() -> int:
 
     if existing_providers:
         provider = existing_providers[0]
-        current = set(provider.get("grant_types") or [])
+        current_grants = set(provider.get("grant_types") or [])
+        current_uris = [
+            entry["url"]
+            for entry in (provider.get("redirect_uris") or [])
+            if isinstance(entry, dict) and entry.get("url")
+        ]
+        missing_uris = [uri for uri in redirect_uris if uri not in current_uris]
 
-        if "authorization_code" in current:
-            print(f"\n  provider already exists (pk {provider['pk']}) and is correctly configured")
+        # Two repairs, because both fail silently at /authorize: an omitted
+        # grant_types lands as [] ("Invalid grant_type for provider"), and a
+        # redirect_uri that was never registered is refused the moment Studio is
+        # reachable under a new host — which is exactly what happens at launch.
+        # An existing-but-unusable provider is worse than a missing one, so a
+        # re-run repairs it instead of skipping it.
+        patch: dict = {}
+        if "authorization_code" not in current_grants:
+            patch["grant_types"] = ["authorization_code", "refresh_token"]
+        if missing_uris:
+            patch["redirect_uris"] = [
+                {"matching_mode": "strict", "url": uri} for uri in [*current_uris, *missing_uris]
+            ]
+
+        if not patch:
+            print(f"\n  provider already exists (pk {provider['pk']}) and is fully configured")
             print("  NOTE: its client_secret is not retrievable. Rotate it in the UI if you need it.")
         elif args.dry_run:
-            print(f"\n  provider exists (pk {provider['pk']}) but grant_types={sorted(current)}")
-            print("  would PATCH grant_types -> ['authorization_code', 'refresh_token']")
+            print(f"\n  provider exists (pk {provider['pk']}) — would PATCH:")
+            for key, value in patch.items():
+                print(f"    {key}: {value}")
         else:
-            # An existing-but-broken provider is worse than a missing one, so a
-            # re-run repairs it instead of skipping it.
-            repaired = api.request(
-                "PATCH",
-                f"/providers/oauth2/{provider['pk']}/",
-                {"grant_types": ["authorization_code", "refresh_token"]},
-            )
-            print(f"\n  provider existed with grant_types={sorted(current)} — patched to {repaired.get('grant_types')}")
-            print("  (without this, Authentik answers 'Invalid grant_type for provider' at /authorize)")
+            repaired = api.request("PATCH", f"/providers/oauth2/{provider['pk']}/", patch)
+            if "grant_types" in patch:
+                print(f"\n  grant_types was {sorted(current_grants)} — patched to {repaired.get('grant_types')}")
+                print("  (without this, Authentik answers 'Invalid grant_type for provider' at /authorize)")
+            if missing_uris:
+                print(f"  registered redirect URI(s): {', '.join(missing_uris)}")
     elif args.dry_run:
         provider = None
         print("\n  would create provider with redirect_uris:")
@@ -238,11 +328,11 @@ def main() -> int:
         print(f"  created application '{args.name}' (slug {args.slug})")
 
     issuer = f"{api.base}/application/o/{args.slug}/"
-    print("\nSet these for Studio:")
+    print("\nSet these in .env for Studio:")
     print(f"  OIDC_ISSUER_URL={issuer}")
     print(f"  OIDC_CLIENT_ID={args.client_id}")
-    print("  OIDC_CLIENT_SECRET=<the value above>")
-    print(f"  OIDC_REDIRECT_URI={redirect_uris[0]}")
+    print("  OIDC_CLIENT_SECRET=<the value above, or the one already configured>")
+    print("  OIDC_REDIRECT_URI=            # empty — Studio derives the callback per request")
     print(f"\nVerify discovery: {issuer}.well-known/openid-configuration")
 
     if args.dry_run:
