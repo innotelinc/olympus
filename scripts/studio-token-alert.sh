@@ -40,14 +40,36 @@ env_value() {
     printf '%s' "$value"
 }
 
+is_placeholder() {
+    # The same shapes the Python tooling treats as unset. `.env.example` ships
+    # placeholders, and an export can carry one too — so a value counts only if
+    # it is non-empty and looks real, whichever layer it came from.
+    local lowered="${1,,}"
+    case "$lowered" in
+        *change-me*|*change_me*|*changeme*|*paste_your*|*placeholder*|*your-*|*xxx*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+credential_value() {
+    # $1 = variable name. Process env wins over .env — unless it is empty or a
+    # placeholder, in which case the file is consulted. A `change-me` export
+    # must not shadow a real value in .env, and a real export must win over a
+    # stale file.
+    local env_val="${!1:-}"
+    if [[ -n "$env_val" ]] && ! is_placeholder "$env_val"; then
+        printf '%s' "$env_val"
+        return
+    fi
+    local file_val
+    file_val="$(env_value "$1")"
+    if [[ -n "$file_val" ]] && ! is_placeholder "$file_val"; then
+        printf '%s' "$file_val"
+    fi
+}
+
 telegram_configured() {
-    local token chat
-    token="${TELEGRAM_BOT_TOKEN:-$(env_value TELEGRAM_BOT_TOKEN)}"
-    chat="${TELEGRAM_CHAT_ID:-$(env_value TELEGRAM_CHAT_ID)}"
-    [[ -n "$token" && -n "$chat" ]] || return 1
-    case "$token" in *change-me*|*change_me*|*PASTE_YOUR*) return 1 ;; esac
-    case "$chat" in *PASTE_YOUR*|*change-me*) return 1 ;; esac
-    return 0
+    [[ -n "$(credential_value TELEGRAM_BOT_TOKEN)" && -n "$(credential_value TELEGRAM_CHAT_ID)" ]]
 }
 
 send_telegram() {
@@ -56,8 +78,8 @@ send_telegram() {
     # receiver without touching the real bot.
     local base token chat
     base="${TELEGRAM_API_BASE:-https://api.telegram.org}"
-    token="${TELEGRAM_BOT_TOKEN:-$(env_value TELEGRAM_BOT_TOKEN)}"
-    chat="${TELEGRAM_CHAT_ID:-$(env_value TELEGRAM_CHAT_ID)}"
+    token="$(credential_value TELEGRAM_BOT_TOKEN)"
+    chat="$(credential_value TELEGRAM_CHAT_ID)"
 
     ALERT_TEXT="$1" ALERT_BASE="$base" ALERT_TOKEN="$token" ALERT_CHAT="$chat" python3 - <<'PY'
 import json
@@ -95,7 +117,7 @@ alert() {
 
     if telegram_configured; then
         if send_telegram "$(printf '[%s] Studio registration credential %s\n\n%s\n\n%s' "$HOST" "$verdict" "$output" "$FIX_HINT")"; then
-            say "alerted: Telegram chat ${TELEGRAM_CHAT_ID:-$(env_value TELEGRAM_CHAT_ID)}"
+            say "alerted: Telegram chat …$(credential_value TELEGRAM_CHAT_ID | tail -c 4)"
         else
             say "telegram delivery FAILED — journal entry is the only record; fix the channel or the credential"
         fi
@@ -123,6 +145,18 @@ fi
 # --api-base) pass straight through.
 output="$(python3 "$REPO_ROOT/scripts/authentik-studio-token.py" --check "$@" 2>&1)"
 rc=$?
+
+# An exported AUTHENTIK_TOKEN that is a vault:// reference without its #key
+# fragment is malformed by definition, and the process env beats .env — so a
+# caller with such an export would blind the check even though the file is
+# fine. Retry once from the file in that case; a real export still wins.
+if [[ $rc -eq 1 && -n "${AUTHENTIK_TOKEN:-}" \
+      && "${AUTHENTIK_TOKEN:-}" == vault://* && "${AUTHENTIK_TOKEN:-}" != *#* ]]; then
+    say "exported AUTHENTIK_TOKEN is a vault:// reference missing #key — retrying from .env"
+    output="$(env -u AUTHENTIK_TOKEN -u AUTHENTIK_URL \
+        python3 "$REPO_ROOT/scripts/authentik-studio-token.py" --check "$@" 2>&1)"
+    rc=$?
+fi
 
 case "$rc" in
     0)
