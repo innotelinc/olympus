@@ -35,6 +35,7 @@ and never appears in the client bundle.
 | Sign-in / callback / sign-out routes | `app/api/auth/{login,callback,logout}/route.ts` |
 | Saved-app library (per identity, on disk) | `lib/projects.ts` |
 | Library routes | `app/api/projects/route.ts`, `app/api/projects/[id]/route.ts` |
+| Factory handoff — spec assembly + the guarded writer | `lib/factory-spec.ts`, `app/api/projects/[id]/export/route.ts` |
 | Test suite + mock Authentik | `tests/` |
 | Container image | `Dockerfile` |
 
@@ -303,6 +304,8 @@ session cookie ──▶ authorizeRequest ──▶ session.sub ──▶ sha256
 | `POST /api/projects` | Create, or update in place when `id` is supplied |
 | `GET /api/projects/<id>` | The app, with its files and the prompt that produced it |
 | `DELETE /api/projects/<id>` | Remove it |
+| `GET /api/projects/<id>/export` | The factory spec for that app, as a markdown download |
+| `POST /api/projects/<id>/export` | Write it into `build-requests/` — `409` unless `{ "overwrite": true }` |
 
 Every one of those goes through the same `authorizeRequest` gate as
 `/api/generate` — identity first, then the optional `STUDIO_ACCESS_TOKEN`. The
@@ -316,6 +319,39 @@ it automatically, so reopening never silently reverts the last change.
 In the container the library is the `studio-data` named volume, mounted at
 `/app/data` and pointed at by `STUDIO_DATA_DIR`. `docker compose down` keeps it;
 `down -v` removes it.
+
+## Export to the factory
+
+Studio builds apps in the browser; the factory builds apps from
+`build-requests/*.md`. **Export to factory** joins them: it writes a spec named
+after the app into that directory, in the shape `factory/APP_SPEC_TEMPLATE.md`
+declares, so a build you liked becomes factory input instead of stopping at the
+preview.
+
+The spec is assembled from the build itself — the instruction, the file set,
+their sizes — with **no second model call**. The same app always produces the
+same bytes, which is what makes the export reviewable and diffable rather than a
+second generation you have to read from scratch. It carries the template's four
+headings (`Core Purpose`, `Tech Stack`, `Key Features & Pages`, `Verification
+Criteria`) plus a bounded appendix holding the files Studio produced, so the
+factory *continues* the app rather than restarting it.
+
+| | |
+| --- | --- |
+| Where it lands | `build-requests/<slug>.md` — `STUDIO_FACTORY_REQUESTS_DIR`, else `build-requests/` at the repository root (under compose, the bind mount at `/app/build-requests`) |
+| Filename | The title, lowercased and dashed, capped at 60 chars — generated, never parsed from input |
+| Existing spec | `409`; the UI asks before replacing it, and `POST { "overwrite": true }` replaces it outright |
+| Too large to inline | Past 60 KB the appendix lists the files without their contents |
+| Next step | `make app SPEC=build-requests/<slug>.md` — or commit it: a push touching `build-requests/*.md` triggers `olympus-app-builder.yml` |
+
+The build is saved before it is exported, so the spec can never describe an older
+build than the one on screen. `GET` returns the same bytes as a download, so the
+handoff still works on a deployment that never mounted the directory.
+
+> **Permissions.** Studio runs as uid 1001, so the bind mount has to be writable
+> by that uid — `chown 1001:1001 build-requests` once. Without it the export
+> answers `503` with that instruction in the message instead of an opaque
+> failure.
 
 ## Security posture
 
@@ -389,7 +425,7 @@ sitting wedged. Docker never restarts an unhealthy container on its own.
 make studio-test      # or: cd web/studio && npm test
 ```
 
-190 tests across ten files, no network required:
+224 tests across twelve files, no network required:
 
 | File | Covers |
 | --- | --- |
@@ -402,6 +438,8 @@ make studio-test      # or: cd web/studio && npm test
 | `tests/projects-route.test.ts` | The library routes: session and access-token gating, per-identity separation through real signed cookies, round-trip, `404` for unknown/hostile ids, `400`/`413`, `no-store` |
 | `tests/ratelimit.test.ts` | Env parsing (junk and odd values, the disabled set, the hard cap), fixed-window accounting, identity isolation, and the route's `429` + `retry-after` — including that a rejected request consumes no budget |
 | `tests/ratelimit-settings.test.ts` | The runtime override: disk round-trip, precedence over `.env`, disable/reset, corrupt files reading as "no override", and the settings endpoint's gating and validation |
+| `tests/factory-spec.test.ts` | The spec: slug safety from hostile titles, the template's headings, stack and verification inference, the bounded appendix, determinism, and the writer's refusal to clobber, its traversal containment, and its `503` message |
+| `tests/export-route.test.ts` | The export route: attachment headers, gating and `404`s, the write into `build-requests/`, `409` then overwrite, a hostile title staying inside the directory, `503` when unwritable, and the download path surviving that |
 | `tests/page.test.ts` | The host split: the root host shows the landing screen, the studio host redirects to the provider, a session gets the builder on either host, and an unconfigured deployment gates nothing |
 
 The mock provider (`tests/helpers/mock-oidc.ts`) serves a real discovery

@@ -6,7 +6,7 @@
 
 **The repository-local automation platform that turns GitHub issues into validated pull requests — observable, gated, and self-hosted.**
 
-Olympus is a deterministic issue → PR factory for the repo it lives in: Archon workflows (YAML DAGs) drive triage → plan → implement → independent validation → controlled merge, with protected-path enforcement, required markers, non-zero evidence counts, and stop controls. One clone, one command, and a coding agent is wired to your OmniRoute gateway — ready to run factory workflows without re-implementing identity, secrets, billing, or storage. **Studio** adds the other direction: describe an app in the browser and watch it build against the same gateway.
+Olympus is a deterministic issue → PR factory for the repo it lives in: Archon workflows (YAML DAGs) drive triage → plan → implement → independent validation → controlled merge, with protected-path enforcement, required markers, non-zero evidence counts, and stop controls. One clone, one command, and a coding agent is wired to your OmniRoute gateway — ready to run factory workflows without re-implementing identity, secrets, billing, or storage. **Studio** adds the other direction: describe an app in the browser and watch it build against the same gateway — then **export it to the factory** as a `build-requests/` spec, so a build you liked becomes factory input instead of stopping at the preview.
 
 [![CI](https://github.com/innotelinc/olympus/actions/workflows/ci.yml/badge.svg)](https://github.com/innotelinc/olympus/actions/workflows/ci.yml)
 [![Conformity](https://github.com/innotelinc/olympus/actions/workflows/conform.yml/badge.svg)](https://github.com/innotelinc/olympus/actions/workflows/conform.yml)
@@ -20,7 +20,7 @@ Olympus is a deterministic issue → PR factory for the repo it lives in: Archon
 
 | Area | Change |
 | --- | --- |
-| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files → live preview, Authentik OIDC sign-in, sandboxed output, saved apps scoped to the signed-in identity. Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
+| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files → live preview, Authentik OIDC sign-in, sandboxed output, saved apps scoped to the signed-in identity, and an **Export to factory** path that writes a `build-requests/` spec from a saved build (`make app SPEC=…`, or commit it and let CI manufacture). Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
 | **SecretOps** | Infisical is **replaced by Cerulean Vault** (KV v2). The `infisical://` reference convention becomes `vault://`, and the bootstrap helper is now `scripts/omniroute-vault.sh` (was `scripts/omniroute-infisical.sh`). |
 | **Compose** | `compose.vault.yml` runs Vault locally; `compose.host-gateway.yml` is a host-network override for when the gateway is published on loopback only. |
 | **Factory** | `factory/doctor.py` and `factory/trigger.py` are published and report the factory's **real** state (no simulated poll loop); CI pins the Archon integration and only manufactures a real new spec. |
