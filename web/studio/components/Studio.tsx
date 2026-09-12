@@ -335,6 +335,86 @@ export default function Studio({ user = null }: { user?: string | null }) {
     }
   }, [activeAppId, activeFiles, appTitle, listSavedApps, persistApp, prompt, status]);
 
+  /**
+   * Hand this build to the factory.
+   *
+   * The saved copy is refreshed first, so the spec always describes the build
+   * on screen rather than whatever was last saved — an export that quietly
+   * lagged the preview would be worse than no export at all.
+   */
+  const exportApp = useCallback(async () => {
+    if (activeFiles.length === 0 || status === "streaming") return;
+
+    setLibraryBusy(true);
+    setLibraryError(null);
+    setLibraryNote(null);
+
+    try {
+      const app = await persistApp({
+        id: activeAppId,
+        title: appTitle || titleFromPrompt(prompt),
+        prompt,
+        files: activeFiles,
+      });
+      setActiveAppId(app.id);
+      setAppTitle(app.title);
+      await listSavedApps();
+
+      // Not `request()`: the 409 that says "a spec already exists" is a
+      // decision to put to the operator, not an error to show.
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (token) headers["x-studio-token"] = token;
+
+      const send = (overwrite: boolean) =>
+        fetch(`/api/projects/${encodeURIComponent(app.id)}/export`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ overwrite }),
+        });
+
+      let response = await send(false);
+      if (response.status === 409) {
+        const conflict = (await response.json()) as { error?: string };
+        const replace = window.confirm(
+          `${conflict.error ?? "That spec already exists."}\n\nReplace it with this build?`,
+        );
+        if (!replace) {
+          setLibraryNote(
+            `Saved “${app.title}”. Export cancelled — the existing spec is untouched.`,
+          );
+          return;
+        }
+        response = await send(true);
+      }
+
+      const payload = (await response.json()) as {
+        filename?: string;
+        replaced?: boolean;
+        next?: string;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(payload.error ?? `Export failed (${response.status}).`);
+
+      setLibraryNote(
+        `${payload.replaced ? "Replaced" : "Wrote"} build-requests/${payload.filename} — ` +
+          `continue with: ${payload.next ?? "make app"}.`,
+      );
+    } catch (thrown) {
+      setLibraryError(thrown instanceof Error ? thrown.message : "Could not export this app.");
+    } finally {
+      setLibraryBusy(false);
+    }
+  }, [
+    activeAppId,
+    activeFiles,
+    appTitle,
+    listSavedApps,
+    persistApp,
+    prompt,
+    status,
+    token,
+  ]);
+
   const openApp = useCallback(
     async (id: string) => {
       setLibraryBusy(true);
@@ -812,6 +892,15 @@ export default function Studio({ user = null }: { user?: string | null }) {
                 disabled={!hasFiles || busy || libraryBusy}
               >
                 {activeAppId ? "Update" : "Save"}
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => void exportApp()}
+                disabled={!hasFiles || busy || libraryBusy}
+                title="Write a build-requests spec so the factory can continue this app"
+              >
+                Export to factory
               </button>
             </div>
 
