@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds studio-install studio-dev studio-build studio studio-test studio-check docker-build docker-up docker-down docker-logs docker-ps docker-shell docker-app docker-clean
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds studio-install studio-dev studio-build studio studio-test studio-check docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -67,14 +67,25 @@ docker-build: ## Build the Olympus image (ghcr.io/innotelinc/olympus:local)
 docker-up: ## Start the Olympus container (detached, builds → volume)
 	docker compose up --build -d
 
+# The gateway this stack talks to is published on 127.0.0.1 only, and a bridge
+# container cannot reach a loopback-published port (verified: host.docker.internal,
+# the host-gateway IP and the LAN address all refuse). Use this target when the
+# gateway runs on this host; see the header of compose.host-gateway.yml.
+docker-up-host: ## Start with host networking (gateway published on loopback here)
+	docker compose -f docker-compose.yml -f compose.host-gateway.yml up -d --build
+
 docker-down: ## Stop the Olympus container (keeps builds volume)
 	docker compose down
+docker-down-host: ## Stop the host-networked stack
+	docker compose -f docker-compose.yml -f compose.host-gateway.yml down
 
 docker-logs: ## Tail Olympus container logs
 	docker compose logs -f
 
 docker-ps: ## List Olympus container status
 	docker compose ps
+docker-ps-host: ## List the host-networked stack's status
+	docker compose -f docker-compose.yml -f compose.host-gateway.yml ps
 
 docker-shell: ## Shell into the running Olympus container
 	docker compose exec olympus bash
