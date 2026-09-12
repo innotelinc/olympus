@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds studio-install studio-dev studio-build studio studio-test studio-check studio-e2e docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds studio-install studio-dev studio-build studio studio-test studio-check studio-e2e docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -124,6 +124,9 @@ studio-e2e: ## Drive the real Authentik handshake (needs STUDIO_E2E_* vars; see 
 
 vault-bootstrap: ## Store this stack's secret in Cerulean Vault (needs VAULT_ADDR + VAULT_TOKEN)
 	python3 scripts/vault-bootstrap.py
+
+vault-renew: ## Renew this stack's scoped Vault token so it cannot lapse (--check to report only)
+	bash scripts/vault-renew.sh
 
 ## ---- Conformity -----------------------------------------------------------
 

@@ -3,7 +3,7 @@
 # Start OmniRoute with its initial password resolved from Cerulean Vault.
 #
 # The secret comes from HashiCorp Vault KV v2 at <VAULT_PREFIX>/<VAULT_PATH> —
-# the SecretOps layer this platform runs. See docs/vault-setup.md.
+# the SecretOps layer this platform runs. See docs/stack.md.
 #
 # Requires: OMNIROUTE_PORT / OMNIROUTE_HOST (optional), VAULT_ADDR,
 #           VAULT_TOKEN (or VAULT_TOKEN_FILE), VAULT_PREFIX (default: cerulean),

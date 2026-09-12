@@ -2,16 +2,19 @@
 """Store this stack's secrets in Cerulean Vault (HashiCorp Vault, KV v2).
 
 Cerulean is the platform's SecretOps layer: a durable, file-backed Vault with
-KV v2 mounted at ``VAULT_PREFIX`` and a periodic token scoped to that prefix.
-This script writes the stack's generated secret there, so it stops living in a
-plaintext ``.env``.
+KV v2 mounted at ``VAULT_PREFIX`` and a periodic token scoped to this stack's
+own path under it (the ``olympus`` policy — see docs/stack.md). This script
+writes the stack's generated secret there, so it stops living in a plaintext
+``.env``.
 
 Every address and credential comes from the environment — nothing is hardcoded
 here, because this file is tracked in a public repository.
 
 Required:
     VAULT_ADDR          e.g. http://vault:8200
-    VAULT_TOKEN         a token with write access to VAULT_PREFIX
+    VAULT_TOKEN         a token with write access to VAULT_PATH — the
+                        path-scoped ``olympus`` policy, NOT the platform's
+                        mount-wide ``cerulean`` one
                         (or VAULT_TOKEN_FILE, pointing at one; Vault's own
                         convention, so `vault login` output can be reused)
     VAULT_PREFIX        KV v2 mount point (Cerulean default: cerulean)
@@ -74,8 +77,9 @@ def read_token() -> str:
     if not token_file:
         fail(
             "No Vault token. Set VAULT_TOKEN, or VAULT_TOKEN_FILE to a file containing one.\n"
-            "On the Cerulean platform the scoped token is written to\n"
-            "./data/vault/token/cerulean.token by scripts/vault-entrypoint.sh."
+            "On the Cerulean platform this stack's path-scoped token lives at\n"
+            "./data/vault/token/cerulean.token (the `olympus` policy); see the\n"
+            "Secrets section of docs/stack.md for how it is minted and renewed."
         )
 
     try:
