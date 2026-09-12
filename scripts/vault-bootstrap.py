@@ -132,24 +132,49 @@ def api(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
         )
 
 
-def probe_kv2() -> None:
-    """Confirm PREFIX is a KV v2 mount without reading sys/mounts.
+def is_kv2_envelope(body: object) -> bool:
+    """KV v2 nests the payload under data.data; KV v1 stops at data."""
+    if not isinstance(body, dict):
+        return False
+    outer = body.get("data")
+    return isinstance(outer, dict) and isinstance(outer.get("data"), dict)
 
-    The platform's scoped token usually cannot read sys/mounts — that endpoint is
-    cluster-wide, while the token is scoped to one prefix. A 403 there is expected
-    and must not be fatal: the mount's own metadata endpoint is authoritative and
-    sits inside the scope.
+
+def probe_kv2() -> None:
+    """Verify the mount through the ONE path this token was granted.
+
+    A scoped token cannot read sys/mounts — that endpoint is cluster-wide — and it
+    should not be able to list the mount root either, since that would disclose
+    every sibling key's name. So the only honest probe is the path we are about to
+    use: a 200 or a 404 both prove the KV v2 *data* endpoint is served, and 403
+    means the grant is wrong.
+
+    The version itself cannot be settled by a 404 (an uncreated v2 path and a v1
+    mount look identical), so `verify_kv2_envelope` settles it from the response
+    shape after the write.
     """
-    status, listing = api("LIST", f"{PREFIX}/metadata")
-    if status == 200:
-        print(f"--- {PREFIX}/ answers as KV v2 (metadata listing) ---")
+    status, body = api("GET", f"{PREFIX}/data/{SECRET_PATH}")
+    if status in (200, 404):
+        print(f"--- {PREFIX}/data/{SECRET_PATH} is served (KV v2 data endpoint) ---")
         return
-    if status == 404:
+    if status == 403:
         fail(
-            f"{PREFIX}/ has no metadata endpoint, so it is not a KV v2 mount.\n"
-            "Point VAULT_PREFIX at the KV v2 mount (Cerulean's default is `cerulean`)."
+            f"The token cannot read {PREFIX}/data/{SECRET_PATH}.\n"
+            f"Grant it a policy covering {PREFIX}/data/{SECRET_PATH} "
+            f"and {PREFIX}/metadata/{SECRET_PATH}, then re-run."
         )
-    fail(f"Could not verify the KV mount at {PREFIX}/: HTTP {status} — {listing.get('errors')}")
+    fail(f"Could not reach {PREFIX}/data/{SECRET_PATH}: HTTP {status} — {body.get('errors')}")
+
+
+def require_kv2_envelope(body: object, action: str) -> None:
+    """Fail with a precise message when the response is not a KV v2 envelope."""
+    if is_kv2_envelope(body):
+        return
+    fail(
+        f"{PREFIX}/ is not answering as KV v2 ({action} returned no data.data nesting).\n"
+        "KV v1 has no versioning and cannot hold secrets the way this stack expects.\n"
+        f"Point VAULT_PREFIX at the KV v2 mount (Cerulean's default is `cerulean`)."
+    )
 
 
 def ensure_kv2() -> None:
@@ -208,7 +233,16 @@ def main() -> int:
     )
     if status not in (200, 204):
         fail(f"Writing the secret failed: HTTP {status} — {written.get('errors')}")
-    version = ((written.get("data") or {}).get("version")) if isinstance(written, dict) else None
+    # A KV v2 write answers with the new version number; KV v1 has no versioning
+    # and answers with nothing. (Only *reads* nest the payload under data.data.)
+    outer = written.get("data") if isinstance(written, dict) else None
+    if not isinstance(outer, dict) or "version" not in outer:
+        fail(
+            f"{PREFIX}/ did not answer as KV v2 (the write returned no version).\n"
+            "KV v1 has no versioning and cannot hold secrets the way this stack expects.\n"
+            f"Point VAULT_PREFIX at the KV v2 mount (Cerulean's default is `cerulean`)."
+        )
+    version = outer.get("version")
     print(f"    stored (version {version}), value not printed")
 
     # Prove it round-trips before claiming success.
@@ -218,6 +252,7 @@ def main() -> int:
     got = ((read.get("data") or {}).get("data") or {})
     if got.get(SECRET_KEY) != omni_password:
         fail("The secret did not read back identically.")
+    require_kv2_envelope(read, "the read-back")
     print(f"    verified: keys present = {sorted(got)}")
 
     password_file = os.environ.get("OMNIROUTE_PASSWORD_FILE", "").strip()
