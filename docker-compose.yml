@@ -5,8 +5,19 @@
 #
 # Builds/ is a named volume (factory output, gitignored); build-requests/ is
 # bind-mounted so dropping a spec triggers the next `make docker-app` without rebuild.
-# OmniRoute defaults to an external gateway; set OMNIROUTE_BASE_URL=http://host.docker.internal:20128
-# if you run the gateway on the host, or add an `omniroute` service below if you vendor it.
+# OmniRoute: the gateway exposes /healthz for liveness (200, unauthenticated).
+# /health is NOT a route (404) despite appearing in older files here — do not
+# probe it. Containers labelled `autoheal=true` are restarted by the autoheal
+# service below when their healthcheck fails.
+#
+# The gateway defaults to an external instance. READ THE CAVEAT:
+# `host.docker.internal:20128` only works when the gateway is bound to a routable
+# address. A gateway published as 127.0.0.1:20128 (loopback-only) is NOT reachable
+# from a bridge network — verified. Pick the wiring that matches your topology:
+#   sibling container            OMNIROUTE_BASE_URL=http://omniroute:20128/v1  (+ same network)
+#   loopback-published on host   run that service with network_mode: host, use http://127.0.0.1:20128/v1
+#   gateway on another machine   OMNIROUTE_BASE_URL=http://<lan-ip>:20128/v1
+#   published on 0.0.0.0         OMNIROUTE_BASE_URL=http://host.docker.internal:20128/v1 (default below)
 
 services:
   olympus:
@@ -16,6 +27,10 @@ services:
     image: ghcr.io/innotelinc/olympus:local
     container_name: olympus
     restart: unless-stopped
+    # Autoheal restarts any container carrying this label when its healthcheck
+    # reports unhealthy. Requires a healthcheck to exist (see below).
+    labels:
+      - "autoheal=true"
     env_file:
       - .env
     environment:
@@ -34,30 +49,120 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:20128/health >/dev/null 2>&1 || python3 factory/doctor.py 2>/dev/null | grep -qi 'ready\\|ok' || exit 1"]
+      # The gateway has no /health route (it answers 404), so doctor.py is the signal.
+      # Match the status line exactly — a bare `grep -i ok` would match the per-check
+      # '[ ok ]' rows and could never fail.
+      test: ["CMD-SHELL", "python3 factory/doctor.py 2>/dev/null | grep -q 'Status: READY' || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 40s
 
-  # Optional bundled gateway — uncomment if you vendor OmniRoute under core-modules/omniroute
-  # and want the factory to bring its own gateway inside the stack rather than reaching
-  # host.docker.internal. When enabled, set OMNIROUTE_BASE_URL=http://omniroute:20128/v1.
-  # omniroute:
-  #   image: node:20-bookworm-slim
-  #   working_dir: /app
-  #   command: bash -c "cd /app/core-modules/omniroute && npm ci && npm run start"
-  #   volumes:
-  #     - .:/app
-  #   ports:
-  #     - "20128:20128"
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "curl -fsS http://localhost:20128/health >/dev/null 2>&1 || exit 1"]
-  #     interval: 15s
-  #     retries: 10
+  # Studio — the vibe-coding web UI (web/studio). Talks to the gateway
+  # server-side; the key never reaches the browser. Build context is the app
+  # directory so the image carries no host node_modules.
+  studio:
+    build:
+      context: ./web/studio
+      dockerfile: Dockerfile
+    image: ghcr.io/innotelinc/olympus-studio:local
+    container_name: olympus-studio
+    restart: unless-stopped
+    labels:
+      - "autoheal=true"
+    env_file:
+      - .env
+    # See the OmniRoute caveat at the top of this file before changing the base URL.
+    environment:
+      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://host.docker.internal:20128/v1}
+      OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
+      OMNIROUTE_MODEL: ${OMNIROUTE_MODEL:-auto/coding}
+      STUDIO_ACCESS_TOKEN: ${STUDIO_ACCESS_TOKEN:-}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid email profile}
+      # Group allow-list. Empty = any authenticated user; set = members of a
+      # listed group only, everyone else gets 403.
+      OIDC_ALLOWED_GROUPS: ${OIDC_ALLOWED_GROUPS:-}
+      STUDIO_SESSION_SECRET: ${STUDIO_SESSION_SECRET:-}
+    ports:
+      - "${STUDIO_PORT:-3001}:3001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://127.0.0.1:3001/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # OmniRoute — the model gateway, brought inside the stack (opt-in).
+  #
+  # Requires the vendored checkout: run ./setup.sh first, which clones
+  # core-modules/omniroute. Then:
+  #
+  #   docker compose --profile gateway up -d omniroute
+  #   OMNIROUTE_BASE_URL=http://omniroute:20128/v1 docker compose up -d studio
+  #
+  # Profile-gated so a plain `docker compose up` never depends on core-modules/.
+  omniroute:
+    image: node:22-bookworm-slim
+    container_name: olympus-omniroute
+    profiles: ["gateway"]
+    working_dir: /app/core-modules/omniroute
+    command: bash -c "npm ci && npm run start"
+    volumes:
+      - .:/app
+      - omniroute-node-modules:/app/core-modules/omniroute/node_modules
+    labels:
+      - "autoheal=true"
+    ports:
+      - "${OMNIROUTE_PORT:-20128}:20128"
+    # The gateway exposes /healthz (200, no auth). Note: /health is NOT a route —
+    # it answers 404, so probing it silently degrades to whatever the fallback does.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://127.0.0.1:20128/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # Autoheal — restarts containers whose healthcheck reports "unhealthy".
+  #
+  # Only containers labelled `autoheal=true` are touched. A container in another
+  # compose project is out of reach here — this stack cannot label containers it
+  # does not own — so the label and an autoheal service must be added to THAT
+  # project instead. (Done for the external OmniRoute gateway this stack
+  # defaults to: it now carries the label and its own autoheal service.)
+  #
+  # Mounting the Docker socket grants this container control over the daemon.
+  # That is inherent to autoheal; scope it by keeping the socket read-mostly and
+  # the label explicit rather than relying on defaults.
+  # Pinned by digest because it holds the Docker socket — a silent upstream
+  # retag would swap code that can restart anything on this host.
+  # Tag at time of pinning: willfarrell/autoheal:latest
+  autoheal:
+    image: willfarrell/autoheal@sha256:a75fcda3176f6b3b70b75cc72fb1979ed86183fc45daacf1a2647902dc44916a
+    container_name: olympus-autoheal
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: "15"
+      AUTOHEAL_START_PERIOD: "60"
+      AUTOHEAL_DEFAULT_STOP_TIMEOUT: "20"
+      DOCKER_SOCK: /var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   olympus-builds:
+  omniroute-node-modules:
 
 networks:
   default:
