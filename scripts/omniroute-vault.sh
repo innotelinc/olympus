@@ -2,9 +2,8 @@
 #
 # Start OmniRoute with its initial password resolved from Cerulean Vault.
 #
-# Replaces the Infisical-backed launcher: same job, same shape, but the secret
-# comes from HashiCorp Vault KV v2 at <VAULT_PREFIX>/<VAULT_PATH> — the
-# SecretOps layer the platform actually runs.
+# The secret comes from HashiCorp Vault KV v2 at <VAULT_PREFIX>/<VAULT_PATH> —
+# the SecretOps layer this platform runs. See docs/vault-setup.md.
 #
 # Requires: OMNIROUTE_PORT / OMNIROUTE_HOST (optional), VAULT_ADDR,
 #           VAULT_TOKEN (or VAULT_TOKEN_FILE), VAULT_PREFIX (default: cerulean),
@@ -67,7 +66,10 @@ fi
 export INITIAL_PASSWORD
 
 echo "Setting OmniRoute password from Vault ($VAULT_PREFIX/$VAULT_PATH)..."
-omniroute setup --password "$INITIAL_PASSWORD" --non-interactive
+# Deliberately no --password: the CLI resolves it from INITIAL_PASSWORD (see
+# bin/cli/commands/setup.mjs resolvePassword), so the secret stays out of argv
+# and out of `ps` output.
+omniroute setup --non-interactive
 
 echo "Starting OmniRoute on port ${OMNIROUTE_PORT}..."
 exec env OMNIROUTE_SERVER_HOST="$OMNIROUTE_HOST" REQUIRE_API_KEY=true \
