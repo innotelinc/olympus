@@ -348,13 +348,15 @@
     <!-- Hero -->
     <div class="hero">
       <div class="wrap hero-inner">
-        <p class="kicker"><span class="pulse" aria-hidden="true"></span> FactoryOps · Issue → validated PR</p>
+        <p class="kicker"><span class="pulse" aria-hidden="true"></span> FactoryOps · Issue → validated PR · Prompt → running app</p>
         <h1>The repo that ships<br>its own factory<span class="accent">.</span></h1>
         <p class="lede">
           Olympus is a repository-local AI software factory — deterministic
           <em>issue → validated pull request</em> automation that lives inside the repo it
           automates. One clone, one command, and a coding agent is wired to your OmniRoute
-          gateway, ready to run gated factory workflows with a cold CPU.
+          gateway, ready to run gated factory workflows with a cold CPU — and
+          <em>Studio</em> puts the same gateway in the browser: describe an app, watch it
+          build, iterate in plain language.
         </p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://github.com/innotelinc/olympus#quick-start">Get started</a>
@@ -367,6 +369,7 @@
         <div class="stats">
           <div class="stat"><b>5 workflows</b><span>prime · implement · validate · regress · triage</span></div>
           <div class="stat"><b>~35 min</b><span>Issue → Fix PR (fast lane)</span></div>
+          <div class="stat"><b>Studio</b><span>prompt → files → live preview</span></div>
           <div class="stat"><b>Cold CPU</b><span>Codex auto/coding + Hermes 3 via OmniRoute</span></div>
           <div class="stat"><b>L0 by default</b><span>manual until a lap is watched</span></div>
         </div>
@@ -400,7 +403,7 @@
           <div class="card">
             <span class="icon" aria-hidden="true">❄️</span>
             <h3>Cold CPU, hot cloud</h3>
-            <p>Heavy inference lives behind the OmniRoute gateway (Codex auto/coding + Hermes 3 via OmniRoute/DeepInfra). Your CPU runs the gate — not the model.</p>
+            <p>Heavy inference lives behind the OmniRoute gateway (Codex auto/coding + Hermes 3 via OpenRouter Free). Your CPU runs the gate and the factory workflows — not the model.</p>
           </div>
           <div class="card">
             <span class="icon" aria-hidden="true">🧭</span>
@@ -421,7 +424,7 @@
       <div class="wrap">
         <h2>A factory, not a feature<span class="accent">.</span></h2>
         <p class="section-sub">
-          Five Archon workflows, a harness-as-contract, and the machinery that enforces it — all inside the repo.
+          Five Archon workflows, a harness-as-contract, the machinery that enforces it, and the installer that wires it up.
         </p>
         <div class="split">
           <div>
@@ -442,6 +445,10 @@
                 <h3>scripts/bootstrap.sh <span style="color:var(--p-text-muted);font-weight:400">· clone → ready</span></h3>
                 <p>Installs the CLIs, mints the OmniRoute key, and wires both agents to the gateway in one command.</p>
               </div>
+              <div class="card">
+                <h3>Cerulean Vault <span style="color:var(--p-text-muted);font-weight:400">· SecretOps</span></h3>
+                <p>KV v2 secrets with per-stack token scoping. Credentials are referenced as <code>vault://&lt;name&gt;</code> and resolved at startup — <code>make setup</code> bootstraps the store, <code>scripts/secret-scan.py</code> keeps secrets out of git.</p>
+              </div>
             </div>
           </div>
           <pre class="terminal"><span class="cmt"># clone → ready</span>
@@ -455,7 +462,15 @@ $ <span class="p">archon</span> <span class="o">workflow run factory-implement</
   --branch factory/impl-42 <span class="o">"implement gh:issue:42"</span>
 
 $ <span class="p">archon</span> <span class="o">workflow run factory-validate</span> \
-  --branch factory/val-42 <span class="o">"validate gh:pr:43"</span></pre>
+  --branch factory/val-42 <span class="o">"validate gh:pr:43"</span>
+
+<span class="cmt"># Studio — prompt → files → live preview</span>
+$ <span class="p">make</span> <span class="o">studio-install</span> &amp;&amp; <span class="p">make</span> <span class="o">studio-dev</span>
+<span class="ok">listening on http://localhost:3001</span>
+
+<span class="cmt"># SecretOps via Cerulean Vault (KV v2)</span>
+$ <span class="p">docker</span> <span class="o">compose</span> -f compose.vault.yml up -d
+$ <span class="p">python3</span> <span class="o">scripts/vault-bootstrap.py</span></pre>
         </div>
       </div>
     </section>

@@ -6,13 +6,25 @@
 
 **The repository-local automation platform that turns GitHub issues into validated pull requests — observable, gated, and self-hosted.**
 
-Olympus is a deterministic issue → PR factory for the repo it lives in: Archon workflows (YAML DAGs) drive triage → plan → implement → independent validation → controlled merge, with protected-path enforcement, required markers, non-zero evidence counts, and stop controls. One clone, one command, and a coding agent is wired to your OmniRoute gateway — ready to run factory workflows without re-implementing identity, secrets, billing, or storage.
+Olympus is a deterministic issue → PR factory for the repo it lives in: Archon workflows (YAML DAGs) drive triage → plan → implement → independent validation → controlled merge, with protected-path enforcement, required markers, non-zero evidence counts, and stop controls. One clone, one command, and a coding agent is wired to your OmniRoute gateway — ready to run factory workflows without re-implementing identity, secrets, billing, or storage. **Studio** adds the other direction: describe an app in the browser and watch it build against the same gateway.
 
 [![CI](https://github.com/innotelinc/olympus/actions/workflows/ci.yml/badge.svg)](https://github.com/innotelinc/olympus/actions/workflows/ci.yml)
 [![Conformity](https://github.com/innotelinc/olympus/actions/workflows/conform.yml/badge.svg)](https://github.com/innotelinc/olympus/actions/workflows/conform.yml)
 [![Pages](https://github.com/innotelinc/olympus/actions/workflows/pages.yml/badge.svg)](https://github.com/innotelinc/olympus/actions/workflows/pages.yml)
 
 </div>
+
+---
+
+## What's new in this version
+
+| Area | Change |
+| --- | --- |
+| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files → live preview, Authentik OIDC sign-in, sandboxed output. Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
+| **SecretOps** | Infisical is **replaced by Cerulean Vault** (KV v2). The `infisical://` reference convention becomes `vault://`, and the bootstrap helper is now `scripts/omniroute-vault.sh` (was `scripts/omniroute-infisical.sh`). |
+| **Compose** | `compose.vault.yml` runs Vault locally; `compose.host-gateway.yml` is a host-network override for when the gateway is published on loopback only. |
+| **Factory** | `factory/doctor.py` and `factory/trigger.py` are published and report the factory's **real** state (no simulated poll loop); CI pins the Archon integration and only manufactures a real new spec. |
+| **Security** | `scripts/secret-scan.py` fails the build on secret-shaped files; the Studio session and Vault token are scoped per stack. |
 
 ---
 
@@ -25,8 +37,9 @@ Olympus is a deterministic issue → PR factory for the repo it lives in: Archon
 | Agents that touch governance or secrets as ordinary work | Protected paths, secret-shaped-file blocks, and bounded PR size — fix the source, never the harness |
 | Heavy model inference that heats the local CPU | 100% of heavy inference routed to free cloud models via the OmniRoute gateway (Codex `auto/coding` + Hermes 3 via OpenRouter), local Ollama bypassed |
 | No visibility into autonomy, blockers, or held work | `factory/doctor.py` and `factory/trigger.py --status` report readiness, autonomy, evidence, and what is held |
+| Building a small app means leaving the platform for a chat window | [Studio](web/studio/) puts prompt → files → running preview in the browser, behind the same gateway, OIDC and secret rules |
 
-> **About Olympus** — a repository-local AI software factory built with three upstream frameworks under `core-modules/` — [OmniRoute](https://github.com/inotex/omniroute) (cloud routing gateway), [Archon](https://github.com/JohanLi233/archon) (YAML DAG workflow engine), and the AI Software Factory (SDLC scheduling and task consumer). The local CPU stays cool because the coding brain (**Codex** via OmniRoute `auto/coding`, Responses API) and the Telegram frontend (**Hermes 3 70B** via OpenRouter Free) never load weights locally — they run behind the gateway at `http://localhost:20128/v1` (Telegram at `nousresearch/hermes-3-llama-3-70b:free`). **Landing page:** [innotelinc.github.io/olympus](https://innotelinc.github.io/olympus)
+> **About Olympus** — a repository-local AI software factory built with three upstream frameworks vendored under `core-modules/` — [OmniRoute](https://github.com/innotelinc/omniroute) (cloud routing gateway), [Archon](https://github.com/innotelinc/Archon) (YAML DAG workflow engine), and the [AI Software Factory](https://github.com/innotelinc/ai-software-factory) (SDLC scheduling and task consumer). Those point at the `innotelinc` mirrors on purpose: the upstream URLs this project originally referenced (`inotex/omniroute`, `JohanLi233/archon`, `Andy-Zhouelect/AI-Software-Factory`) are **404** — see [UPSTREAMS.md](UPSTREAMS.md) for provenance, pinned SHAs, licenses and how to re-sync a mirror. The local CPU stays cool because the coding brain (**Codex** via OmniRoute `auto/coding`, Responses API) and the Telegram frontend (**Hermes 3 70B** via OpenRouter Free) never load weights locally — they run behind the gateway at `http://localhost:20128/v1` (Telegram at `nousresearch/hermes-3-llama-3-70b:free`). **Landing page:** [innotelinc.github.io/olympus](https://innotelinc.github.io/olympus)
 
 ---
 
@@ -36,6 +49,7 @@ Olympus is a deterministic issue → PR factory for the repo it lives in: Archon
 - **Owns:** the five Archon factory workflows and the harness as the definition of "working" — the harness is never edited to make a check pass
 - **Provides:** a one-command agent-ready clone (`bash scripts/bootstrap.sh`) and an interactive Telegram surface for issue → fix laps
 - **Provides:** [Studio](web/studio/) — the browser vibe-coding surface: describe an app in plain language, watch it build, iterate on it, all against the same OmniRoute gateway (`make studio-dev`)
+- **Provides:** the installer, the compose stacks, the landing page and this documentation — this repository is where an operator gets a working factory, not where its governance lives (see [What this repo does and does not contain](#what-this-repo-does-and-does-not-contain))
 - **Fast lane:** Issue → Fix PR in ~35 minutes including autonomous code review
 - **Classification:** **FactoryOps** — see [docs/stack.md](docs/stack.md)
 
@@ -43,25 +57,41 @@ Olympus is a deterministic issue → PR factory for the repo it lives in: Archon
 
 ## Quick start
 
-### Local (clone → ready)
+Three entry points. Pick one — they are independent, and `make help` lists every target.
+
+### 1. Local (clone → ready)
 
 ```bash
 git clone https://github.com/innotelinc/olympus.git
 cd olympus
-bash scripts/bootstrap.sh
+bash scripts/bootstrap.sh          # idempotent
 ```
 
-### Docker (one command)
+### 2. Docker (one command)
 
 ```bash
 git clone https://github.com/innotelinc/olympus.git
 cd olympus
-cp .env.example .env   # set TELEGRAM_BOT_TOKEN, OMNIROUTE_* if you have a gateway
-make docker-up          # builds image ghcr.io/innotelinc/olympus:local + starts container
-make docker-logs        # tail factory + gateway logs
+make setup                         # preflight + .env with generated secrets
+$EDITOR .env                       # OMNIROUTE_* / OIDC_* / VAULT_* — see .env.example
+make docker-up                     # builds ghcr.io/innotelinc/olympus:local + starts
+make docker-logs                   # tail factory + gateway logs
 ```
 
-Then inside the container (or via `make docker-app`):
+### 3. Studio (the web UI)
+
+```bash
+make studio-install                # install web/studio dependencies (Bun)
+make studio-dev                    # dev server → http://localhost:3001
+make studio-test                   # vitest: file parser, gateway route, OIDC flow
+
+# or inside the stack
+docker compose up -d studio
+```
+
+Studio needs a gateway and (optionally) OIDC. `make setup` scaffolds `.env`; the keys that matter are `OMNIROUTE_BASE_URL` + `OMNIROUTE_API_KEY` for generation, and `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URI` / `STUDIO_SESSION_SECRET` for sign-in. **Auth stays off until it is configured** — run `python3 scripts/authentik-studio-app.py` to create the Cerulean Authentik application and provider for it. See [web/studio/README.md](web/studio/README.md) for the full contract.
+
+Then manufacture an app from a spec:
 
 ```bash
 make new-request NAME=my-todo   # → build-requests/my-todo.md
@@ -95,7 +125,41 @@ python3 factory/doctor.py
 # or from the host: docker compose exec olympus bash scripts/manufacture.sh build-requests/my-todo.md
 ```
 
-See `MISSION.md`, `FACTORY.md`, and `FACTORY_RULES.md` in the source repo for scope, operations, and safety rules, and `harness/END-TO-END.md` plus `.factory/holdout/HOLDOUT.md` for the holdout contract.
+### Installation details
+
+| Step | Command / file | Notes |
+| --- | --- | --- |
+| Prerequisites | `make setup` | Preflight (git, curl, python3, node, docker where needed), installs the attribution guard hooks, generates `.env` with fresh secrets |
+| Environment | `.env.example` → `.env` | `make setup` never overwrites an existing `.env`; new keys are seeded on upgrade |
+| Gateway | `OMNIROUTE_BASE_URL`, `OMNIROUTE_API_KEY` | Remote gateway? point the URL at it. Publish it on loopback only? add `compose.host-gateway.yml` |
+| SecretOps | `compose.vault.yml` + `scripts/vault-bootstrap.py` | Cerulean Vault (KV v2). `VAULT_ADDR` / `VAULT_TOKEN` / `VAULT_PREFIX`; values may be `vault://<name>` references resolved at startup. Tokens are scoped to this stack's own path |
+| Identity | `scripts/authentik-studio-app.py` | Creates the Studio application/provider in Cerulean Authentik; Studio is public until OIDC is set |
+| Trust / edge | `scripts/` (NPM + Cerulean) | DNS and TLS for the public names are managed through Cerulean and NPM Edge; see [docs/stack.md](docs/stack.md) |
+| Upgrade | `git pull && make setup` | Idempotent; `scripts/factory-pin.sh` pins the factory's upstream SHAs |
+| Verify | `make doctor`, `make studio-test`, `make ps` | Readiness, Studio test suite, supporting-service status |
+
+> **Not published in this repo.** `MISSION.md`, `FACTORY.md`, `FACTORY_RULES.md`, `AGENTS.md`, `harness/`,
+> `factory/*` (beyond `APP_SPEC_TEMPLATE.md`, `doctor.py` and `trigger.py`), `.archon/workflows/factory/` and
+> `.factory/` state are deliberately gitignored — see [What this repo does and does not contain](#what-this-repo-does-and-does-not-contain).
+> An agent-ready clone installs them; a plain clone of this repository has the installer without the governance.
+
+---
+
+## What this repo does and does not contain
+
+This repository is the **installer and operator surface** for Olympus. `.gitignore` is the
+contract, not an accident:
+
+- **Published:** `scripts/` (bootstrap, manufacture, Vault, secret scan, factory pin), `factory/doctor.py`,
+  `factory/trigger.py`, `factory/APP_SPEC_TEMPLATE.md`, `web/studio/`, `web/landing/`, `docs/`,
+  `docker-compose.yml`, `compose.vault.yml`, `compose.host-gateway.yml`, `Dockerfile`, `Makefile`, `UPSTREAMS.md`
+- **Not published (gitignored):** `MISSION.md`, `FACTORY.md`, `FACTORY_RULES.md`, `harness/`,
+  `.factory/` runtime state, `.archon/workflows/factory/`, and `core-modules/*` — the vendored upstreams are
+  cloned by `setup.sh` / `bootstrap.sh` on first run, so provenance stays pinned in [UPSTREAMS.md](UPSTREAMS.md)
+  instead of drifting with a copy in git
+
+If you are looking for the safety rules, the holdout contract, or the five YAML DAGs, they live in the
+source checkout of the factory — not in this distribution repo.
 
 ---
 
@@ -103,15 +167,13 @@ See `MISSION.md`, `FACTORY.md`, and `FACTORY_RULES.md` in the source repo for sc
 
 | Document | What it covers |
 | --- | --- |
-| [UPSTREAMS.md](UPSTREAMS.md) | Vendored upstream mirrors (Archon, AI Software Factory, skills, OmniRoute) — provenance, SHAs, licenses, recovery || [docs/stack.md](docs/stack.md) | This platform's role in the [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) (FactoryOps) | 
-| [web/studio/README.md](web/studio/README.md) | Studio — the vibe-coding web UI: how to run it, configuration, output contract, security posture | 
-| `MISSION.md` | What Olympus is and is not — the factory's scope (in the source repo) |
-| `FACTORY.md` | How the five components are built, autonomy ladder (in the source repo) |
-| `FACTORY_RULES.md` | Safety rules: protected files, gates, caps (in the source repo) |
-| `AGENTS.md` | Conventions for agents working in this repo (in the source repo) |
-| `harness/END-TO-END.md` | Journeys that must pass (in the source repo) |
-| `.factory/holdout/HOLDOUT.md` | Holdout the auto-merge rests on (in the source repo) |
-| `docs/stack.md` | SecretOps via Cerulean Vault (KV v2), and the `vault://` reference convention |
+| [web/studio/README.md](web/studio/README.md) | Studio — the vibe-coding web UI: how to run it, configuration, output contract, security posture |
+| [docs/stack.md](docs/stack.md) | This platform's role in the [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) (FactoryOps), including SecretOps via Cerulean Vault (KV v2) and the `vault://` reference convention |
+| [UPSTREAMS.md](UPSTREAMS.md) | Vendored upstream mirrors (Archon, AI Software Factory, skills, OmniRoute, archon-cli) — provenance, pinned SHAs, licenses, recovery and re-sync |
+| [factory/APP_SPEC_TEMPLATE.md](factory/APP_SPEC_TEMPLATE.md) | The spec format `make new-request` scaffolds and the manufacture step reads |
+| `.env.example` | Every knob the stack reads, grouped and commented (gateway, Studio, OIDC, Vault, Cerulean, NPM, Magnate) |
+| `Makefile` | The full target list — `make help` |
+| `MISSION.md`, `FACTORY.md`, `FACTORY_RULES.md`, `AGENTS.md`, `harness/END-TO-END.md`, `.factory/holdout/HOLDOUT.md` | Scope, operations, safety rules and the holdout contract — **in the source checkout**, gitignored here (see above) |
 
 ---
 
