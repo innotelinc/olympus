@@ -3,13 +3,13 @@
 # Olympus bootstrap: turn a fresh clone into a working factory installation.
 #
 # What it does, in order:
-#   1. Loads local .env (gitignored) for OMNIROUTE_* / INFISICAL_* variables.
+#   1. Loads local .env (gitignored) for OMNIROUTE_* / VAULT_* variables.
 #   2. Checks prerequisites (git, curl, node/npm, python3).
 #   3. Installs, when missing: the omniroute CLI, the codex CLI, the Claude
 #      Code CLI, and the archon CLI (the factory's workflow engine).
 #   4. Makes sure an OmniRoute server is reachable at OMNIROUTE_BASE_URL
 #      (default http://localhost:20128). If it is not running locally, it
-#      tries scripts/omniroute-infisical.sh; otherwise it prints how to start
+#      tries scripts/omniroute-vault.sh; otherwise it prints how to start
 #      it and continues (the agents still get wired, ready for when it is up).
 #   5. Ensures an OmniRoute API key exists and is stored where the agents and
 #      the omniroute CLI can find it (~/.omniroute/.env, gitignored).
@@ -24,7 +24,7 @@
 #   OMNIROUTE_BASE_URL        e.g. http://192.168.1.10:20128  (default http://localhost:20128)
 #   OMNIROUTE_API_KEY         reuse an existing key instead of creating one
 #   OMNIROUTE_ADMIN_PASSWORD  dashboard/admin password used to mint a key
-#                             (falls back to Infisical secret INITIAL_PASSWORD)
+#                             (falls back to the Vault secret INITIAL_PASSWORD)
 #   SKIP_AGENT_INSTALL=1      do not install agents, only wire existing ones
 # ---------------------------------------------------------------------------
 set -euo pipefail
@@ -99,17 +99,19 @@ export PATH="$HOME/.local/bin:$PATH"
 # ---------------------------------------------------------------------------
 say "Checking OmniRoute at ${OMNIROUTE_BASE_URL}"
 server_up=0
-if curl -fsS -m 5 "${OMNIROUTE_BASE_URL}/health" >/dev/null 2>&1; then
+if curl -fsS -m 5 "${OMNIROUTE_BASE_URL}/healthz" >/dev/null 2>&1; then
   server_up=1
 fi
 
 if [ "$server_up" -eq 0 ]; then
   warn "${OMNIROUTE_BASE_URL} is not reachable"
-  if [ -f scripts/omniroute-infisical.sh ] && [ -n "${INFISICAL_PROJECT_ID:-}" ] && command -v infisical >/dev/null 2>&1; then
-    say "Starting OmniRoute via scripts/omniroute-infisical.sh (Infisical-backed)"
-    bash scripts/omniroute-infisical.sh >/tmp/omniroute-bootstrap.log 2>&1 &
+  # The launcher resolves the secret from Vault over curl, so there is no CLI
+  # dependency here — only VAULT_ADDR and a token (VAULT_TOKEN or a token file).
+  if [ -f scripts/omniroute-vault.sh ] && [ -n "${VAULT_ADDR:-}" ]; then
+    say "Starting OmniRoute via scripts/omniroute-vault.sh (Vault-backed)"
+    bash scripts/omniroute-vault.sh >/tmp/omniroute-bootstrap.log 2>&1 &
     for _ in $(seq 1 30); do
-      if curl -fsS -m 2 "${OMNIROUTE_BASE_URL}/health" >/dev/null 2>&1; then
+      if curl -fsS -m 2 "${OMNIROUTE_BASE_URL}/healthz" >/dev/null 2>&1; then
         server_up=1
         break
       fi
@@ -119,7 +121,7 @@ if [ "$server_up" -eq 0 ]; then
       warn "OmniRoute did not become healthy; see /tmp/omniroute-bootstrap.log"
     fi
   else
-    warn "Start OmniRoute manually, e.g. 'bash scripts/omniroute-infisical.sh' (needs INFISICAL_* in .env)"
+    warn "Start OmniRoute manually, e.g. 'bash scripts/omniroute-vault.sh' (needs VAULT_ADDR + a token)"
     warn "The agents below will be wired now and will work as soon as the server is up."
   fi
 fi
@@ -136,14 +138,19 @@ fi
 if [ -z "$key" ] && [ "$server_up" -eq 1 ]; then
   say "No OMNIROUTE_API_KEY set — creating one on ${OMNIROUTE_BASE_URL}"
   admin_password="${OMNIROUTE_ADMIN_PASSWORD:-}"
-  if [ -z "$admin_password" ] && command -v infisical >/dev/null 2>&1 && [ -n "${INFISICAL_PROJECT_ID:-}" ]; then
+  # Fall back to the stack's secret in Cerulean Vault (KV v2). This reads over
+  # curl so no Vault CLI is needed; absent address or token just means "no
+  # fallback" rather than an error.
+  vault_token="${VAULT_TOKEN:-}"
+  if [ -z "$vault_token" ] && [ -n "${VAULT_TOKEN_FILE:-}" ] && [ -r "${VAULT_TOKEN_FILE}" ]; then
+    vault_token="$(tr -d '\r\n' < "${VAULT_TOKEN_FILE}")"
+  fi
+  if [ -z "$admin_password" ] && [ -n "${VAULT_ADDR:-}" ] && [ -n "$vault_token" ]; then
     admin_password="$(
-      infisical secrets get INITIAL_PASSWORD \
-        --projectId "${INFISICAL_PROJECT_ID}" \
-        --env "${INFISICAL_ENV:-dev}" \
-        --path "${INFISICAL_PATH:-/}" \
-        ${INFISICAL_DOMAIN:+--domain "${INFISICAL_DOMAIN}"} \
-        --plain 2>/dev/null || true
+      curl -sS -m 15 ${VAULT_SKIP_VERIFY:+-k} -H "X-Vault-Token: $vault_token" \
+        "${VAULT_ADDR}/v1/${VAULT_PREFIX:-cerulean}/data/${VAULT_PATH:-olympus}" \
+        | python3 -c 'import json,sys
+print(json.load(sys.stdin).get("data",{}).get("data",{}).get("INITIAL_PASSWORD",""))' 2>/dev/null || true
     )"
   fi
   if [ -n "$admin_password" ]; then
@@ -176,7 +183,7 @@ if [ -z "$key" ] && [ "$server_up" -eq 1 ]; then
       warn "Dashboard login failed — create a key in the dashboard at ${OMNIROUTE_BASE_URL}/login and export OMNIROUTE_API_KEY, then re-run."
     fi
   else
-    warn "No OMNIROUTE_ADMIN_PASSWORD and no Infisical INITIAL_PASSWORD — create a key in the dashboard at ${OMNIROUTE_BASE_URL}/login and export OMNIROUTE_API_KEY, then re-run."
+    warn "No OMNIROUTE_ADMIN_PASSWORD and no Vault INITIAL_PASSWORD — create a key in the dashboard at ${OMNIROUTE_BASE_URL}/login and export OMNIROUTE_API_KEY, then re-run."
   fi
 fi
 
@@ -300,4 +307,4 @@ echo
 echo "Next steps:"
 echo "  - Watch one lap:        archon workflow run factory-implement --branch factory/impl-1 \"implement gh:issue:<n>\""
 echo "  - Audit readiness:      python3 factory/doctor.py"
-echo "  - Start OmniRoute:      bash scripts/omniroute-infisical.sh   (needs INFISICAL_* in .env)"
+echo "  - Start OmniRoute:      bash scripts/omniroute-vault.sh   (needs VAULT_ADDR + a token)"

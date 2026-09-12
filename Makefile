@@ -45,19 +45,19 @@ new-request: ## Scaffold build-requests/$(NAME).md from factory/APP_SPEC_TEMPLAT
 builds: ## List factory output (./builds, gitignored)
 	@ls -la builds 2>/dev/null || echo "builds/: empty (run make app) — output is gitignored per .gitignore:builds/"
 
-## ---- Compose (Infisical profile) -----------------------------------------
+## ---- Compose (Vault profile) ----------------------------------------------
 
-up: ## Start supporting services where present (Infisical profile)
-	docker compose -f compose.infisical.yml --profile infisical up -d 2>/dev/null || docker compose -f docker-compose.infisical.yml --profile infisical up -d 2>/dev/null || echo "no compose stack for this profile"
+up: ## Start supporting services where present (Vault profile)
+	docker compose -f compose.vault.yml --profile vault up -d 2>/dev/null || docker compose -f docker-compose.vault.yml --profile vault up -d 2>/dev/null || echo "no compose stack for this profile"
 
 down: ## Stop supporting services (keeps volumes)
-	docker compose -f compose.infisical.yml --profile infisical down 2>/dev/null || docker compose -f docker-compose.infisical.yml --profile infisical down 2>/dev/null || true
+	docker compose -f compose.vault.yml --profile vault down 2>/dev/null || docker compose -f docker-compose.vault.yml --profile vault down 2>/dev/null || true
 
 logs: ## Tail logs from supporting services
-	docker compose -f compose.infisical.yml --profile infisical logs -f 2>/dev/null || docker compose -f docker-compose.infisical.yml --profile infisical logs -f 2>/dev/null || true
+	docker compose -f compose.vault.yml --profile vault logs -f 2>/dev/null || docker compose -f docker-compose.vault.yml --profile vault logs -f 2>/dev/null || true
 
 ps: ## List supporting service status
-	docker compose -f compose.infisical.yml --profile infisical ps 2>/dev/null || docker compose -f docker-compose.infisical.yml --profile infisical ps 2>/dev/null || true
+	docker compose -f compose.vault.yml --profile vault ps 2>/dev/null || docker compose -f docker-compose.vault.yml --profile vault ps 2>/dev/null || true
 
 ## ---- Docker (container) ---------------------------------------------------
 
@@ -108,6 +108,9 @@ studio-check: ## Typecheck + test Studio (run make studio-install first)
 studio-e2e: ## Drive the real Authentik handshake (needs STUDIO_E2E_* vars; see web/studio/README.md)
 	cd web/studio && npm run test:integration
 
+vault-bootstrap: ## Store this stack's secret in Cerulean Vault (needs VAULT_ADDR + VAULT_TOKEN)
+	python3 scripts/vault-bootstrap.py
+
 ## ---- Conformity -----------------------------------------------------------
 
 check: ## Run attribution guard + credential scan + structure checks
@@ -125,7 +128,12 @@ check-commits: ## Run the attribution guard over recent commit messages
 	bash .githooks/commit-msg .git/COMMIT_EDITMSG 2>/dev/null || true
 	git log --oneline -5 2>/dev/null | head -5
 
-check-compose: ## Validate compose files against .env.example
-	cp .env.example .env 2>/dev/null || true
-	docker compose -f compose.infisical.yml config --quiet 2>/dev/null || docker compose -f docker-compose.infisical.yml config --quiet 2>/dev/null || echo "compose config: not applicable"
-	rm -f .env 2>/dev/null || true
+check-compose: ## Validate compose files (rendered against .env.example, never touching .env)
+	@tmp_env=$$(mktemp); \
+	cp .env.example "$$tmp_env" 2>/dev/null || true; \
+	if docker compose --env-file "$$tmp_env" -f compose.vault.yml config --quiet 2>/dev/null; then \
+		echo "compose config: ok (compose.vault.yml)"; \
+	else \
+		echo "compose config: not applicable"; \
+	fi; \
+	rm -f "$$tmp_env"

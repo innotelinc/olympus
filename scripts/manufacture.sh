@@ -23,8 +23,8 @@ fi
 echo "==> manufacture: spec: $SPEC"
 
 # Ensure local gateway is up if possible (non-fatal if not)
-if [ -d "$ROOT_DIR/core-modules/omniroute" ] && ! curl -fsS -m 2 http://localhost:20128/health >/dev/null 2>&1; then
-  if [ -f "$ROOT_DIR/scripts/omniroute-infisical.sh" ]; then
+if [ -d "$ROOT_DIR/core-modules/omniroute" ] && ! curl -fsS -m 2 http://localhost:20128/healthz >/dev/null 2>&1; then
+  if [ -f "$ROOT_DIR/scripts/omniroute-vault.sh" ]; then
     echo "==> OmniRoute not at http://localhost:20128 — attempting local gateway (non-blocking)" >&2
     # Don't block; the factory will complain verbosely if unreachable.
   fi

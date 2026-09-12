@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Credential scan for tracked files — fails closed on literal secrets.
 
-This exists because a hardcoded Infisical admin password once shipped in this
+This exists because a hardcoded secret-manager admin password once shipped in this
 public repository. It is intentionally narrow: it looks for *literal* secrets,
 not for the word "password", so it stays quiet on templates, env references,
 and documentation.
@@ -48,6 +48,13 @@ ASSIGNMENT = re.compile(
 # this narrow on purpose.
 NAMESPACED_IDENTIFIER_KEY = re.compile(r"_key$", re.IGNORECASE)
 NAMESPACED_IDENTIFIER_VALUE = re.compile(r"^[a-z0-9]+(\.[a-z0-9]+)+$")
+
+# A value that is itself a SCREAMING_SNAKE_CASE name is naming a field or env var,
+# not carrying a credential — e.g. SECRET_KEY = "INITIAL_PASSWORD", which says
+# *which* Vault field to read. Two or more all-uppercase words joined by
+# underscores, and nothing else: real secrets are mixed-case and include digits
+# or symbols, so this cannot swallow one.
+FIELD_NAME_VALUE = re.compile(r"^[A-Z]+(_[A-Z]+)+$")
 
 # Values that look like configuration rather than credentials.
 PLACEHOLDER_HINTS = (
@@ -134,6 +141,8 @@ def scan_text(label: str, text: str) -> list[Finding]:
             if is_placeholder(value):
                 continue
             if NAMESPACED_IDENTIFIER_KEY.search(name) and NAMESPACED_IDENTIFIER_VALUE.match(value):
+                continue
+            if FIELD_NAME_VALUE.match(value):
                 continue
             findings.append((label, number, f"literal-secret ({name})", mask(value)))
 
