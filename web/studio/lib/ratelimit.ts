@@ -18,6 +18,10 @@
  * Counters are fixed one-minute windows (cheap, allocation-free, trivially
  * explainable in an incident) with a cheap cleanup pass so the map cannot grow
  * with the number of identities ever seen.
+ *
+ * The limit can be disabled entirely — `STUDIO_RATE_LIMIT_PER_MIN=0` (or
+ * `off`) means no cap. For a single-operator deployment behind an IdP that is a
+ * legitimate choice; the default exists for the shared case.
  */
 
 export const RATE_LIMIT_ENV = "STUDIO_RATE_LIMIT_PER_MIN";
@@ -27,6 +31,23 @@ export const DEFAULT_RATE_LIMIT_PER_MIN = 20;
 
 /** Hard cap — enough headroom for heavy interactive use, low enough that a runaway loop still gets stopped. */
 export const MAX_RATE_LIMIT_PER_MIN = 600;
+
+/** Values that switch the limit off rather than falling back to the default. */
+const DISABLED_VALUES = new Set(["0", "off", "false", "disabled", "no", "unlimited"]);
+
+/**
+ * The configured per-minute limit, or `null` when the limit is disabled.
+ * An unparseable value falls back to the default rather than silently meaning
+ * "unlimited" — a typo should not remove the only spend cap.
+ */
+export function readRateLimitConfig(): number | null {
+  const raw = process.env[RATE_LIMIT_ENV]?.trim() ?? "";
+  if (!raw) return DEFAULT_RATE_LIMIT_PER_MIN;
+  if (DISABLED_VALUES.has(raw.toLowerCase())) return null;
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isNaN(parsed) || parsed < 1) return DEFAULT_RATE_LIMIT_PER_MIN;
+  return Math.min(parsed, MAX_RATE_LIMIT_PER_MIN);
+}
 
 /** Drop counters not touched within this window; identity namespaces are tiny, but unbounded is unbounded. */
 const IDLE_SWEEP_MS = 15 * 60_000;
@@ -41,18 +62,12 @@ let lastSweep = 0;
 
 export type RateLimitResult = {
   ok: boolean;
+  /** The active per-minute limit; 0 means the limit is disabled. */
   limit: number;
   remaining: number;
   /** Seconds until the current window ends; 0 when the request is allowed. */
   retryAfterSeconds: number;
 };
-
-export function readRateLimitConfig(): number {
-  const raw = process.env[RATE_LIMIT_ENV]?.trim() ?? "";
-  const parsed = Number.parseInt(raw, 10);
-  if (Number.isNaN(parsed) || parsed < 1) return DEFAULT_RATE_LIMIT_PER_MIN;
-  return Math.min(parsed, MAX_RATE_LIMIT_PER_MIN);
-}
 
 function sweep(now: number): void {
   if (now - lastSweep < SWEEP_EVERY_MS) return;
@@ -68,6 +83,13 @@ function sweep(now: number): void {
  */
 export function checkRateLimit(identity: string, now: number = Date.now()): RateLimitResult {
   const limit = readRateLimitConfig();
+
+  // Disabled: never touch a counter, so re-enabling later starts everyone at a
+  // clean window instead of one their pre-disable activity filled.
+  if (limit === null) {
+    return { ok: true, limit: 0, remaining: -1, retryAfterSeconds: 0 };
+  }
+
   const windowStart = Math.floor(now / WINDOW_MS) * WINDOW_MS;
   sweep(now);
 
