@@ -60,7 +60,7 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 | Flow | Path |
 |---|---|
 | Definition source | [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) is canonical; this page is the product's link to it |
-| Identity | Cerulean's Authentik at `https://auth.cerulean.innotel.us` (platform alias `auth.olympus.innotel.us` where wired) — OIDC provider per service |
+| Identity | Cerulean's Authentik at `https://auth.cerulean.innotel.us`, aliased at `auth.olympus.innotel.us` — the same alias every platform gets — OIDC provider per service |
 | Secrets | Cerulean Vault (KV v2) — credentials live in Vault; `.env` carries `vault://` references and is gitignored |
 | Trust / Edge | Cerulean (DNS/certs) and NPM Edge where the hosting host is fronted — managed by Cerulean |
 | AI plane | OmniRoute gateway in front of upstream models — Codex via `wire_api = "responses"` (primary), one key per user |
