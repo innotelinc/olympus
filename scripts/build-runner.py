@@ -62,6 +62,13 @@ REQUEST_SUFFIX = ".request.json"
 RUNNING_SUFFIX = ".running.json"
 STATUS_SUFFIX = ".status.json"
 LOG_SUFFIX = ".log"
+# Dropped by Studio (or an operator) to ask for a stop. A marker file rather than
+# a signal because the two sides share a directory, not a process table: Studio
+# runs in a container and cannot signal a host process. The runner deletes it
+# when it acts, so a stale marker cannot cancel the *next* build.
+CANCEL_SUFFIX = ".cancel.json"
+# How long a build gets to wind down after SIGTERM before SIGKILL.
+CANCEL_GRACE_SECONDS = 10
 HEARTBEAT_NAME = "runner.heartbeat.json"
 LOCK_NAME = "runner.lock"
 
@@ -135,7 +142,9 @@ def parse_env_file(text: str) -> dict[str, str]:
     return parsed
 
 
-def allowed_env(dotenv: dict[str, str], base: dict[str, str]) -> dict[str, str]:
+def allowed_env(
+    dotenv: dict[str, str], base: dict[str, str], repo: Path | None = None
+) -> dict[str, str]:
     """The environment a build runs with: the operator's, plus allow-listed `.env` keys.
 
     Real environment wins over the file, so an operator can override a value by
@@ -156,13 +165,30 @@ def allowed_env(dotenv: dict[str, str], base: dict[str, str]) -> dict[str, str]:
 
     env.setdefault("HOME", os.path.expanduser("~"))
     env.setdefault("PATH", os.defpath)
-    # `uv` lives outside the default systemd PATH, and the workflow's script
-    # nodes declare `runtime: uv` — without this the first node fails with
-    # "uv: command not found", which reads as a workflow bug rather than a unit
-    # that needs one more path.
-    for extra in ("/root/.local/bin", "/usr/local/bin"):
+    # The workflow's script nodes declare `runtime: uv`, and `uv` is not always on
+    # the unit's PATH — without it the first node fails with "uv: command not
+    # found", which reads as a workflow bug rather than a unit that needs one more
+    # path. The directory is a setting (BUILD_EXTRA_PATH, colon-separated) instead
+    # of a hardcoded list because the runner is no longer root: a per-user install
+    # like /root/.local/bin is unreadable to the service account, so the installer
+    # puts uv somewhere every user can reach and points this at it.
+    configured = (os.environ.get("BUILD_EXTRA_PATH") or "").strip()
+    extra_paths = [entry for entry in configured.split(":") if entry] or ["/usr/local/bin"]
+    for extra in reversed(extra_paths):
         if extra not in env["PATH"].split(":"):
             env["PATH"] = f"{extra}:{env['PATH']}"
+
+    # git refuses to work in a repository owned by another account
+    # ("detected dubious ownership"), and that is the normal case here: the
+    # checkout belongs to whoever cloned it — root — while builds run as the
+    # service account. Archon asks git for the repo root before anything else, so
+    # without this the first node dies on a safe.directory message that says
+    # nothing about the build. Passed as command-line config so it travels with
+    # the process instead of depending on a gitconfig someone has to remember.
+    if repo is not None and "GIT_CONFIG_COUNT" not in env:
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = "safe.directory"
+        env["GIT_CONFIG_VALUE_0"] = str(repo)
     return env
 
 
@@ -352,7 +378,7 @@ class Runner:
         return {}
 
     def build_env(self) -> dict[str, str]:
-        return allowed_env(self.dotenv, dict(os.environ))
+        return allowed_env(self.dotenv, dict(os.environ), self.repo)
 
     # ---- queue plumbing -------------------------------------------------
 
@@ -450,7 +476,32 @@ class Runner:
             log_tail="",
         )
 
-        exit_code, detail = self.run_build(job, spec, started_at)
+        exit_code, detail, state_override = self.run_build(job, spec, started_at)
+
+        # A cancelled build is reported as cancelled, not as a failure with an
+        # inscrutable exit code — and a half-written app directory is removed, so
+        # the next attempt is not blocked by the clobber guard on a directory the
+        # operator never meant to keep.
+        if state_override == "cancelled":
+            cancelled_dir = resolve_build_dir(self.repo, slug)
+            if cancelled_dir.is_dir() and read_manifest(cancelled_dir) is None:
+                shutil.rmtree(cancelled_dir, ignore_errors=True)
+                detail = f"{detail} The partial build was removed."
+            log(f"cancelled {slug}: {detail}")
+            self.write_status(
+                job,
+                **self.job_fields(spec),
+                state="cancelled",
+                started_at=started_at,
+                finished_at=now_iso(),
+                exit_code=exit_code,
+                message=detail,
+                artifact=None,
+                log_tail=log_tail(self.log_path(job)),
+            )
+            self.cancel_path(job).unlink(missing_ok=True)
+            running.unlink(missing_ok=True)
+            return
 
         build_dir = resolve_build_dir(self.repo, slug)
         artifact = read_manifest(build_dir)
@@ -494,8 +545,53 @@ class Runner:
             "requested_by": spec["requested_by"],
         }
 
-    def run_build(self, job: str, spec: dict, started_at: str) -> tuple[int, str]:
-        """Run the build, streaming to the job log. Returns (exit_code, detail).
+    def cancel_path(self, job: str) -> Path:
+        return self.queue / f"{job}{CANCEL_SUFFIX}"
+
+    def cancel_requested(self, job: str) -> bool:
+        return self.cancel_path(job).exists()
+
+    def _stop_tree(self, child: subprocess.Popen, graceful: bool) -> None:
+        """Stop the build and everything it started.
+
+        A build is a tree — manufacture.sh → archon → codex — and signalling only
+        the shell we spawned leaves the agent running, holding the model gateway
+        and still writing files into the app directory after the operator was told
+        the build had stopped. The child is started in its own session so the
+        whole group can be signalled at once.
+        """
+        if child.poll() is not None:
+            return
+        try:
+            group = os.getpgid(child.pid)
+        except OSError:
+            group = None
+
+        def signal_tree(sig: int) -> None:
+            if group is None:
+                child.send_signal(sig)
+                return
+            try:
+                os.killpg(group, sig)
+            except (ProcessLookupError, PermissionError):
+                child.send_signal(sig)
+
+        signal_tree(signal.SIGTERM if graceful else signal.SIGKILL)
+        if not graceful:
+            child.wait()
+            return
+        try:
+            child.wait(timeout=CANCEL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            signal_tree(signal.SIGKILL)
+            child.wait()
+
+    def run_build(self, job: str, spec: dict, started_at: str) -> tuple[int, str, str | None]:
+        """Run the build, streaming to the job log.
+
+        Returns (exit_code, detail, state_override). The override is how a cancel
+        is recorded as `cancelled` rather than as a mysterious failure: the exit
+        code of a killed process cannot say why it died.
 
         The child writes straight to the log file, so the parent can report a live
         tail while it runs — which is the difference between a Studio panel that
@@ -514,6 +610,10 @@ class Runner:
         command = ["bash", str(self.manufacture), str(spec["spec"])]
         started = time.monotonic()
 
+        # A marker left over from a previous job with this id would cancel this
+        # run before it started. Claiming the job means this id is ours now.
+        self.cancel_path(job).unlink(missing_ok=True)
+
         try:
             with self.log_path(job).open("wb") as sink:
                 self.child = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
@@ -523,20 +623,29 @@ class Runner:
                     stdin=subprocess.DEVNULL,
                     stdout=sink,
                     stderr=subprocess.STDOUT,
+                    # Own session, so the whole build tree can be signalled.
+                    start_new_session=True,
                 )
                 # `started_at` was written before the child existed; keep it.
                 last_status = time.monotonic()
                 while self.child.poll() is None:
-                    if self.stopping:
-                        self.child.terminate()
-                        break
+                    if self.stopping or self.cancel_requested(job):
+                        why = "a stop was requested" if self.stopping else "cancelled from Studio"
+                        self._stop_tree(self.child, graceful=True)
+                        self.child = None
+                        self.cancel_path(job).unlink(missing_ok=True)
+                        log(f"{slug}: {why} (job {job})")
+                        return 130, f"The build was stopped — {why}.", "cancelled"
 
                     elapsed = time.monotonic() - started
                     if elapsed > self.timeout_seconds:
-                        self.child.kill()
-                        self.child.wait()
+                        self._stop_tree(self.child, graceful=False)
                         self.child = None
-                        return 124, f"The build exceeded {self.timeout_seconds}s and was killed."
+                        return (
+                            124,
+                            f"The build exceeded {self.timeout_seconds}s and was killed.",
+                            None,
+                        )
 
                     if time.monotonic() - last_status >= STATUS_EVERY_SECONDS:
                         last_status = time.monotonic()
@@ -558,11 +667,11 @@ class Runner:
 
                 exit_code = self.child.wait() if self.child else 130
         except OSError as error:
-            return 1, f"Could not start the build command: {error}"
+            return 1, f"Could not start the build command: {error}", None
         finally:
             self.child = None
 
-        return exit_code, ""
+        return exit_code, "", None
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -687,9 +796,16 @@ def main() -> int:
             if (repo / ".env").is_file()
             else {},
             dict(os.environ),
+            repo,
         )
+        # Reported because the runner no longer has to be root: an operator
+        # checking a fresh install wants to see *which* account is about to run
+        # builds, and whether it can read the .env containing the gateway key.
+        print(f"user        uid {os.geteuid()} ({os.environ.get('USER') or 'unknown'})")
         print(f"repo        {repo}")
         print(f"queue       {queue}")
+        print(f"queue writable  {os.access(queue if queue.exists() else repo, os.W_OK)}")
+        print(f".env readable   {(repo / '.env').is_file() and os.access(repo / '.env', os.R_OK)}")
         print(f"timeout     {timeout}s")
         print(f"gateway     {env.get('OMNIROUTE_BASE_URL', '<unset>')}")
         print(f"model       {env.get('OMNIROUTE_MODEL', '<unset>')}")
@@ -738,7 +854,20 @@ def main() -> int:
 
     # One runner per queue. Two would both scan, and though the claim is atomic,
     # two concurrent `make app` runs is exactly the load this avoids.
-    lock = lock_path.open("w")
+    #
+    # A permissions failure here is NOT "another runner is running" — it is the
+    # account this unit runs as being unable to use the queue at all, which is
+    # what a switch from a root install leaves behind (a root-owned lock file the
+    # new service account cannot open). Saying so saves reading the errno.
+    try:
+        lock = lock_path.open("w")
+    except PermissionError:
+        log(
+            f"cannot open {lock_path} as uid {os.geteuid()}: the queue directory is "
+            "owned by another account — re-run scripts/install-build-runner.sh to "
+            "hand it to the build user"
+        )
+        return 1
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:

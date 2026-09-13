@@ -19,9 +19,28 @@
 # EROFS and read as a workflow bug. The containment that matters is in the
 # runner itself, which treats the queue as untrusted input.
 #
+# RUNS AS A DEDICATED USER, NOT ROOT. Root was never required — the toolchain is
+# world-executable — and a build that runs a coding agent over a spec written in a
+# browser should not hold root. So the unit gets its own account:
+#
+#   group olympus-build      shared group: the queue directory is group-writable
+#   user  olympus-builder    the build's account, no login shell, own HOME so
+#                            Archon and Codex keep their state out of /root
+#
+# Three pieces of state have to be handed over for that to work, and all three are
+# done here so a fresh install runs on the first click:
+#
+#   ./builds/             chowned to the builder — it is the only writer
+#   .factory/build-queue/ group-writable, with an ACL for Studio's uid (1001),
+#                         which has no host account to put in the group
+#   .env                  reads as 0600 root, so the builder gets an ACL rather
+#                         than a widened mode: the file holds the Vault and
+#                         Authentik secrets and only the runner needs those keys
+#
 #   scripts/install-build-runner.sh              # install and start
 #   scripts/install-build-runner.sh --uninstall
 #   scripts/install-build-runner.sh --no-start   # write the unit only
+#   scripts/install-build-runner.sh --as-root    # opt back into running as root
 #   systemctl status olympus-build-runner
 #   journalctl -u olympus-build-runner -f
 #   python3 scripts/build-runner.py --list
@@ -31,6 +50,10 @@ DIR=/etc/systemd/system
 UNIT=olympus-build-runner
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-/usr/bin/python3}"
+BUILD_USER="${BUILD_USER:-olympus-builder}"
+BUILD_GROUP="${BUILD_GROUP:-olympus-build}"
+BUILD_HOME="${BUILD_HOME:-/var/lib/$BUILD_USER}"
+STUDIO_UID="${STUDIO_UID:-1001}"
 
 say()  { printf '\033[1;32m==> \033[0m%s\n' "$*"; }
 warn() { printf '\033[1;33m==> \033[0m%s\n' "$*" >&2; }
@@ -38,11 +61,13 @@ die()  { printf '\033[1;31m==> \033[0m%s\n' "$*" >&2; exit 1; }
 
 uninstall=false
 start=true
+run_as_root=false
 for arg in "$@"; do
     case "$arg" in
         --uninstall) uninstall=true ;;
         --no-start)  start=false ;;
-        *) die "unknown argument: $arg (expected --uninstall and/or --no-start)" ;;
+        --as-root)   run_as_root=true ;;
+        *) die "unknown argument: $arg (expected --uninstall, --no-start and/or --as-root)" ;;
     esac
 done
 
@@ -72,6 +97,87 @@ else
     mkdir -p "$REPO_ROOT/.factory/build-queue"
 fi
 
+# ---- the build account --------------------------------------------------------
+# Everything below is skipped under --as-root, so the flag is a real escape hatch
+# and not just a comment: the unit, the ownership and the PATH all follow it.
+if $run_as_root; then
+    SERVICE_USER=root
+    SERVICE_GROUP=root
+    SERVICE_HOME=/root
+    SERVICE_PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    warn "--as-root: builds will run as root (uv from /root/.local/bin)"
+else
+    getent group "$BUILD_GROUP" >/dev/null 2>&1 || groupadd --system "$BUILD_GROUP"
+    if ! id -u "$BUILD_USER" >/dev/null 2>&1; then
+        useradd --system --gid "$BUILD_GROUP" --home-dir "$BUILD_HOME" \
+            --shell /usr/sbin/nologin --comment "Olympus app builds" "$BUILD_USER"
+        say "created service account $BUILD_USER ($BUILD_GROUP)"
+    fi
+    install -d -o "$BUILD_USER" -g "$BUILD_GROUP" -m 0750 "$BUILD_HOME"
+
+    SERVICE_USER="$BUILD_USER"
+    SERVICE_GROUP="$BUILD_GROUP"
+    SERVICE_HOME="$BUILD_HOME"
+    SERVICE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+    # `uv` is usually a single binary in the operator's own ~/.local/bin, which the
+    # service account cannot read (and /root is 0700). "Is uv on *my* PATH" is the
+    # wrong question — under sudo, root's PATH resolves it and the install looks
+    # fine while the builder still cannot run the workflow's `runtime: uv` nodes. So
+    # the test is whether a copy exists where every account can execute it.
+    if [[ ! -x /usr/local/bin/uv ]]; then
+        candidates=()
+        command -v uv >/dev/null 2>&1 && candidates+=("$(command -v uv)")
+        candidates+=(/root/.local/bin/uv "$SERVICE_HOME/.local/bin/uv")
+        for candidate in "${candidates[@]}"; do
+            if [[ -x "$candidate" ]]; then
+                install -m 0755 "$candidate" /usr/local/bin/uv
+                say "published uv: $candidate -> /usr/local/bin/uv (readable by every account)"
+                break
+            fi
+        done
+    fi
+    if [[ ! -x /usr/local/bin/uv ]]; then
+        warn "uv is not available to the service account — the workflow's script nodes declare 'runtime: uv'; install it (see docs/stack.md)"
+    fi
+
+    # ./builds/ — the builder is its only writer, so it owns it outright.
+    # -R, because apps built before this change are root-owned inside, and the
+    # `replace` path removes a previous build before rebuilding: it would fail to,
+    # silently, and the workflow's clobber guard would then refuse the rebuild.
+    if [[ -d "$REPO_ROOT/builds" ]] || mkdir -p "$REPO_ROOT/builds"; then
+        chown -R "$SERVICE_USER:$SERVICE_GROUP" "$REPO_ROOT/builds"
+        chmod 0775 "$REPO_ROOT/builds"
+    fi
+
+    # The queue is written by BOTH accounts: Studio drops requests in, the builder
+    # renames them and writes status/log files. Studio runs as uid 1001 with no
+    # host account, so it cannot simply be added to the group — it gets an ACL,
+    # and a *default* ACL so files either side creates stay readable to the other.
+    QUEUE_DIR="$REPO_ROOT/.factory/build-queue"
+    chgrp "$SERVICE_GROUP" "$QUEUE_DIR"
+    chmod 2775 "$QUEUE_DIR"
+    if command -v setfacl >/dev/null 2>&1; then
+        setfacl -m "u:$SERVICE_USER:rwx,u:$STUDIO_UID:rwx" "$QUEUE_DIR"
+        setfacl -d -m "u:$SERVICE_USER:rwx,u:$STUDIO_UID:rwx" "$QUEUE_DIR"
+        # -R, and it matters: a default ACL only governs files created later. A
+        # queue left over from a root install already holds runner.lock and a
+        # heartbeat, both root-owned 0644 — the runner then fails to open its own
+        # lock and the unit restart-loops. `X` keeps directories traversable
+        # without marking files executable.
+        setfacl -R -m "u:$SERVICE_USER:rwX,u:$STUDIO_UID:rwX" "$QUEUE_DIR"
+        say "queue shared: $QUEUE_DIR — group $SERVICE_GROUP + uid $STUDIO_UID (ACL)"
+    else
+        warn "setfacl is missing; Studio (uid $STUDIO_UID) may not be able to queue builds"
+    fi
+
+    # `.env` holds the gateway key the runner allow-lists — and the Vault and
+    # Authentik secrets it must never pass on. An ACL keeps the 0600 mode intact.
+    if [[ -f "$REPO_ROOT/.env" ]] && command -v setfacl >/dev/null 2>&1; then
+        setfacl -m "u:$SERVICE_USER:r" "$REPO_ROOT/.env"
+    fi
+fi
+
 cat > "$DIR/$UNIT.service" <<UNIT
 [Unit]
 Description=Olympus build runner — runs \`make app\` for builds queued by Studio
@@ -82,6 +188,8 @@ After=network-online.target docker.service
 
 [Service]
 Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_GROUP
 WorkingDirectory=$REPO_ROOT
 # The runner reads the repo .env itself, allow-listing OMNIROUTE_*/ARCHON_* — so
 # unlike EnvironmentFile= it never hands the build the Vault or Authentik tokens.
@@ -89,15 +197,20 @@ WorkingDirectory=$REPO_ROOT
 ExecStart=$PYTHON $REPO_ROOT/scripts/build-runner.py --serve
 Restart=always
 RestartSec=5
-# uv lives in ~/.local/bin and the workflow's script nodes declare \`runtime: uv\`;
-# the runner prepends it too, but the unit should not depend on that.
-Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=HOME=/root
+# Home is the service account's own, so Archon state lands in
+# $SERVICE_HOME/.archon instead of /root/.archon, and the build cannot read
+# root's Codex credentials even by accident.
+Environment=HOME=$SERVICE_HOME
+Environment=USER=$SERVICE_USER
+# \`uv\` is published to /usr/local/bin by this installer: the operator's copy
+# in ~/.local/bin is not readable from a different account.
+Environment=PATH=$SERVICE_PATH
+Environment=BUILD_EXTRA_PATH=/usr/local/bin
 # Deliberately no ProtectSystem/ProtectHome: see the header.
 
 [Install]
-# Without this, `systemctl enable` warns and the runner does not come back after
-# a reboot — the queue would silently stop draining until someone noticed.
+# Without this, \`systemctl enable\` warns and the runner does not come back
+# after a reboot — the queue would silently stop draining until someone noticed.
 WantedBy=multi-user.target
 UNIT
 
@@ -105,15 +218,30 @@ chmod 644 "$DIR/$UNIT.service"
 systemctl daemon-reload
 
 if $start; then
-    systemctl enable --now "$UNIT.service"
-    say "installed and started: $UNIT.service -> scripts/build-runner.py --serve"
+    systemctl enable "$UNIT.service"
+    # restart, not `enable --now`: re-running this installer is how you apply a
+    # change to the unit *or* to build-runner.py, and `enable --now` on an already
+    # active service does nothing — leaving the new files on disk and the old code
+    # in memory, which reads as the fix not working.
+    systemctl restart "$UNIT.service"
+    say "installed and (re)started: $UNIT.service -> scripts/build-runner.py --serve"
 else
     say "installed: $UNIT.service (not started)"
 fi
 
 echo
 say "environment the runner will use:"
-"$PYTHON" "$REPO_ROOT/scripts/build-runner.py" --check || warn "the runner reported a problem above"
+# Run the check AS the service account. Running it as root would happily read a
+# .env the builder cannot, which is the one failure this install is most likely
+# to have — and it would look green right up until the first build.
+if ! $run_as_root && command -v runuser >/dev/null 2>&1; then
+    runuser -u "$SERVICE_USER" -- env HOME="$SERVICE_HOME" "USER=$SERVICE_USER" \
+        PATH="$SERVICE_PATH" BUILD_EXTRA_PATH=/usr/local/bin \
+        "$PYTHON" "$REPO_ROOT/scripts/build-runner.py" --check \
+        || warn "the runner reported a problem above"
+else
+    "$PYTHON" "$REPO_ROOT/scripts/build-runner.py" --check || warn "the runner reported a problem above"
+fi
 echo
 echo "  status:   systemctl status $UNIT"
 echo "  logs:     journalctl -u $UNIT -f"
