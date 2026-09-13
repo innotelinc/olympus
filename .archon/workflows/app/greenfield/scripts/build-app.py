@@ -34,6 +34,16 @@ them cooling down at once used to end a run that the wider catalogue could have 
 Pin OMNIROUTE_MODEL to a concrete tool-calling model (see .env.example) to make this
 deterministic rather than a coin toss.
 
+A TREE THAT IS WRITTEN AND BROKEN GOES BACK TO THE AGENT THAT WROTE IT. The retry above
+stops the moment a file exists, which is right — re-running an agent over a half-written
+app produces something that is neither build — but it also means a project that installs
+and then fails to compile reached packaging untouched, and the failure surfaced there as
+a compiler message with nobody left to act on it. Nothing in this workflow ran the
+*plan's* own build: `verify-app` runs a check the spec declares, and the packager runs
+the plan's commands in the image, after this node is gone. So the plan's install and
+build run here once, on the tree the agent just wrote, and a non-zero exit is handed
+back to the agent — which is the only party that can fix it and is still in the room.
+
 Reads (env):
     INPUTS_SPEC_PATH            the resolved spec
     INPUTS_APP_DIR              where the app must be written
@@ -56,6 +66,7 @@ import functools
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -81,6 +92,24 @@ RETRY_BACKOFF = 4  # 30s, then 120s
 # nothing" is true of a rate limit and of a model that cannot use tools, and they need
 # different answers from whoever reads the failure.
 RATE_LIMIT_MARKERS = (" 429 ", "429 too many requests", "too many requests", "exceeded retry limit")
+
+# How many times a written-but-broken tree goes back to the agent. One: the agent is
+# still in the room with the exact command and the compiler's own message, and a tree
+# that fails a second repair is evidence about the task rather than bad luck.
+MAX_REPAIRS = 1
+# The plan's build, run here before packaging runs it in the image. Bounded well under
+# RUN_TIMEOUT_SECONDS: this is one install and one compile, not an agent turn.
+BUILD_TIMEOUT_SECONDS = 600
+# Enough of the compiler's output to name the file and the reason. The agent gets this;
+# the build log keeps the whole thing.
+BUILD_ERROR_CHARS = 4_000
+# Languages whose install step writes *inside the project*: `npm install` goes to
+# ./node_modules, `composer install` to ./vendor. Only those are built here, because the
+# node runs on the host and a `pip install -r requirements.txt` would install into
+# whatever interpreter is on PATH — a change outside the project that this node has no
+# business making. A plan in any other language is still built and repaired in its image,
+# where the install is the container's business and cannot reach the host.
+BUILDABLE_HERE = frozenset({"node", "go", "php", "rust"})
 
 DEFAULT_MODEL = "auto/coding"
 # A CONCRETE model, not a combo. Combos pin a native Codex turn to one member, and the
@@ -353,6 +382,100 @@ def has_artifact(app_dir: Path) -> bool:
         return False
 
 
+def plan_build_commands(app_dir: Path) -> list[str]:
+    """The commands the image will run for this plan, as the plan declares them.
+
+    Read from the plan on disk rather than rebuilt from the spec: the plan is what the
+    packager writes into the Dockerfile and what the runtime starts, so running it here
+    is running the same thing packaging would, only early enough for the agent that
+    wrote the tree to answer for it.
+
+    An absent module or an absent plan is not an error — a project built before the
+    planner existed has no plan, and it packaged fine before this existed. A plan in a
+    language whose install would reach outside the project is refused for the reason in
+    `BUILDABLE_HERE`; that is a limitation of running this on a host, not a statement
+    about the project.
+    """
+    module = plan_contract()
+    if module is None:
+        return []
+    plan = module.read_plan_file(app_dir) if hasattr(module, "read_plan_file") else None
+    if not plan:
+        return []
+    runtime = plan.get("runtime") if isinstance(plan.get("runtime"), dict) else {}
+    language = str(runtime.get("language") or "").strip().lower()
+    if language not in BUILDABLE_HERE:
+        return []
+    run = plan.get("run") if isinstance(plan.get("run"), dict) else {}
+    commands = [str(run.get("install") or "").strip(), str(run.get("build") or "").strip()]
+    return [command for command in commands if command]
+
+
+def build_program(commands: list[str]) -> str:
+    """The program the first command needs, or "" when it cannot be read."""
+    if not commands:
+        return ""
+    try:
+        parts = shlex.split(commands[0])
+    except ValueError:
+        return ""
+    return parts[0] if parts else ""
+
+
+def run_plan_build(
+    app_dir: Path, commands: list[str], child_env: dict[str, str]
+) -> tuple[int, str]:
+    """Install and build the project exactly as the Dockerfile will, and report it.
+
+    Through `bash -lc` because that is what a Dockerfile `RUN` is: a shell. Passing the
+    commands as arguments to a shell rather than a shell string keeps `shlex` out of the
+    security story — the plan's commands are already what the image executes as root,
+    and this is the same string in the same order, not a new capability.
+    """
+    joined = " && ".join(commands)
+    try:
+        completed = subprocess.run(
+            ["bash", "-lc", joined],
+            cwd=str(app_dir),
+            env=child_env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=BUILD_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, f"the plan's build did not finish within {BUILD_TIMEOUT_SECONDS}s"
+    except OSError as error:
+        return 127, f"could not run the plan's build: {error}"
+
+    output = f"{completed.stdout or ''}\n{completed.stderr or ''}".strip()
+    if len(output) > BUILD_ERROR_CHARS:
+        output = "… (truncated)\n" + output[-BUILD_ERROR_CHARS:]
+    return completed.returncode, output
+
+
+def repair_prompt(base_prompt: str, commands: list[str], output: str) -> str:
+    """The build's own failure, appended to the instruction that produced the tree.
+
+    The whole original prompt is kept, so the repair is a correction to the same task
+    rather than a new one: an agent handed only the error tends to rewrite the project
+    around it, and the plan and the spec are what stop that.
+    """
+    return (
+        base_prompt
+        + "\n\n## The tree you just wrote does not build\n\n"
+        + f"Running the plan's own commands — `{' && '.join(commands)}` — in the working "
+        + "directory exited non-zero:\n\n```\n"
+        + (output or "(no output)")
+        + "\n```\n\n"
+        + "Fix the cause in the files you wrote. Do not remove a feature, stub a module, "
+        + "or change the stack to make the error go away, and do not run a packager — "
+        + "packaging runs after you, from the same plan. When the tree builds, stop."
+    )
+
+
 def run_agent(argv: list[str], app_dir: Path, child_env: dict[str, str]) -> tuple[int, str]:
     """One attempt. Returns the agent's exit code and its (bounded) output."""
     try:
@@ -475,10 +598,54 @@ def main() -> int:
             "with quota in OMNIROUTE_MODEL."
         )
 
+    # Written, but does it build? The retry above stopped the moment a file existed, so
+    # this is the first and only point where the plan's own commands run against the tree
+    # the agent wrote. Skipped unless the toolchain the plan asks for is here: a build
+    # this node cannot run would produce an error about a missing program and hand that
+    # to the agent as if the project were broken, and the packager installs its own
+    # toolchain in the image anyway.
+    commands = plan_build_commands(app_dir)
+    build_exit = 0
+    repairs = 0
+    if has_artifact(app_dir) and commands:
+        program = build_program(commands)
+        if not program or shutil.which(program) is None:
+            note(
+                f"skipping the plan's build: {program or 'its first command'} is not on "
+                "PATH here — packaging runs it in the image"
+            )
+        else:
+            build_exit, build_output = run_plan_build(app_dir, commands, child_env)
+            note(f"plan build exit={build_exit}")
+            while build_exit != 0 and repairs < MAX_REPAIRS:
+                repairs += 1
+                note(
+                    f"repair {repairs}/{MAX_REPAIRS}: the build failed, handing its output "
+                    f"back to {model}"
+                )
+                repair_argv = [
+                    codex, "exec",
+                    "-C", str(app_dir),
+                    "--skip-git-repo-check",
+                    "--sandbox", "workspace-write",
+                    "-m", model,
+                    *gateway_overrides(),
+                    repair_prompt(prompt, commands, build_output),
+                ]
+                exit_code, output = run_agent(repair_argv, app_dir, child_env)
+                note(f"agent exit={exit_code} repair={repairs} model={model}")
+                build_exit, build_output = run_plan_build(app_dir, commands, child_env)
+                note(f"plan build exit={build_exit} after repair {repairs}")
+
     print(json.dumps({
         "exit_code": exit_code,
         "model": model,
         "attempts": attempt,
+        # Recorded so a reader can tell "the agent gave up" from "the agent's tree does
+        # not compile": a run whose build_exit is non-zero is one verify will report as
+        # written and unbuildable, and the number says whether it was ever retried.
+        "build_exit": build_exit,
+        "repairs": repairs,
         "log": output,
     }))
     return 0

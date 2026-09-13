@@ -13,8 +13,12 @@ build. These pin the layering that prevents it.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
+import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -187,6 +191,182 @@ class Precedence(EnvFixture):
             [self.module.DEFAULT_MODEL, self.module.DEFAULT_FALLBACK_MODEL],
         )
         self.assertEqual(self.module.setting("OMNIROUTE_BASE_URL"), "")
+
+
+class ThePlanBuildAndItsRepair(EnvFixture):
+    """The plan's own build runs here, and its failure goes back to the agent.
+
+    Measured, not hypothetical: a spec-driven build wrote its files and exited 0, and
+    only failed later when packaging ran the plan's commands in the image — by which
+    point the agent that wrote the tree was gone and the failure was a compiler message
+    nobody could act on. Nothing in the workflow ran the *plan's* build: `verify-app`
+    runs a check the spec declares, and the packager runs it in the image. These pin the
+    loop that closes that gap, and the two ways it must stay quiet.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.module.plan_contract.cache_clear()
+        self.addCleanup(self.module.plan_contract.cache_clear)
+
+        real = Path(__file__).resolve().parents[2]
+        # The node finds the checkout's plan contract and its prompt by path, so both
+        # have to exist under the fake checkout for `main()` to run at all.
+        (self.checkout / "scripts").mkdir(parents=True)
+        shutil.copy(
+            real / "scripts" / "project_plan.py", self.checkout / "scripts" / "project_plan.py"
+        )
+        real_commands = real / ".archon" / "workflows" / "app" / "greenfield" / "commands"
+        commands = self.checkout / ".archon" / "workflows" / "app" / "greenfield" / "commands"
+        commands.mkdir(parents=True)
+        shutil.copy(real_commands / "build.md", commands / "build.md")
+
+        self.app_dir = self.checkout / "builds" / "probe-app"
+        self.app_dir.mkdir(parents=True)
+        self.spec = self.checkout / "build-requests" / "probe-app.md"
+        self.spec.parent.mkdir(parents=True)
+        self.spec.write_text(
+            "# Probe App\n\n## Verification Criteria\n\n- open it and look\n", encoding="utf-8"
+        )
+
+        os.environ["INPUTS_APP_DIR"] = str(self.app_dir)
+        os.environ["INPUTS_SPEC_PATH"] = str(self.spec)
+        os.environ["INPUTS_TITLE"] = "Probe App"
+
+        self.calls = self.root / "codex-calls"
+
+    def write_codex(self, behaviour: str) -> None:
+        """A stand-in for the agent, so the node's loop can be driven without a gateway."""
+        path = self.root / "codex"
+        path.write_text(
+            "#!/bin/sh\n" f"echo call >> {self.calls}\n" + behaviour,
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        os.environ["CODEX_BIN"] = str(path)
+
+    def write_plan(self, build: str, language: str = "node") -> None:
+        (self.app_dir / "plan.json").write_text(
+            json.dumps(
+                {
+                    "name": "Probe App",
+                    "kind": "app",
+                    "summary": "a probe",
+                    "runtime": {"language": language, "frameworks": [], "database": None},
+                    "run": {
+                        "install": "",
+                        "build": build,
+                        "start": "node server/index.js",
+                        "port": 3000,
+                        "healthcheck": "/",
+                    },
+                    "files": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def run_main(self) -> dict:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = self.module.main()
+        self.assertEqual(code, 0, "the node reports the outcome in its JSON, not its exit code")
+        return json.loads(out.getvalue().strip().splitlines()[-1])
+
+    def call_count(self) -> int:
+        if not self.calls.is_file():
+            return 0
+        return len(self.calls.read_text(encoding="utf-8").splitlines())
+
+    def test_a_failing_build_is_handed_back_and_the_repaired_tree_passes(self) -> None:
+        # The build command fails while the agent's `broken` marker exists, which is the
+        # shape of a real one: the tree is present, and the plan's own command rejects it.
+        self.write_plan(build="test ! -f broken")
+        self.write_codex(
+            f'app="{self.app_dir}"\n'
+            'case "$*" in\n'
+            '  *"does not build"*) rm -f "$app/broken" ;;\n'
+            '  *) touch "$app/broken" ;;\n'
+            "esac\n"
+            'printf "<html>probe</html>" > "$app/index.html"\n'
+            "exit 0\n"
+        )
+
+        result = self.run_main()
+
+        self.assertEqual(result["repairs"], 1)
+        self.assertEqual(result["build_exit"], 0, "the repair left a tree that builds")
+        self.assertEqual(self.call_count(), 2, "one attempt, then one repair")
+        self.assertFalse((self.app_dir / "broken").exists())
+
+    def test_a_tree_that_builds_first_time_is_never_repaired(self) -> None:
+        self.write_plan(build="test -f index.html")
+        self.write_codex(
+            f'app="{self.app_dir}"\nprintf "<html>probe</html>" > "$app/index.html"\n'
+        )
+
+        result = self.run_main()
+
+        self.assertEqual(result["build_exit"], 0)
+        self.assertEqual(result["repairs"], 0)
+        self.assertEqual(self.call_count(), 1, "no second agent run over a tree that builds")
+
+    def test_a_build_this_node_cannot_run_is_skipped_not_blamed_on_the_agent(self) -> None:
+        # The packager installs its own toolchain in the image. A program missing *here*
+        # is this node's limitation, and handing that to the agent as a project failure
+        # would have it rewrite a working tree to satisfy a tool nobody has.
+        self.write_plan(build="definitely-not-a-program --build")
+        self.write_codex(
+            f'app="{self.app_dir}"\nprintf "<html>probe</html>" > "$app/index.html"\n'
+        )
+
+        result = self.run_main()
+
+        self.assertEqual(result["build_exit"], 0)
+        self.assertEqual(result["repairs"], 0)
+        self.assertEqual(self.call_count(), 1)
+
+    def test_no_plan_means_there_is_no_build_to_run(self) -> None:
+        self.assertEqual(self.module.plan_build_commands(self.app_dir), [])
+
+    def test_a_language_whose_install_leaves_the_project_is_not_built_here(self) -> None:
+        # The node runs on the host, and `pip install` would install into whatever
+        # interpreter is on PATH — a change outside the project. That plan is built in
+        # its image instead, where the install cannot reach the host.
+        self.write_plan(build="pip install -r requirements.txt", language="python")
+        self.assertEqual(self.module.plan_build_commands(self.app_dir), [])
+
+    def test_the_repair_keeps_the_original_instruction_and_the_guardrails(self) -> None:
+        prompt = self.module.repair_prompt(
+            "BASE INSTRUCTION",
+            ["npm install", "npm run build"],
+            "src/App.tsx(3,1): error TS2304: Cannot find name 'x'.",
+        )
+
+        self.assertTrue(prompt.startswith("BASE INSTRUCTION"))
+        self.assertIn("npm install && npm run build", prompt)
+        self.assertIn("Cannot find name 'x'", prompt)
+        # The three ways a model makes a build error go away without fixing it.
+        lowered = prompt.lower()
+        self.assertIn("do not run a packager", lowered)
+        self.assertIn("do not remove a feature", lowered)
+        self.assertIn("change the stack to make the error go away", lowered)
+
+    def test_the_first_command_names_the_program_that_has_to_be_here(self) -> None:
+        self.assertEqual(self.module.build_program(["npm install", "npm run build"]), "npm")
+        self.assertEqual(self.module.build_program([]), "")
+
+
+class ThePlanBuildRunsInTheImageOrder(EnvFixture):
+    def test_a_failing_command_reports_its_own_output(self) -> None:
+        # Through a shell, because that is what a Dockerfile `RUN` is: the plan's
+        # commands are run in the order and with the operators the plan asked for.
+        exit_code, output = self.module.run_plan_build(
+            self.checkout, ["printf 'boom from the compiler\\n'; exit 3"], dict(os.environ)
+        )
+
+        self.assertEqual(exit_code, 3)
+        self.assertIn("boom from the compiler", output)
 
 
 if __name__ == "__main__":
