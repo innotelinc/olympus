@@ -151,6 +151,21 @@ gateway-up: ## Start the in-repo gateway (profile: gateway) and wait for it
 gateway-down: ## Stop the in-repo gateway (keeps its data volume)
 	docker compose --profile gateway rm -sf omniroute
 
+# The gateway's state is ONE volume, and the key that decrypts its provider
+# connections lives inside that same volume (`server.env`) — so the volume does
+# not merely hold the gateway, it is the gateway. This copies both halves into
+# Cerulean Vault, under this stack's own path, so losing the host stops mattering.
+# It is safe to run any time: --check compares the backup with the live gateway
+# and exits non-zero on drift, which is the version worth putting on a timer.
+gateway-vault-backup: ## Back the gateway's keys + connections up to Cerulean Vault
+	python3 scripts/omniroute-vault-backup.py $(ARGS)
+
+gateway-vault-check: ## Fail when the Vault backup no longer matches the live gateway
+	python3 scripts/omniroute-vault-backup.py --check
+
+gateway-vault-restore: ## Put the stored keys + connections back (ARGS="--force" to overwrite server.env)
+	python3 scripts/omniroute-vault-backup.py --restore $(ARGS)
+
 gateway-sso-up: ## Put the gateway dashboard behind Cerulean Authentik (oauth2-proxy)
 	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi; \
 	for k in GATEWAY_OIDC_CLIENT_SECRET GATEWAY_SSO_COOKIE_SECRET GATEWAY_PUBLIC_HOST; do \

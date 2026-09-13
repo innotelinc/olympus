@@ -6,7 +6,7 @@
 #   olympus-<target>-check.service   runs scripts/<target>-alert.sh
 #   olympus-<target>-check.timer     fires it daily, and 2 min after boot
 #
-# Three targets exist:
+# Four targets exist:
 #
 #   studio-token   credential expiry check for `make studio-oidc`
 #                  (scripts/studio-token-alert.sh)
@@ -14,6 +14,12 @@
 #                  (scripts/vault-renew-alert.sh)
 #   build-model    can the configured build model call a tool, twice over
 #                  (scripts/build-model-alert.sh)
+#   gateway-backup the gateway's connections + the key that decrypts them, into
+#                  Vault (scripts/gateway-backup-alert.sh)
+#
+# gateway-backup is the one target here that writes something — into Vault, over
+# the network, which is why it still fits this hardening: it reads the gateway's
+# data dir and stores what it read, and writes nothing on this host.
 #
 # On expiry or failure the units land in `systemctl --failed`, which is the
 # fallback signal when Telegram is not configured yet; the service is hardened
@@ -45,9 +51,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # $1 = target name; sets TARGET_SCRIPT and UNIT_BASE
 resolve_target() {
     case "$1" in
-        studio-token) TARGET_SCRIPT=studio-token-alert.sh ;;
-        vault-renew)  TARGET_SCRIPT=vault-renew-alert.sh ;;
-        build-model)  TARGET_SCRIPT=build-model-alert.sh ;;
+        studio-token)   TARGET_SCRIPT=studio-token-alert.sh ;;
+        vault-renew)    TARGET_SCRIPT=vault-renew-alert.sh ;;
+        build-model)    TARGET_SCRIPT=build-model-alert.sh ;;
+        gateway-backup) TARGET_SCRIPT=gateway-backup-alert.sh ;;
         *) return 1 ;;
     esac
     UNIT_BASE="olympus-$1-check"
@@ -67,13 +74,13 @@ for arg in "$@"; do
     case "$arg" in
         --uninstall) uninstall_only=true ;;
         TARGET=*) targets+=("${arg#TARGET=}") ;;
-        *) echo "unknown argument: $arg (expected TARGET=<studio-token|vault-renew|build-model> and/or --uninstall)" >&2; exit 2 ;;
+        *) echo "unknown argument: $arg (expected TARGET=<studio-token|vault-renew|build-model|gateway-backup> and/or --uninstall)" >&2; exit 2 ;;
     esac
 done
-if [[ ${#targets[@]} -eq 0 ]]; then targets=(studio-token vault-renew build-model); fi
+if [[ ${#targets[@]} -eq 0 ]]; then targets=(studio-token vault-renew build-model gateway-backup); fi
 
 for target in "${targets[@]}"; do
-    resolve_target "$target" || { echo "unknown target: $target (expected studio-token, vault-renew or build-model)" >&2; exit 2; }
+    resolve_target "$target" || { echo "unknown target: $target (expected studio-token, vault-renew, build-model or gateway-backup)" >&2; exit 2; }
 
     [[ -f "$REPO_ROOT/scripts/$TARGET_SCRIPT" ]] || {
         echo "scripts/$TARGET_SCRIPT is missing next to this installer" >&2
@@ -143,4 +150,5 @@ if ! $uninstall_only; then
     echo "test the channel:    $REPO_ROOT/scripts/studio-token-alert.sh --test-telegram"
     echo "                     $REPO_ROOT/scripts/vault-renew-alert.sh --test-telegram"
     echo "                     $REPO_ROOT/scripts/build-model-alert.sh --test-telegram"
+    echo "                     $REPO_ROOT/scripts/gateway-backup-alert.sh --test-telegram"
 fi

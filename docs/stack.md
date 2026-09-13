@@ -85,8 +85,12 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 >   provider connections stored in the `storage.sqlite` beside it. A volume copied
 >   with that file intact keeps working — verified by comparing all ten connections
 >   by id after the move; a volume rebuilt without it comes back with credentials
->   that are not *missing* but unreadable. Back the file up wherever you would back
->   up the providers themselves.
+>   that are not *missing* but unreadable. `make gateway-vault-backup` puts both
+>   halves in Cerulean Vault under this stack's own path, and
+>   `make gateway-vault-check` exits non-zero when that copy has drifted from the
+>   live gateway, so it is worth a timer. The restore was exercised against a copy
+>   of the live database: the key read back from Vault decrypted all ten
+>   connections, which is the property the backup exists to have.
 > * **Whoever talks to the gateway inherits the topology problem.** `OMNIROUTE_BASE_URL`
 >   is one value in one `.env`, and host-side scripts need it to be the loopback URL,
 >   so a container cannot be handed a different one. On a host where the gateway is
@@ -273,6 +277,17 @@ administrator: the `olympus-studio-registration` role grants exactly the reads
 and the provider/application writes that registration needs — no users, groups,
 roles, outposts, and no deletes.
 
+The gateway's own state is stored the same way, one level down, because it is the
+one thing here that cannot be regenerated from code — its provider connections and
+the key that decrypts them (`make gateway-vault-backup`, and
+`make gateway-vault-check` to catch drift):
+
+    cerulean/olympus/omniroute    SERVER_ENV (the key), PROVIDERS_JSON, provenance
+
+The sub-path is deliberate rather than extra keys in the secret above: a KV v2
+write replaces the whole secret, so folding an unrelated credential into
+`cerulean/olympus` would make every re-run a quiet coin flip between the two.
+
 ```bash
 make studio-token-check                          # remaining days; exit 2 once lapsing
 make studio-token-rotate AUTHENTIK_HOST=<host>   # rebuild and re-date it
@@ -281,10 +296,11 @@ make studio-token-rotate AUTHENTIK_HOST=<host>   # rebuild and re-date it
 On the deployment host the check runs daily without anyone remembering it:
 
 ```bash
-scripts/install-token-check-timer.sh             # all three: 06:17 UTC + after boot
+scripts/install-token-check-timer.sh             # all four: 06:17 UTC + after boot
 systemctl start olympus-studio-token-check.service   # run the credential check now
 systemctl start olympus-vault-renew-check.service    # renew the Vault token now
 systemctl start olympus-build-model-check.service    # can builds produce anything now
+systemctl start olympus-gateway-backup-check.service # back the gateway's state up now
 ```
 
 The third is the one that guards against silence rather than an outage: builds fail
@@ -292,6 +308,13 @@ without an error when the gateway has no capacity to serve them, so
 `scripts/install-token-check-timer.sh TARGET=build-model` runs
 `scripts/build-model-check.py` daily and alerts when no model in the configured chain
 can call a tool. See [build-model.md](build-model.md).
+
+The fourth is the one that guards against a loss that would otherwise have no
+alarm at all. It re-reads the running gateway every day and stores what it found,
+which is why it needs no drift check to go with it — the copy cannot fall behind
+the thing it is copied from. It is also the only target here that writes anything,
+and it writes to Vault over the network, so the units' read-only hardening is
+intact.
 
 It alerts through Telegram when the credential is inside its warning window
 (`--warn-days`, 14 by default) or unusable, and repeats daily while it lapses —

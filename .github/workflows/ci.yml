@@ -67,7 +67,8 @@ jobs:
           # command run on the host, prune deletes built apps, and the model check
           # decides whether a build can write anything at all. These assert the
           # refusals — traversal, path-shaped slugs, symlinks out of
-          # build-requests/, a 200 that answers in prose — rather than discovering
+          # build-requests/, a 200 that answers in prose, a restore that would
+          # clobber the gateway's live encryption key — rather than discovering
           # them. No gateway is needed: the check's classification is pure and its
           # exit codes are driven against a closed port.
           python3 -m unittest discover -s scripts/tests -t scripts/tests
