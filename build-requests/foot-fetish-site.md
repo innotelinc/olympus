@@ -8,9 +8,9 @@
 
 1. Manufacture it here: `make app SPEC=build-requests/foot-fetish-site.md`
 2. Or commit it (`git add build-requests/foot-fetish-site.md`) — `.github/workflows/olympus-app-builder.yml` builds it on push.
-3. Package the client: `python3 scripts/package-app.py foot-fetish-site`
-4. Build and run it as its own container: `python3 scripts/app-runtime.py --up foot-fetish-site --build`
-5. Put it on a name: `make site-publish SLUG=foot-fetish-site` — the app's vhost is generated, so the edge needs nothing app-specific (see docs/site-publishing.md).
+3. Package and run it from the plan the factory wrote: `python3 scripts/package-project.py foot-fetish-site` then `python3 scripts/app-runtime.py --up foot-fetish-site --build`
+4. Or do it from Studio, which needs no shell: **Preview It** runs it and frames it under `foot-fetish-site-preview.<suffix>`, and **Publish It** puts it on `foot-fetish-site.<suffix>` (see docs/site-publishing.md).
+5. Do not run `package-app.py` or `package-website.py` unless the build directory has no `plan.json`; they build a fixed stack and would ignore the one this spec was planned in.
 
 ## 🎯 Core Purpose
 
@@ -59,6 +59,12 @@ python3 scripts/app-runtime.py --up foot-fetish-site --build   # image + contain
 
 Each app runs as its own container with its own loopback port and its own SQLite
 file under `OLYMPUS_APPS_ROOT` — see `docs/site-publishing.md`.
+
+This project has no stored plan, so the factory plans the stack from this spec
+before it builds — the Tech Stack above is what it starts from — and writes
+`plan.json` beside the build. `scripts/package-project.py` packages from that plan.
+The packager named above is the pre-planner one and applies only to a build
+directory with no `plan.json`.
 
 ## 📎 Reference build (from Studio)
 

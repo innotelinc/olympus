@@ -395,6 +395,18 @@ def plan_prompt_block(plan: dict) -> str:
         f"  at runtime beyond what the project ships.",
         "- Anything worth keeping between restarts goes under the directory in `$DATA_DIR`,",
         "  which is the one path that survives a rebuild. Do not write state anywhere else.",
+        # The one instruction that has to beat the spec, because a spec carries
+        # delivery notes written for a reader and the agent is not the reader. A
+        # spec that says "package the client with `package-app.py`" is describing
+        # the pipeline that packager belongs to; following it writes the fixed
+        # React/Node scaffold over the stack this plan just chose. It happened on
+        # the first planned factory build: the app it produced served a directory
+        # its own image did not contain.
+        "- **Do not run a packager** (`package-app.py`, `package-website.py`,",
+        "  `package-project.py`), and ignore any packaging or delivery instructions in the",
+        "  spec — including its \"Next steps\". Those describe the pipeline, not your job:",
+        "  packaging runs after you, from this plan. A packager you run replaces the project",
+        "  with the stack that packager knows.",
     ]
     if plan["notes"]:
         lines += ["", f"Noted when the plan was confirmed: {plan['notes']}"]

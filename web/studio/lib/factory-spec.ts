@@ -22,6 +22,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { loadRepoEnv, repoRoot } from "./env";
+import type { BuildPlan } from "./plan";
 import type { Project, ProjectKind, StoredFile } from "./projects";
 
 /**
@@ -121,13 +122,27 @@ export function entryPoint(files: StoredFile[], kind: ProjectKind = "app"): stri
 
 /* ---- inference ---------------------------------------------------------- */
 
-function detectStack(files: StoredFile[], kind: ProjectKind): string[] {
+function detectStack(files: StoredFile[], kind: ProjectKind, plan: BuildPlan | null): string[] {
   const stack: string[] = [];
 
   // The kind is stated first and unconditionally. It is not inferred from the file
   // names because it is not an inference: it is what the operator chose, and the
   // factory has to honour it (a website needs packaging; an app must not get it).
-  if (kind === "website") {
+  //
+  // A confirmed plan replaces the two sentences below, because they were the fixed
+  // stacks the packagers used to impose — and a spec that states the old stack is
+  // how the factory builds the old stack, whatever the project was planned as.
+  if (plan) {
+    const frameworks =
+      plan.runtime.frameworks.length > 0 ? ` (${plan.runtime.frameworks.join(", ")})` : "";
+    const database = plan.runtime.database ? ` + ${plan.runtime.database}` : "";
+    stack.push(
+      `${plan.runtime.language}${frameworks}${database} — from the plan this project was built to, which is what it is packaged and run as`,
+    );
+    stack.push(
+      `Runs with \`${plan.run.start}\` on port ${plan.run.port}, health checked at \`${plan.run.healthcheck}\``,
+    );
+  } else if (kind === "website") {
     stack.push("Vite + React 19 + TypeScript (packaged to static `dist/`)");
   } else {
     stack.push(
@@ -155,7 +170,31 @@ function detectStack(files: StoredFile[], kind: ProjectKind): string[] {
   return stack;
 }
 
-function verificationCriteria(files: StoredFile[], kind: ProjectKind): string[] {
+function verificationCriteria(
+  files: StoredFile[],
+  kind: ProjectKind,
+  plan: BuildPlan | null,
+): string[] {
+  // A planned project's bar is its own plan, which is unusual in a good way: the
+  // criteria are the commands that will actually run and the port that will actually
+  // answer, so a build cannot pass this section and fail packaging. Naming a file
+  // the old scaffolder produced is how "verified" came to mean "packaged by
+  // something that no longer builds this project".
+  if (plan) {
+    const criteria: string[] = [];
+    if (plan.run.install) criteria.push(`\`${plan.run.install}\` completes`);
+    if (plan.run.build) criteria.push(`\`${plan.run.build}\` completes`);
+    criteria.push(
+      `the container built from \`plan.json\` starts with \`${plan.run.start}\` and answers \`${plan.run.healthcheck}\` on port ${plan.run.port}`,
+    );
+    criteria.push(
+      kind === "website"
+        ? "the served page renders at 360px and 1440px with no console errors"
+        : "every screen the spec lists works against the API: with rows, with no rows, and while the request is in flight",
+    );
+    return criteria;
+  }
+
   // A website's bar is the build, and nothing else it does matters if that fails.
   if (kind === "website") {
     return [
@@ -252,7 +291,7 @@ export function buildFactorySpec(project: Project): FactorySpec {
   );
 
   lines.push("## 🧰 Tech Stack", "");
-  for (const item of detectStack(files, kind)) lines.push(`- ${item}`);
+  for (const item of detectStack(files, kind, project.plan)) lines.push(`- ${item}`);
   lines.push("");
 
   lines.push("## 🛠️ Key Features & Pages", "");
@@ -277,14 +316,48 @@ export function buildFactorySpec(project: Project): FactorySpec {
   }
 
   lines.push("## 🚦 Verification Criteria", "");
-  for (const item of verificationCriteria(files, kind)) lines.push(`- ${item}`);
+  for (const item of verificationCriteria(files, kind, project.plan)) lines.push(`- ${item}`);
   lines.push("");
 
-  // An app is not finished by generating it either, and what it needs is different
-  // in kind: a client build is not an app, it is half of one. The other half is the
-  // server that owns the database, and saying so here is what stops whoever picks
-  // this up from shipping a `dist/` that cannot save anything.
-  if (kind === "app") {
+  // What packages this, and what the factory agent must not do to it.
+  //
+  // A planned project is packaged from its own plan, and that is worth a section of
+  // its own because the failure it prevents is specific: an agent reading "package
+  // the client with `package-app.py`" will run it, and that packager writes the
+  // fixed React/Node scaffold into the working directory — over the stack the plan
+  // had just chosen. The first planned factory build did exactly that, and the app
+  // it produced served a directory its own image did not contain.
+  if (project.plan) {
+    const plan = project.plan;
+    const frameworks = plan.runtime.frameworks.length > 0 ? ` (${plan.runtime.frameworks.join(", ")})` : "";
+    const database = plan.runtime.database ? ` and ${plan.runtime.database}` : "";
+    lines.push("## 🧱 Packaging & runtime", "");
+    lines.push(
+      `The stack is the plan's: ${plan.runtime.language}${frameworks}${database}.`,
+      "`scripts/package-project.py` generates the Dockerfile from that plan — the base image",
+      "from `runtime.language`, the plan's install and build commands run inside it — and",
+      "`scripts/app-runtime.py` runs the image on the plan's port, checking the plan's",
+      "healthcheck path. Nothing is installed on the host, and nothing else decides the stack.",
+      "",
+    );
+    lines.push(
+      "```bash",
+      `python3 scripts/package-project.py ${specSlug(project.title)}`,
+      `python3 scripts/app-runtime.py --up ${specSlug(project.title)} --build   # image + container`,
+      "```",
+      "",
+    );
+    lines.push(
+      "Write only the files the plan lists, into the working directory, and do not run a",
+      "packager: packaging is the step after this one, and the older packagers build a stack",
+      "of their own rather than the one this project was planned in.",
+      "",
+    );
+  } else if (kind === "app") {
+    // An app is not finished by generating it either, and what it needs is different
+    // in kind: a client build is not an app, it is half of one. The other half is the
+    // server that owns the database, and saying so here is what stops whoever picks
+    // this up from shipping a `dist/` that cannot save anything.
     lines.push("## 🧱 Packaging & runtime", "");
     lines.push(
       "This is a full-stack application: React client, Node HTTP API, SQLite. The model",
@@ -306,12 +379,20 @@ export function buildFactorySpec(project: Project): FactorySpec {
       "file under `OLYMPUS_APPS_ROOT` — see `docs/site-publishing.md`.",
       "",
     );
+    lines.push(
+      "This project has no stored plan, so the factory plans the stack from this spec",
+      "before it builds — the Tech Stack above is what it starts from — and writes",
+      "`plan.json` beside the build. `scripts/package-project.py` packages from that plan.",
+      "The packager named above is the pre-planner one and applies only to a build",
+      "directory with no `plan.json`.",
+      "",
+    );
   }
 
   // A website is not finished by generating it, and the difference is the whole
   // reason the spec has a kind. Saying so here is what stops the factory (or a
   // human) treating the source as the deliverable.
-  if (kind === "website") {
+  if (kind === "website" && !project.plan) {
     lines.push("## 🌐 Packaging & delivery", "");
     lines.push(
       "This is a React site, so the source does not run anywhere on its own — JSX needs a",
@@ -326,6 +407,13 @@ export function buildFactorySpec(project: Project): FactorySpec {
       "That writes `builds/<slug>/dist/`, an archive of source + dist, and stages the built",
       "site under `OLYMPUS_SITES_ROOT` (default `/var/lib/olympus/sites`). Publishing it to a",
       "public name additionally needs an edge host — see `docs/site-publishing.md`.",
+      "",
+    );
+    lines.push(
+      "This project has no stored plan, so the factory plans the stack from this spec",
+      "before it builds and writes `plan.json` beside the build; a planned website is an",
+      "image with its server in it rather than a staged static tree, and it is",
+      "`scripts/package-project.py` that packages it.",
       "",
     );
   }
@@ -372,24 +460,42 @@ export function nextSteps(project: Project, filename: string): string[] {
     `Or commit it (\`git add build-requests/${filename}\`) — \`.github/workflows/olympus-app-builder.yml\` builds it on push.`,
   ];
 
-  if (project.kind === "website") {
+  // A planned project is packaged from its own plan, and the two commands that
+  // follow are the plan's packager and the plan's runtime. The older packagers are
+  // named only when there is no plan, because naming one here is not advice to a
+  // reader — the factory agent reads these steps too, and an instruction to run
+  // `package-app.py` makes it generate the fixed React/Node scaffold *over* the
+  // stack its own plan just chose. That is not hypothetical: it is what the first
+  // planned factory build did, and the app it produced served a directory its image
+  // did not have.
+  if (project.plan) {
     steps.push(
-      `Package the result into a servable site: \`python3 scripts/package-website.py ${slug} --publish\``,
+      `Package and run it from its own plan: \`python3 scripts/package-project.py ${slug}\` then \`python3 scripts/app-runtime.py --up ${slug} --build\``,
     );
     steps.push(
-      "Built sites live under /var/lib/olympus/sites — serve one on a name with `make site-publish SLUG=" +
-        slug +
-        "` (see docs/site-publishing.md).",
-    );
-  } else {
-    steps.push(`Package the client: \`python3 scripts/package-app.py ${slug}\``);
-    steps.push(
-      `Build and run it as its own container: \`python3 scripts/app-runtime.py --up ${slug} --build\``,
+      `Or do the same from Studio, which needs no shell: **Preview It** runs it and frames it under \`${slug}-preview.<suffix>\`, and **Publish It** puts it on \`${slug}.<suffix>\` (see docs/site-publishing.md).`,
     );
     steps.push(
-      `Put it on a name: \`make site-publish SLUG=${slug}\` — the app's vhost is generated, so the edge needs nothing app-specific (see docs/site-publishing.md).`,
+      "Do not run `package-app.py` or `package-website.py` for this project. They build a fixed stack and would replace what the plan already decided.",
     );
+    return steps;
   }
+
+  // No stored plan: this project predates the planner, so the spec cannot state a
+  // stack. The factory still plans one — `make app` picks the stack from this spec
+  // and writes `plan.json` beside the build — so it is *that* plan which packages
+  // and runs the result, and naming the older packagers here would describe a
+  // pipeline this build will not take. They are worth a line only because a build
+  // directory with no `plan.json` at all is still reachable by hand.
+  steps.push(
+    `Package and run it from the plan the factory wrote: \`python3 scripts/package-project.py ${slug}\` then \`python3 scripts/app-runtime.py --up ${slug} --build\``,
+  );
+  steps.push(
+    `Or do it from Studio, which needs no shell: **Preview It** runs it and frames it under \`${slug}-preview.<suffix>\`, and **Publish It** puts it on \`${slug}.<suffix>\` (see docs/site-publishing.md).`,
+  );
+  steps.push(
+    "Do not run `package-app.py` or `package-website.py` unless the build directory has no `plan.json`; they build a fixed stack and would ignore the one this spec was planned in.",
+  );
 
   return steps;
 }

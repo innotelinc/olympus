@@ -253,7 +253,8 @@ describe("website specs", () => {
     const { markdown, nextSteps } = buildFactorySpec(website());
     expect(markdown).toContain("## 🌐 Packaging & delivery");
     expect(markdown).toContain("scripts/package-website.py product-site --publish");
-    expect(nextSteps.join(" ")).toContain("scripts/package-website.py product-site");
+    expect(nextSteps.join(" ")).toContain("scripts/package-project.py product-site");
+    expect(nextSteps.join(" ")).toContain("scripts/app-runtime.py --up product-site");
   });
 
   it("tells an app it still has to be packaged and run", () => {
@@ -262,9 +263,9 @@ describe("website specs", () => {
     const { markdown, nextSteps } = buildFactorySpec(project());
     expect(markdown).not.toContain("## 🌐 Packaging & delivery");
     expect(markdown).toContain("## 🧱 Packaging & runtime");
-    expect(nextSteps.join(" ")).toContain("scripts/package-app.py markdown-notes");
+    expect(nextSteps.join(" ")).toContain("scripts/package-project.py markdown-notes");
     expect(nextSteps.join(" ")).toContain("scripts/app-runtime.py --up markdown-notes");
-    expect(nextSteps.join(" ")).toContain("make site-publish SLUG=markdown-notes");
+    expect(nextSteps.join(" ")).toContain("Publish It");
   });
 
   it("returns the next steps as the same list the spec prints", () => {
@@ -275,6 +276,99 @@ describe("website specs", () => {
       // document would disagree about what to do next.
       expect(spec.markdown).toContain(step);
     }
+  });
+});
+
+describe("planned specs", () => {
+  const PLAN = {
+    name: "Macro Log",
+    slug: "macro-log",
+    kind: "app" as const,
+    summary: "Log meals and see the day's totals.",
+    runtime: { language: "python", frameworks: ["flask"], database: "sqlite" },
+    run: {
+      install: "pip install -r requirements.txt",
+      build: "",
+      start: "python app.py",
+      port: 5000,
+      healthcheck: "/healthz",
+    },
+    files: [{ path: "app.py", purpose: "the server" }],
+    notes: null,
+  };
+
+  const planned = (overrides: Partial<Project> = {}) => project({ plan: PLAN, ...overrides });
+
+  it("names the plan's packager and not the fixed-stack ones", () => {
+    // The failure this prevents is not hypothetical. A spec whose instructions say
+    // "package the client with package-app.py" is read by the factory agent, which
+    // then runs it — writing the React/Node scaffold over the stack the plan chose.
+    // The first planned factory build did exactly that, and served a directory its
+    // own image did not have.
+    const { markdown, nextSteps } = buildFactorySpec(planned());
+    const steps = nextSteps.join(" ");
+
+    expect(steps).toContain("scripts/package-project.py markdown-notes");
+    expect(steps).toContain("scripts/app-runtime.py --up markdown-notes");
+    expect(steps).not.toContain("scripts/package-app.py");
+    expect(markdown).not.toContain("scripts/package-app.py markdown-notes");
+    // Said outright, because the agent will otherwise reach for a command it knows.
+    expect(steps).toContain("Do not run `package-app.py`");
+  });
+
+  it("states the plan's stack instead of the one the packagers used to impose", () => {
+    const { markdown } = buildFactorySpec(planned());
+    expect(markdown).toContain("python (flask) + sqlite");
+    expect(markdown).toContain("`python app.py` on port 5000");
+    expect(markdown).toContain("`/healthz`");
+    // The pre-planner sentences, which would tell the factory to build React + Node.
+    expect(markdown).not.toContain("React 19 + TypeScript client, Node HTTP API, SQLite");
+  });
+
+  it("verifies with the commands and the path that will actually run", () => {
+    const { markdown } = buildFactorySpec(planned());
+    expect(markdown).toContain("pip install -r requirements.txt");
+    expect(markdown).toContain("answers `/healthz` on port 5000");
+    // An app's pre-planner bar named a file the old packager wrote, so "verified"
+    // could mean "packaged by something that no longer builds this project".
+    expect(markdown).not.toContain("dist/client/index.html");
+    expect(markdown).not.toContain("/api/health");
+  });
+
+  it("keeps a planned website on its plan too", () => {
+    // A planned website is an image with nginx in it, not a static tree, so the old
+    // `package-website.py --publish` section would describe the wrong pipeline.
+    const { markdown, nextSteps } = buildFactorySpec(
+      planned({ kind: "website", title: "Product Site" }),
+    );
+    expect(markdown).not.toContain("## 🌐 Packaging & delivery");
+    expect(markdown).toContain("## 🧱 Packaging & runtime");
+    expect(nextSteps.join(" ")).toContain("package-project.py product-site");
+    // The command form, not the name: the prohibition on running it is the point of
+    // the section and has to be allowed to name it.
+    expect(markdown).not.toContain("python3 scripts/package-website.py");
+  });
+
+  it("tells the agent not to package, because packaging is the next step", () => {
+    const { markdown } = buildFactorySpec(planned());
+    expect(markdown).toContain("do not run a");
+    expect(markdown).toContain("packager: packaging is the step after this one");
+  });
+
+  it("sends a project with no stored plan down the plan-driven pipeline anyway", () => {
+    // A project saved before the planner has no stack to state, but the factory
+    // plans one from the spec before it builds — so the packaging instructions have
+    // to be the ones that path takes. Naming the pre-planner packager here is what
+    // made the factory agent run it, over the stack the factory had just planned.
+    const { markdown, nextSteps } = buildFactorySpec(project());
+    const steps = nextSteps.join(" ");
+
+    expect(steps).toContain("scripts/package-project.py markdown-notes");
+    expect(steps).not.toContain("scripts/package-app.py markdown-notes");
+    // The older packagers are still named, as the fallback they are — a build
+    // directory with no `plan.json` — rather than as the way to package this.
+    expect(steps).toContain("no `plan.json`");
+    expect(markdown).toContain("the factory plans the stack from this spec");
   });
 });
 
