@@ -55,8 +55,14 @@ services:
       - ./build-requests:/app/build-requests:ro
       # Persist the factory token across restarts when using env_file .env
       - ./.factory-env:/app/.factory-env
-    ports:
-      - "${OLYMPUS_PORT:-20128}:20128"
+    # NO PUBLISHED PORT, deliberately, and this is a fix rather than an omission.
+    # This service used to publish ${OLYMPUS_PORT:-20128}:20128 — the same host port
+    # the gateway service below owns — because the image can start a *bundled*
+    # gateway. It only ever worked because this container runs host-networked here
+    # (its ports are discarded); on a bridge run the two services fight for 20128,
+    # and if this one wins, the build runner and the SSO proxy reach an empty
+    # gateway with no provider connections. Nothing outside talks to this container:
+    # `make docker-app` uses `docker compose exec`, not the network. One OmniRoute.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

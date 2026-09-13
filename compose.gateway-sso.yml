@@ -74,6 +74,31 @@ services:
       - --upstream=${GATEWAY_SSO_UPSTREAM:-http://127.0.0.1:20128}
       # 0.0.0.0 because the edge is on another host and reaches this over the LAN.
       - --http-address=0.0.0.0:${GATEWAY_SSO_PORT:-20129}
+      # THE LAN PATH FOR API CLIENTS, and the reason this listener is on 0.0.0.0
+      # rather than loopback. The gateway itself stays on 127.0.0.1, so the only
+      # way in from another machine is through here — which means one door, and it
+      # has to be the right one for each kind of caller:
+      #
+      #   /v1/*      inference. Already authenticated by `Authorization: Bearer
+      #              $OMNIROUTE_API_KEY`, which is what a key is for. Putting an
+      #              interactive OIDC login in front of it would not add a check,
+      #              it would break every client — Codex, the CLIs, a browser
+      #              fetch — because they send a key, not a session cookie.
+      #   /healthz   liveness. Answers 200 with no body and no secrets.
+      #   everything else, INCLUDING the dashboard, still requires the Authentik
+      #   session and the group. The dashboard is the thing worth protecting here:
+      #   it can read and write provider credentials.
+      #
+      # So "reachable on the LAN" and "the dashboard is not exposed" are both true,
+      # and neither is achieved by widening the gateway's own binding.
+      #
+      # NOT skipped, and this one is deliberate: `/api/auth/login` is the
+      # dashboard's OWN password login. Exempting it would hand anyone holding that
+      # password a dashboard session that never touched Authentik, which turns the
+      # group check into decoration. To sign in you go through SSO first, then the
+      # password — two gates, in that order.
+      - --skip-auth-route=^/v1/
+      - --skip-auth-route=^/healthz$
       - --redirect-url=https://${GATEWAY_PUBLIC_HOST}/oauth2/callback
       # The edge terminates TLS, so the session cookie is only ever sent over
       # HTTPS even though this listener speaks plain HTTP.
