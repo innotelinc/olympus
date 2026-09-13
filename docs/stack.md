@@ -46,20 +46,61 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 | Telegram interface | Hermes 3 via OpenRouter Free through OmniRoute | Interactive bot that parses intent into Archon DAG runs |
 | Coding brain | Codex (`auto/coding`) via OmniRoute Responses API (`wire_api = "responses"`) | Repository code modifications dispatched by the factory consumer + harness E2E (`omniroute launch-codex -p auto-coding`) |
 | `web/studio/` | Next.js (App Router) + Authentik OIDC | Browser vibe-coding surface — prompt in, runnable app out, gateway key held server-side; saved apps are scoped per identity (OIDC subject) on the stack's own volume |
-| Build runner (`scripts/build-runner.py`) | Python + systemd (`olympus-build-runner.service`) | Executes `make app` for builds Studio queues. Studio's image carries no toolchain, so the queue file is the whole interface — and the runner treats it as untrusted input |
+| Build runner (`scripts/build-runner.py`) | Python + systemd (`olympus-build-runner.service`); account probed at install | Executes `make app` for builds Studio queues. Studio's image carries no toolchain, so the queue file is the whole interface — and the runner treats it as untrusted input |
+| `scripts/omniroute-restore-providers.py` | Python + the OmniRoute CLI | Copies provider credentials from an existing OmniRoute data dir into the gateway that is serving traffic — the repair for a gateway that came back with no connections |
+| `scripts/prune-builds.py` | Python | Reports (or removes) old `builds/<slug>` directories and finished queue files, so a slug can be rebuilt past the clobber guard |
 
-> **Known gateway behaviour — a combo turn pins.** `auto/coding` is a *combo*, and the
-> gateway pins a native Codex turn to whichever member served the first turn
-> (`pinNativeCodexTurn`, 45-minute TTL, keyed by request body + combo name). When the
-> provider behind that member has no credentials the pinned path answers
-> `503 No credentials for opencode` — while the *unpinned* path serves the same model
-> fine, which is why the first turn of a run can succeed and every turn after it fail.
-> Credentials live in `provider_connections` inside the gateway's `storage.sqlite`, and
-> it is empty on this deployment: the stack runs entirely on free providers. Two
-> consequences worth carrying into any agent work here — name a **concrete** model
-> rather than the combo for anything multi-turn (`OMNIROUTE_MODEL_FALLBACK` in
-> `.env.example` is the app-builder's case of this), and never read an agent's exit code
-> as evidence it did anything, because Codex exits **0** after a refused request.
+> **The build runner's account is a platform capability, not a preference.** A build
+> runs a coding agent inside Codex's bubblewrap sandbox, and bubblewrap needs user
+> namespaces. Container environments commonly deny those to unprivileged users, and
+> this one does (`unshare -U` as a plain user: `Permission denied`, while root can).
+> There, a non-root runner does not make builds safer — it makes the sandbox
+> unavailable, so the agent executes unsandboxed with whatever that account can read
+> (including `.env`, which holds the Vault and Authentik tokens).
+>
+> So `scripts/install-build-runner.sh` probes with the build account and installs the
+> configuration that keeps the agent sandboxed: `olympus-builder` where user
+> namespaces work, root where they do not, printing which it chose and why.
+> `--as-user` / `--as-root` override it. Where the account *is* the runner's, the
+> installer hands over `builds/`, the shared queue (group + an ACL for Studio's uid
+> 1001) and an ACL on `.env`; where it is root, none of that is needed and the
+> sandbox is what confines the agent. Codex's Landlock fallback is not an escape
+> hatch here: this build calls bubblewrap the default and Landlock the legacy path,
+> and it refuses the fallback for the `workspace-write` profile.
+
+> **The gateway's provider connections are deployment state, not code.** OmniRoute
+> keeps them in the `storage.sqlite` of the data dir it was started with. Replace the
+> data dir — a container recreated on a fresh volume, or a move from a host-run server
+> to a container — and the gateway comes back with **zero** connections while still
+> answering on its free providers. Nothing looks broken, but `auto/coding` (a *combo*)
+> has no credentialed member to pick: it pins its last-known-good to a provider with no
+> credentials and every turn after the first answers `503 No credentials for opencode`.
+>
+> That is what happened on this deployment: `127.0.0.1:20128` serves from a container
+> volume with no connections, while the credentials the operator had configured sat in
+> a host-run instance's dir (`/root/.omniroute`) that the container replaced. Fix it
+> with:
+>
+> ```bash
+> scripts/omniroute-restore-providers.py --dry-run      # what would be copied
+> scripts/omniroute-restore-providers.py                # copy them, and clear the pin
+> ```
+>
+> The script decrypts locally with `omniroute auth export` (the credentials are still
+> in the old dir, encrypted with *its* key), authenticates to the target with its
+> dashboard password (`OMNIROUTE_DASHBOARD_PASSWORD`) or a management-scoped key, adds
+> only what is missing, and then clears the combo's last-known-good via
+> `DELETE /api/settings/lkgp-cache`. That last step is load-bearing: the pin survives
+> adding connections, so without it the gateway keeps routing to the provider that 503s
+> and the restore looks like it did nothing. OAuth connections (github) need their own
+> `omniroute providers auth <provider>` flow and free ones need no credential at all;
+> the script reports both as skipped rather than dropping them silently.
+>
+> Two habits worth keeping for any agent work here: never read an agent's exit code as
+> evidence it did anything (Codex exits **0** after a refused request), and if you do
+> fall back to a concrete model name rather than the combo — naming a model keeps the
+> turn off the combo path entirely (`OMNIROUTE_MODEL_FALLBACK` in `.env.example` is the
+> app-builder's case of this).
 
 > **Scope of this checkout.** This repository is the deployment surface. The
 > factory state machine, the harness, and the Archon workflow definitions
