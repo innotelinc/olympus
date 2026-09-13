@@ -16,7 +16,19 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { loadRepoEnv, repoRoot } from "./env";
 import { FactorySpecError, specSlug, writeFactorySpec } from "./factory-spec";
@@ -424,6 +436,99 @@ export function requestCancel(job: string): BuildStatus {
   }
 
   return status;
+}
+
+/* ---- the log ------------------------------------------------------------ */
+
+/**
+ * How much of a build log a browser is handed.
+ *
+ * A build's log is whatever Codex said, and Codex is not brief — the runner's own
+ * files run to tens of kilobytes for a one-file app, and a stalled build's log is
+ * bigger than a finished one's. The tail is the part that says what happened, so
+ * the tail is what is sent, and the size is stated rather than silently applied.
+ */
+export const MAX_LOG_BYTES = 200_000;
+
+export type BuildLog = {
+  job: string;
+  slug: string | null;
+  state: BuildState;
+  text: string;
+  /** Bytes on disk, which is what tells the reader something was cut. */
+  bytes: number;
+  truncated: boolean;
+};
+
+/**
+ * Read one job's log, newest bytes first — the whole thing when it is small.
+ *
+ * Read from the tail of the file rather than by reading it all and slicing:
+ * a runaway build log should not be pulled into the Studio container's memory to
+ * then throw most of it away. The read starts at a byte offset, so a truncated
+ * log is trimmed forward to the next newline — half a line of mojibake at the top
+ * of a log is exactly how a reader concludes the log is corrupt.
+ *
+ * A job with no log file yet is not an error: the runner writes the log when it
+ * claims the request, so a build queued a moment ago legitimately has none, and
+ * "no output yet" is a more useful answer than 404.
+ */
+export function readBuildLog(job: string, limitBytes: number = MAX_LOG_BYTES): BuildLog | null {
+  if (!JOB_ID_PATTERN.test(job)) return null;
+
+  const status = readBuildStatus(job);
+  if (!status) return null;
+
+  const path = join(buildQueueDir(), `${job}.log`);
+  const base: Omit<BuildLog, "text" | "bytes" | "truncated"> = {
+    job: status.job,
+    slug: status.slug,
+    state: status.state,
+  };
+
+  let size: number;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return { ...base, text: "", bytes: 0, truncated: false };
+  }
+
+  const limit = Math.max(1, limitBytes);
+  const truncated = size > limit;
+  const start = truncated ? size - limit : 0;
+  const length = size - start;
+
+  let text: string;
+  try {
+    const descriptor = openSync(path, "r");
+    try {
+      const buffer = Buffer.alloc(length);
+      readSync(descriptor, buffer, 0, length, start);
+      text = buffer.toString("utf8");
+    } finally {
+      closeSync(descriptor);
+    }
+  } catch {
+    // Unreadable (permissions, a file removed between stat and open) is reported
+    // as no output rather than as a 500: the caller already has the status.
+    return { ...base, text: "", bytes: size, truncated: false };
+  }
+
+  if (truncated) {
+    // Drop the partial line the byte offset landed inside, then say so. The byte
+    // offset is not a line boundary and no amount of care makes it one.
+    const firstBreak = text.indexOf("\n");
+    if (firstBreak !== -1) text = text.slice(firstBreak + 1);
+    text = `… [earlier log omitted — showing the last ${kilobytes(length)} of ${kilobytes(size)}]\n${text}`;
+  }
+
+  return { ...base, text, bytes: size, truncated };
+}
+
+/** Local to this module so the marker reads like the panel's own units. */
+function kilobytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
 }
 
 /** Re-exported so a route can distinguish "the spec exists" from other failures. */
