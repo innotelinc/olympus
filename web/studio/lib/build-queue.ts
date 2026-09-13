@@ -93,6 +93,12 @@ export type BuildStatus = {
   spec: string | null;
   requestedAt: string | null;
   requestedBy: string | null;
+  /**
+   * The language the project was planned in, when it has a plan. Reported on every
+   * status of the job, so a build in progress can say what it is building rather
+   * than only where it got to.
+   */
+  language: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   updatedAt: string | null;
@@ -395,6 +401,7 @@ function toBuildStatus(raw: unknown): BuildStatus | null {
     spec: asString(record.spec),
     requestedAt: asString(record.requested_at),
     requestedBy: asString(record.requested_by),
+    language: asString(record.language),
     startedAt: asString(record.started_at),
     finishedAt: asString(record.finished_at),
     updatedAt: asString(record.updated_at),

@@ -999,6 +999,58 @@ pre.code-body {
   text-align: center;
 }
 
+/* ---- the preview -------------------------------------------------------- */
+
+/* The frame is the running project, so it gets the whole pane and none of the
+   padding the other panels have: anything around it is space the app could be
+   using. */
+.preview {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+
+.preview-url {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: #fff;
+}
+
+/* ---- the error the build reported, and the button that answers it ------- */
+
+.build-fix {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-left: 2px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
 /* ---- the plan ----------------------------------------------------------- */
 
 /* The step between "here is what I want" and "here is your code". It sits in the

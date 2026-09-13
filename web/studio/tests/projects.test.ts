@@ -250,3 +250,92 @@ describe("delete", () => {
     expect(deleteProject(NAMESPACE, saved.project.id)).toBe(false);
   });
 });
+
+describe("the plan a project is built to", () => {
+  const PLAN = {
+    name: "Weight Tracker",
+    kind: "app",
+    summary: "Daily weigh-ins.",
+    runtime: { language: "python", frameworks: ["flask"], database: "sqlite" },
+    run: {
+      install: "pip install -r requirements.txt",
+      build: "",
+      start: "python app.py",
+      port: 8000,
+      healthcheck: "/healthz",
+    },
+    files: [{ path: "app.py", purpose: "the server" }],
+  };
+
+  it("is stored and read back", () => {
+    const { project } = saveProject(NAMESPACE, {
+      title: "Weight Tracker",
+      files: [{ path: "app.py", contents: "print('hi')" }],
+      plan: PLAN,
+    });
+
+    const loaded = readProject(NAMESPACE, project.id);
+    expect(loaded?.plan?.run.start).toBe("python app.py");
+    expect(loaded?.plan?.run.port).toBe(8000);
+    expect(loaded?.plan?.slug).toBe("weight-tracker");
+  });
+
+  it("is what the runner builds from, so an absent one stays absent", () => {
+    // A project saved before the planner existed has no plan, and its own packager
+    // still builds it. Storing a guess would change what "Publish It" builds.
+    const { project } = saveProject(NAMESPACE, { title: "Legacy", files: html("x") });
+    expect(readProject(NAMESPACE, project.id)?.plan).toBeNull();
+  });
+
+  it("survives a revision that does not mention one", () => {
+    // A development turn does not re-plan, so the client sends no plan — and the
+    // project must keep the one it has rather than becoming unbuildable.
+    const first = saveProject(NAMESPACE, {
+      title: "Weight Tracker",
+      files: [{ path: "app.py", contents: "one" }],
+      plan: PLAN,
+    });
+
+    const second = saveProject(NAMESPACE, {
+      id: first.project.id,
+      title: "Weight Tracker",
+      files: [{ path: "app.py", contents: "two" }],
+    });
+
+    expect(second.project.plan?.run.start).toBe("python app.py");
+  });
+
+  it("is re-read rather than trusted, so a stored one cannot be weakened", () => {
+    const { project } = saveProject(NAMESPACE, {
+      title: "Weight Tracker",
+      files: [{ path: "app.py", contents: "x" }],
+      plan: { ...PLAN, run: { ...PLAN.run, port: 80 } },
+    });
+
+    // Refused at the boundary, and the out-of-range port is replaced by the default
+    // rather than reaching a container that could not bind it.
+    expect(readProject(NAMESPACE, project.id)?.plan?.run.port).toBe(3000);
+  });
+
+  it("is dropped entirely when it is unusable", () => {
+    const { project } = saveProject(NAMESPACE, {
+      title: "Broken",
+      files: html("x"),
+      plan: { name: "Broken", run: {} },
+    });
+
+    expect(readProject(NAMESPACE, project.id)?.plan).toBeNull();
+  });
+
+  it("cannot change what kind of thing the project is", () => {
+    const { project } = saveProject(NAMESPACE, {
+      title: "Site",
+      kind: "website",
+      files: html("x"),
+      plan: { ...PLAN, kind: "app" },
+    });
+
+    expect(project.kind).toBe("website");
+    expect(project.plan?.kind).toBe("website");
+  });
+});

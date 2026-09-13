@@ -633,3 +633,61 @@ describe("POST /api/projects/[id]/build/cancel", () => {
     expect(readdirSync(QUEUE)).toContain("0123456789abcdef.cancel.json");
   });
 });
+
+describe("the plan travels with the request", () => {
+  const PLAN = {
+    name: "Markdown Notes",
+    kind: "app",
+    summary: "Notes with a preview pane.",
+    runtime: { language: "python", frameworks: ["flask"], database: "sqlite" },
+    run: {
+      install: "pip install -r requirements.txt",
+      build: "",
+      start: "python app.py",
+      port: 8000,
+      healthcheck: "/healthz",
+    },
+    files: [{ path: "app.py", purpose: "the server" }],
+  };
+
+  async function requestFor(project: Project, body?: Record<string, unknown>) {
+    const response = await post(project.id, body);
+    const payload = (await response.json()) as { job: string };
+    return JSON.parse(
+      readFileSync(join(QUEUE, `${payload.job}.request.json`), "utf8"),
+    ) as Record<string, unknown>;
+  }
+
+  it("sends the stored plan with a build", async () => {
+    // This is what makes Build It work on a reloaded project: without the plan the
+    // runner has nothing but the two stacks it used to know.
+    const project = seed({ plan: PLAN });
+    beat();
+
+    const request = await requestFor(project);
+    const plan = request.plan as Record<string, unknown>;
+    expect(plan.run).toMatchObject({ start: "python app.py", port: 8000 });
+    expect((plan.runtime as Record<string, unknown>).language).toBe("python");
+  });
+
+  it("sends the stored plan with a publish", async () => {
+    const project = seed({ plan: PLAN });
+    beat();
+
+    const request = await requestFor(project, { action: "publish" });
+    expect(request.action).toBe("publish");
+    expect((request.plan as Record<string, unknown>).kind).toBe("app");
+    // A publish carries the files as well: it builds what is on screen.
+    expect(Array.isArray(request.files)).toBe(true);
+  });
+
+  it("omits the plan for a project that has none, rather than inventing one", async () => {
+    // A project saved before the planner existed is built by its own packager. A
+    // guessed plan would change what Publish It builds.
+    const project = seed();
+    beat();
+
+    expect(await requestFor(project)).not.toHaveProperty("plan");
+    expect(await requestFor(project, { action: "publish" })).not.toHaveProperty("plan");
+  });
+});
