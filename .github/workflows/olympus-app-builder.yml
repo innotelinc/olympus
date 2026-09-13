@@ -110,10 +110,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SPECS: ${{ steps.spec.outputs.specs }}
           OMNIROUTE_BASE_URL: http://127.0.0.1:20128/v1
+          # This gateway is started fresh by setup.sh, so it has NO provider
+          # connections and `auto/coding` has no credentialed member to route to — the
+          # free pool member is all that can answer here. It answers in prose rather
+          # than calling tools, so treat this job's output as unverified until the
+          # gateway has a provider with quota; the host runner pins a concrete model in
+          # `.env` instead (see .env.example).
           OMNIROUTE_MODEL: auto/coding
-          # Concrete model for the build node's retry. See .env.example: the gateway
-          # pins native Codex turns to a combo member that the free tier cannot
-          # authenticate, so the primary model alone cannot complete a build everywhere.
           OMNIROUTE_MODEL_FALLBACK: oc/big-pickle
           OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
         run: |

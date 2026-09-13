@@ -135,16 +135,34 @@ agent that exits 0 having written nothing fails the run — worth knowing becaus
 gateway does that: Codex exits 0 even when its last request was refused.
 
 The build node retries while the app directory is still empty, and switches model
-between attempts. `OMNIROUTE_MODEL` (default `auto/coding`) is tried first;
-`OMNIROUTE_MODEL_FALLBACK` (default `oc/big-pickle`) covers the retries. The reason is
-gateway behaviour, not preference: `auto/coding` is a **combo**, and the gateway pins a
-native Codex turn to whichever combo member served the first turn. Where the free
-provider has no credentials the pinned path answers `503 No credentials for opencode`,
-so only the first turn ever succeeds — naming a concrete model keeps the turn off the
-combo path entirely. Once the gateway has real provider credentials
-(`scripts/omniroute-restore-providers.py`) the combo serves every turn and this
-fallback is only insurance. If your gateway has real provider credentials, set both variables
-to the same value to disable the fallback.
+between attempts: `OMNIROUTE_MODEL` first, then `OMNIROUTE_MODEL_FALLBACK`. Both are read
+from this checkout's `.env`, and that is not a detail you can skip — Archon strips the
+repo's own `.env` keys out of a script node's environment ("stripped 42 keys") *and* runs
+the workflow from a copy under `artifacts/runs/<id>/`, so the node used to fall back to
+its code defaults while `.env` said otherwise: a deployment pinned to
+`gemini/gemini-3-flash-preview` asked the gateway for `auto/coding` and the manifest
+recorded the model nobody configured. Changing `.env` is therefore how you change the
+build model; exporting the variable does not survive.
+
+Pin a **concrete, tool-calling model**. A model that answers in prose still "completes"
+while writing nothing, which shows up as a build that runs for minutes and leaves an
+empty directory with no error to read:
+
+* `auto/coding` is a **combo** that walks the whole gateway catalogue — `Trying model
+  1109/1388` before it answered — so which brain finishes a build is luck. Routed to the
+  free `oc/big-pickle` the agent wrote the file out as chat text and produced nothing for
+  eight minutes; routed further along it built the same spec correctly in 2m18s. It also
+  pins a native Codex turn to the member that served the first turn, which answers `503
+  No credentials for opencode` where that member has none.
+* Restoring the provider connections (`scripts/omniroute-restore-providers.py`) does not
+  settle it: of the ten accounts recovered here, agentrouter was `402 budget pool
+  exhausted`, openrouter **out of credits** and openai `429 no credits` — only the gemini
+  accounts had live quota, and their free tier cools down for 15–23 minutes after a burst.
+
+So: a concrete model first, a second entry for when the primary is cooling, and check any
+candidate with a tool-calling request to `/v1/responses` — a 200 is not the check, a
+`function_call` in the response is. The shape is in `.env.example`, along with the models
+measured as unusable here.
 
 Docker also runs the same `push` manufacture trigger in CI: `.github/workflows/olympus-app-builder.yml`
 (`on.push.paths: build-requests/*.md`).

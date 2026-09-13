@@ -241,9 +241,11 @@ WorkingDirectory=$REPO_ROOT
 ExecStart=$PYTHON $REPO_ROOT/scripts/build-runner.py --serve
 Restart=always
 RestartSec=5
-# Home is the service account's own, so Archon state lands in
-# $SERVICE_HOME/.archon instead of /root/.archon, and the build cannot read
-# root's Codex credentials even by accident.
+# HOME/USER are the build account's own ($SERVICE_USER, per the probe in the
+# header), so Archon and Codex state land under its home rather than the
+# operator's — a non-root builder cannot read root's Codex credentials even by
+# accident. When the probe picks root, that is because the agent's bubblewrap
+# sandbox needs namespaces this host withholds from an unprivileged user.
 Environment=HOME=$SERVICE_HOME
 Environment=USER=$SERVICE_USER
 # \`uv\` is published to /usr/local/bin by this installer: the operator's copy
