@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -51,12 +51,24 @@ build-runner-install: ## Install the host build runner as a systemd service (nee
 	bash scripts/install-build-runner.sh
 
 build-runner-check: ## Check the build runner's environment without building anything
-	python3 scripts/build-runner.py --check
+	@# As the service account when it exists: run as root, this reports root's PATH and
+	@# root's readability of .env, which is exactly the difference that makes a broken
+	@# install look green. Fall back to the current user when there is no service account.
+	@if [ "$$(id -u)" = "0" ] && id -u olympus-builder >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then \
+		runuser -u olympus-builder -- env HOME=/var/lib/olympus-builder USER=olympus-builder \
+			PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin BUILD_EXTRA_PATH=/usr/local/bin \
+			python3 scripts/build-runner.py --check; \
+	else \
+		python3 scripts/build-runner.py --check; \
+	fi
+
+prune: ## Report old builds + finished queue files (ARGS="--yes" to delete, "--older-than 0" for all)
+	python3 scripts/prune-builds.py $(ARGS)
 
 build-runner-list: ## Show the build queue and where each job got to
 	python3 scripts/build-runner.py --list
 
-test-runner: ## Run the build runner's unit tests (validation, env allow-list, status)
+test-runner: ## Run the script unit tests (runner validation/env/status, prune selection)
 	python3 -m unittest discover -s scripts/tests -t scripts/tests -v
 
 ## ---- Compose (Vault profile) ----------------------------------------------
