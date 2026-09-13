@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import type { BuildStatus, RunnerState } from "@/lib/build-queue";
 import { EMPTY_DOCUMENT, buildPreviewDocument, currentFileFrom, parseFiles, type GeneratedFile } from "@/lib/files";
 import CodeView from "./CodeView";
 import Preview from "./Preview";
@@ -43,6 +44,24 @@ function clock(seconds: number): string {
 /** Human-readable byte count for the progress line. */
 function kilobytes(bytes: number): string {
   return bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`;
+}
+
+/**
+ * "running — 1:04" while a factory build is in flight, else the terminal state.
+ *
+ * The elapsed clock comes from the runner's own `started_at`, not from when this
+ * page noticed the job: a reload halfway through a build should show the build's
+ * true age, not the tab's.
+ */
+function buildStateLabel(build: BuildStatus): string {
+  if (build.state !== "running") {
+    return build.state === "succeeded" ? "succeeded" : "failed";
+  }
+
+  const since = build.startedAt ? Date.parse(build.startedAt) : Number.NaN;
+  if (!Number.isFinite(since)) return "running";
+
+  return `running — ${clock(Math.max(0, Math.round((Date.now() - since) / 1000)))}`;
 }
 
 async function readFailure(response: Response): Promise<string> {
@@ -142,6 +161,13 @@ export default function Studio({ user = null }: { user?: string | null }) {
   const [libraryBusy, setLibraryBusy] = useState(false);
   const [libraryNote, setLibraryNote] = useState<string | null>(null);
   const [libraryError, setLibraryError] = useState<string | null>(null);
+
+  // The factory build of this app. There is no socket to the runner — Studio
+  // polls the status file it writes, and that file is the entire conversation.
+  const [build, setBuild] = useState<BuildStatus | null>(null);
+  const [runner, setRunner] = useState<RunnerState | null>(null);
+  const [buildBusy, setBuildBusy] = useState(false);
+  const [buildError, setBuildError] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -245,6 +271,49 @@ export default function Studio({ user = null }: { user?: string | null }) {
   useEffect(() => {
     void listSavedApps();
   }, [listSavedApps]);
+
+  /** Read the runner's status file through the API. Never fetches a build itself. */
+  const fetchBuild = useCallback(
+    async (appId: string, job?: string) => {
+      const query = job ? `?job=${encodeURIComponent(job)}` : "";
+      const response = await request(`/api/projects/${encodeURIComponent(appId)}/build${query}`);
+      const payload = (await response.json()) as {
+        build?: BuildStatus | null;
+        runner?: RunnerState;
+      };
+      setBuild(payload.build ?? null);
+      setRunner(payload.runner ?? null);
+      return payload.build ?? null;
+    },
+    [request],
+  );
+
+  // Pick up where the last build left off when an app is opened, so a reload
+  // does not make a finished build look like one that never ran.
+  useEffect(() => {
+    if (!activeAppId) {
+      setBuild(null);
+      return;
+    }
+
+    void fetchBuild(activeAppId).catch(() => {
+      /* the panel is an extra; a failure here never breaks the editor */
+    });
+  }, [activeAppId, fetchBuild]);
+
+  // Poll only while something is actually running. A build is minutes long, so a
+  // 3s cadence is responsive without being a busy loop.
+  useEffect(() => {
+    if (!activeAppId || build?.state !== "running") return;
+
+    const id = window.setInterval(() => {
+      void fetchBuild(activeAppId, build.job).catch(() => {
+        /* transient — the next tick retries */
+      });
+    }, 3000);
+
+    return () => window.clearInterval(id);
+  }, [activeAppId, build?.state, build?.job, fetchBuild]);
 
   // ---- rate limit (operator setting) ------------------------------------
 
@@ -408,6 +477,84 @@ export default function Studio({ user = null }: { user?: string | null }) {
     activeAppId,
     activeFiles,
     appTitle,
+    listSavedApps,
+    persistApp,
+    prompt,
+    status,
+    token,
+  ]);
+
+  /**
+   * Export this build and run `make app` on it, then report what happened.
+   *
+   * The saved copy is refreshed first for the same reason the export does it: a
+   * build that describes an older version of the app than the one on screen is a
+   * build you cannot trust. The 409 is the same conflict the export raises, and
+   * it is put to the operator rather than resolved silently — `replace` covers
+   * both the spec and a previous `builds/<slug>`.
+   */
+  const runBuild = useCallback(async () => {
+    if (activeFiles.length === 0 || status === "streaming") return;
+
+    setBuildBusy(true);
+    setBuildError(null);
+    setLibraryError(null);
+    setLibraryNote(null);
+
+    try {
+      const app = await persistApp({
+        id: activeAppId,
+        title: appTitle || titleFromPrompt(prompt),
+        prompt,
+        files: activeFiles,
+      });
+      setActiveAppId(app.id);
+      setAppTitle(app.title);
+      await listSavedApps();
+
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (token) headers["x-studio-token"] = token;
+
+      const send = (replace: boolean) =>
+        fetch(`/api/projects/${encodeURIComponent(app.id)}/build`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ replace }),
+        });
+
+      let response = await send(false);
+      if (response.status === 409) {
+        const conflict = (await response.json()) as { error?: string };
+        const replace = window.confirm(
+          `${conflict.error ?? "A spec or a previous build already exists."}\n\nReplace it and build now?`,
+        );
+        if (!replace) {
+          setLibraryNote(`Saved “${app.title}”. Build cancelled — nothing was replaced.`);
+          return;
+        }
+        response = await send(true);
+      }
+
+      const payload = (await response.json()) as {
+        job?: string;
+        spec?: string;
+        runner?: RunnerState;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(payload.error ?? `Build failed to start (${response.status}).`);
+
+      setRunner(payload.runner ?? null);
+      if (payload.job) await fetchBuild(app.id, payload.job);
+    } catch (thrown) {
+      setBuildError(thrown instanceof Error ? thrown.message : "Could not start the build.");
+    } finally {
+      setBuildBusy(false);
+    }
+  }, [
+    activeAppId,
+    activeFiles,
+    appTitle,
+    fetchBuild,
     listSavedApps,
     persistApp,
     prompt,
@@ -902,7 +1049,52 @@ export default function Studio({ user = null }: { user?: string | null }) {
               >
                 Export to factory
               </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => void runBuild()}
+                disabled={!hasFiles || busy || libraryBusy || buildBusy || build?.state === "running"}
+                title="Run make app on the host runner and report the result here"
+              >
+                {build?.state === "running" ? "Building…" : "Build it"}
+              </button>
             </div>
+
+            {build || buildError ? (
+              <div className={`build-panel ${build?.state ?? "failed"}`}>
+                <div className="build-panel-head">
+                  <span className="produced-head">Factory build</span>
+                  <span className="topbar-spacer" />
+                  <span className="hint">{build ? buildStateLabel(build) : "not started"}</span>
+                </div>
+
+                <p className="build-message">{buildError ?? build?.message}</p>
+
+                {build?.state === "running" ? (
+                  <div className="build-bar" aria-hidden="true">
+                    <span />
+                  </div>
+                ) : null}
+
+                {build?.artifact ? (
+                  <p className="hint">
+                    {build.artifact.files ?? 0} file(s), {kilobytes(build.artifact.bytes ?? 0)} — entry{" "}
+                    {build.artifact.entry ?? "unknown"} in {build.artifact.dir}
+                  </p>
+                ) : null}
+
+                {build?.logTail ? (
+                  <details className="build-log">
+                    <summary className="hint">Build log</summary>
+                    <pre>{build.logTail}</pre>
+                  </details>
+                ) : null}
+
+                {runner && !runner.live ? (
+                  <p className="hint">No build runner is responding — start olympus-build-runner.</p>
+                ) : null}
+              </div>
+            ) : null}
 
             {savedApps.length > 0 ? (
               <ul className="library-list">

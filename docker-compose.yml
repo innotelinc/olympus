@@ -90,6 +90,12 @@ services:
       # Saved-app library. Without this volume the store lives in the container
       # and every app disappears on the next image build.
       STUDIO_DATA_DIR: ${STUDIO_DATA_DIR:-/app/data/studio}
+      # Where "Build it" writes a request for the host-side runner. Studio cannot
+      # run `make app` itself — this image carries no Archon CLI, no Codex CLI and
+      # no checkout — so it drops a small request file here and the runner
+      # (scripts/build-runner.py, olympus-build-runner.service) picks it up where
+      # the toolchain actually is. The runner re-validates every field.
+      STUDIO_BUILD_QUEUE_DIR: ${STUDIO_BUILD_QUEUE_DIR:-/app/build-queue}
     volumes:
       - studio-data:/app/data
       # The factory handoff. "Export to factory" writes a spec into this
@@ -99,6 +105,10 @@ services:
       # be writable by that uid: `chown 1001:1001 build-requests` once. If it is
       # not, the export fails with a message naming the fix rather than a 500.
       - ./build-requests:/app/build-requests
+      # The build queue the runner watches. Root-owned here means Studio can
+      # neither queue nor see a heartbeat; `make studio-build-queue-dir` (or
+      # scripts/studio-export-dir.sh) settles it for uid 1001.
+      - ./.factory/build-queue:/app/build-queue
     ports:
       - "${STUDIO_PORT:-3001}:3001"
     extra_hosts:
