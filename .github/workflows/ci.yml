@@ -54,6 +54,7 @@ jobs:
           python3 -m compileall -q scripts/build-runner.py scripts/prune-builds.py scripts/omniroute-restore-providers.py
           python3 -m compileall -q scripts/vault-bootstrap.py scripts/authentik-studio-app.py
           python3 -m compileall -q scripts/authentik-studio-token.py scripts/build-model-check.py
+          python3 -m compileall -q scripts/cerulean-edge.py
           # The rotation program is generated, so it has to stay valid Python.
           python3 scripts/authentik-studio-token.py --snippet > /tmp/studio-token-snippet.py
           python3 -c "compile(open('/tmp/studio-token-snippet.py').read(), 'snippet', 'exec')"

@@ -143,6 +143,15 @@ gateway-sso-up: ## Put the gateway dashboard behind Cerulean Authentik (oauth2-p
 gateway-sso-down: ## Stop the dashboard SSO proxy (the gateway itself keeps running)
 	docker compose -f docker-compose.yml -f compose.gateway-sso.yml rm -sf gateway-sso
 
+# Publishes GATEWAY_PUBLIC_HOST at the edge. The SSO proxy makes the dashboard
+# safe to reach; this is what makes it REACHABLE — the CNAME, a certificate, and
+# the NPM proxy host that forwards to the proxy rather than to the gateway.
+# Idempotent, and it refuses to repoint a name that already answers somewhere
+# else. Needs CERULEAN_* in .env; see docs/gateway-sso.md.
+gateway-edge: ## Publish the gateway's public name through Cerulean + the NPM edge (ARGS="--dry-run")
+	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi
+	python3 scripts/cerulean-edge.py $(ARGS)
+
 # Asserts the two things that distinguish "wired up" from "running": the proxy
 # answers liveness, and an unauthenticated request is handed to Authentik with
 # OUR client id. A dashboard served directly would pass the first and fail the

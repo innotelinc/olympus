@@ -81,11 +81,15 @@ services:
       - --cookie-samesite=lax
       # Honours X-Forwarded-Proto/Host, which is how the session cookie stays
       # `Secure` and the OAuth redirects come back on the public name instead of
-      # on the LAN address. The cost: oauth2-proxy trusts those headers from
-      # anyone who can reach 20129, and on the LAN that is not only the edge. A
-      # direct caller could claim `https`. It buys no access — every path still
-      # requires an Authentik session in an allowed group — but once the edge's
-      # address is fixed, `--trusted-ip` should name it and close that gap.
+      # on the LAN address.
+      #
+      # `--trusted-ip` was tried here and REMOVED: oauth2-proxy warns on every
+      # request that mixing it with `--reverse-proxy` is unsafe, and it is right —
+      # with reverse-proxy on, the client IP is read from X-Forwarded-For, so a
+      # caller who can reach 20129 spoofs the trusted address and is believed.
+      # It hardens nothing. The real control is who can reach the port: the
+      # listener is on 0.0.0.0 so the edge can, which means the port should be
+      # firewalled to the edge's address — see docs/gateway-sso.md.
       - --reverse-proxy=true
       # Any verified email may pass the OIDC step; the group below is the actual
       # door. OmniRoute's own allow-list cannot express this at all — it takes
