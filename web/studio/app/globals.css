@@ -646,6 +646,81 @@ kbd {
   font-size: 13px;
 }
 
+/* The factory build panel. Studio does not run the build — it polls the status
+   file the host runner writes, so this is a view of another process's state and
+   says so plainly rather than pretending to be live. */
+.build-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.build-panel.succeeded {
+  border-color: rgba(74, 222, 128, 0.35);
+}
+
+.build-panel.failed {
+  border-color: rgba(255, 107, 107, 0.35);
+}
+
+.build-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.build-message {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* Indeterminate on purpose: a build has no honest percentage. It reuses the
+   same slide as the generation bar so the two read as the same idea. */
+.build-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.build-bar span {
+  display: block;
+  height: 100%;
+  width: 40%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), #9cc0ff);
+  animation: progress-slide 1.4s ease-in-out infinite;
+}
+
+.build-log summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.build-log pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  max-height: 180px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
 .library-list {
   list-style: none;
   margin: 0;

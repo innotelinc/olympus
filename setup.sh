@@ -402,28 +402,43 @@ EOF
 }
 
 # ──────────────────────────────────────────────
-# 8. Studio's factory-export directory
+# 8. Studio's writable directories
 # ──────────────────────────────────────────────
-# "Export to factory" writes a spec into build-requests/ from inside the studio
-# container, which runs as uid 1001. The bind mount keeps host ownership, so a
-# root-owned directory answers 503 on every export. Settled here so a fresh
-# install never needs the manual chown — and reported rather than fatal when the
-# operator is not root, because the rest of setup is still useful to them.
+# Two directories Studio writes into from inside its container, which runs as
+# uid 1001: build-requests/ for "Export to factory", and .factory/build-queue/
+# for "Build it". The bind mounts keep host ownership, so a root-owned directory
+# answers 503 on every write. Settled here so a fresh install never needs the
+# manual chown — and reported rather than fatal when the operator is not root,
+# because the rest of setup is still useful to them.
+#
+# The queue is created here as well as chowned: if it does not exist, the first
+# `docker compose up` creates the bind-mount source itself, as root, and no
+# amount of documenting that afterwards makes the failure obvious.
 prepare_studio_export_dir() {
   local script="$ROOT_DIR/scripts/studio-export-dir.sh"
 
   if [[ ! -x "$script" ]]; then
-    info "scripts/studio-export-dir.sh not found — skipping Studio's factory-export directory"
+    info "scripts/studio-export-dir.sh not found — skipping Studio's writable directories"
     return 0
   fi
 
-  header "Studio Factory Export"
-  if "$script"; then
-    success "build-requests/ is writable by the Studio container"
-  else
-    warn "build-requests/ is not writable by the Studio container yet — see above;"
-    warn "exports will answer 503 until it is"
-  fi
+  local label target ok=true
+
+  for spec in "build-requests:$ROOT_DIR/build-requests" "build-queue:$ROOT_DIR/.factory/build-queue"; do
+    label="${spec%%:*}"
+    target="${spec#*:}"
+
+    header "Studio Writable Directory — $label"
+    if STUDIO_DIR_LABEL="$label" "$script" "$target"; then
+      success "$label is writable by the Studio container"
+    else
+      warn "$label is not writable by the Studio container yet — see above;"
+      warn "writes will answer 503 until it is"
+      ok=false
+    fi
+  done
+
+  $ok
 }
 
 # ──────────────────────────────────────────────
