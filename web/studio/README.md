@@ -408,12 +408,16 @@ directory after the panel said it had stopped. A cancelled build whose directory
 holds no `MANIFEST.json` is removed, so the next attempt is not blocked by the
 clobber guard on a half-written app the operator never asked to keep.
 
-The runner no longer runs as root. `scripts/install-build-runner.sh` creates
-`olympus-builder` (group `olympus-build`), gives it `builds/`, a shared writable
-queue (group + an ACL for Studio's uid 1001, which has no host account), an ACL on
-`.env` so it can read the gateway key while the file stays `0600`, and publishes
-`uv` to `/usr/local/bin` — the operator's copy in `~/.local/bin` is unreadable from
-another account. `--as-root` restores the old behaviour.
+Whether the runner is root is decided by a probe, because the agent's containment
+depends on it. Codex sandboxes model commands with bubblewrap, which needs user
+namespaces; where the host grants those to unprivileged users the installer runs as
+a dedicated `olympus-builder` account (group `olympus-build`) and hands it
+`builds/`, a shared writable queue (group + an ACL for Studio's uid 1001, which has
+no host account) and an ACL on `.env`, publishing `uv` to `/usr/local/bin` since
+the operator's copy in `~/.local/bin` is unreadable from another account. Where the
+host denies them — as this one does — it stays root, because the alternative is an
+unsandboxed agent. `--as-user` / `--as-root` force either, and the installer says
+which one it chose and why.
 
 Both the exporter and the runner read and write the same files, so the two sides
 can be checked against each other independently: `python3 scripts/build-runner.py

@@ -20,7 +20,7 @@ Olympus is a deterministic issue → PR factory for the repo it lives in: Archon
 
 | Area | Change |
 | --- | --- |
-| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files → live preview, Authentik OIDC sign-in, sandboxed output, saved apps scoped to the signed-in identity, a **Build it** button that runs `make app` for real on the host runner and reports its progress, and an **Export to factory** path that writes a `build-requests/` spec from a saved build (`make app SPEC=…`, or commit it and let CI manufacture). Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
+| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files → live preview, Authentik OIDC sign-in, sandboxed output, saved apps scoped to the signed-in identity, a **Build it** button that runs `make app` for real on the host runner and reports its progress — with the app's earlier builds listed beside it and a **Cancel** that stops the run — and an **Export to factory** path that writes a `build-requests/` spec from a saved build (`make app SPEC=…`, or commit it and let CI manufacture). Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
 | **SecretOps** | Infisical is **replaced by Cerulean Vault** (KV v2). The `infisical://` reference convention becomes `vault://`, and the bootstrap helper is now `scripts/omniroute-vault.sh` (was `scripts/omniroute-infisical.sh`). |
 | **Compose** | `compose.vault.yml` runs Vault locally; `compose.host-gateway.yml` is a host-network override for when the gateway is published on loopback only. |
 | **Factory** | `factory/doctor.py` and `factory/trigger.py` are published and report the factory's **real** state (no simulated poll loop); CI pins the Archon integration and only manufactures a real new spec. |
@@ -91,10 +91,24 @@ make studio-build-queue-dir        # let Studio queue builds (uid 1001)
 # Studio's image is a traced Next.js bundle — no Archon CLI, no Codex CLI, no
 # checkout — so it queues a request and this service, which runs where the
 # toolchain is, executes the same command `make app` does and records the result.
+# The account is probed, not assumed: the agent works inside Codex's bubblewrap
+# sandbox, which needs unprivileged user namespaces — available on some hosts, denied
+# on others (including container setups). Where they work the installer uses a
+# dedicated `olympus-builder` account and hands it the queue, `builds/` and an ACL
+# on `.env`; where they are denied it stays root, because a non-root runner there
+# means an *unsandboxed* agent rather than a safer one. Either way the agent stays
+# sandboxed. `--as-user` / `--as-root` override the probe.
 sudo make build-runner-install     # systemd service (idempotent; --uninstall to remove)
 make build-runner-check            # what the runner will use: gateway, model, tools
 make build-runner-list             # the queue, and where each build got to
 make test-runner                   # the runner's unit tests
+make prune                         # old builds + finished queue files (ARGS="--yes" to delete)
+
+# The gateway's provider credentials are deployment state, not code. If the
+# gateway ever comes back on a fresh data dir it has none, and `auto/coding`
+# then pins to a provider that 503s on every turn after the first.
+scripts/omniroute-restore-providers.py --dry-run   # what would be copied
+scripts/omniroute-restore-providers.py             # copy them, and clear the pin
 
 # or inside the stack
 docker compose up -d studio
@@ -127,7 +141,9 @@ gateway behaviour, not preference: `auto/coding` is a **combo**, and the gateway
 native Codex turn to whichever combo member served the first turn. Where the free
 provider has no credentials the pinned path answers `503 No credentials for opencode`,
 so only the first turn ever succeeds — naming a concrete model keeps the turn off the
-combo path entirely. If your gateway has real provider credentials, set both variables
+combo path entirely. Once the gateway has real provider credentials
+(`scripts/omniroute-restore-providers.py`) the combo serves every turn and this
+fallback is only insurance. If your gateway has real provider credentials, set both variables
 to the same value to disable the fallback.
 
 Docker also runs the same `push` manufacture trigger in CI: `.github/workflows/olympus-app-builder.yml`

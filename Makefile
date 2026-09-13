@@ -51,11 +51,16 @@ build-runner-install: ## Install the host build runner as a systemd service (nee
 	bash scripts/install-build-runner.sh
 
 build-runner-check: ## Check the build runner's environment without building anything
-	@# As the service account when it exists: run as root, this reports root's PATH and
-	@# root's readability of .env, which is exactly the difference that makes a broken
-	@# install look green. Fall back to the current user when there is no service account.
-	@if [ "$$(id -u)" = "0" ] && id -u olympus-builder >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then \
-		runuser -u olympus-builder -- env HOME=/var/lib/olympus-builder USER=olympus-builder \
+	@# As the account the unit actually runs as — which the installer probes for (root,
+	@# on hosts that deny unprivileged user namespaces). Checking as the wrong account
+	@# reports a PATH and a .env the runner cannot really see, which is the difference
+	@# that makes a broken install look green.
+	@UNIT_USER=$$(systemctl show olympus-build-runner -p User --value 2>/dev/null); \
+	UNIT_HOME=$$(systemctl show olympus-build-runner -p Environment --value 2>/dev/null \
+		| tr ' ' '\n' | sed -n 's/^HOME=//p' | head -1); \
+	if [ "$$(id -u)" = "0" ] && [ -n "$$UNIT_USER" ] && [ "$$UNIT_USER" != "root" ] \
+		&& command -v runuser >/dev/null 2>&1; then \
+		runuser -u "$$UNIT_USER" -- env HOME="$$UNIT_HOME" USER="$$UNIT_USER" \
 			PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin BUILD_EXTRA_PATH=/usr/local/bin \
 			python3 scripts/build-runner.py --check; \
 	else \

@@ -19,16 +19,24 @@
 # EROFS and read as a workflow bug. The containment that matters is in the
 # runner itself, which treats the queue as untrusted input.
 #
-# RUNS AS A DEDICATED USER, NOT ROOT. Root was never required — the toolchain is
-# world-executable — and a build that runs a coding agent over a spec written in a
-# browser should not hold root. So the unit gets its own account:
+# WHICH ACCOUNT RUNS THE BUILD — probed, because the honest answer depends on the
+# host. A build runs a coding agent, and the agent works inside Codex's
+# bubblewrap sandbox. bubblewrap needs user namespaces, and plenty of container
+# environments (this one included) deny those to unprivileged users. There, a
+# non-root runner does not make builds safer — it makes the sandbox unavailable,
+# so the agent executes unsandboxed with whatever the account can read, which is
+# the opposite of containment. So:
 #
-#   group olympus-build      shared group: the queue directory is group-writable
-#   user  olympus-builder    the build's account, no login shell, own HOME so
-#                            Archon and Codex keep their state out of /root
+#   unprivileged user namespaces work -> run as $BUILD_USER  (sandboxed, no root)
+#   denied                            -> run as root          (sandboxed by bwrap)
 #
-# Three pieces of state have to be handed over for that to work, and all three are
-# done here so a fresh install runs on the first click:
+# Both keep the agent sandboxed; only one of them also keeps the runner off root.
+# The installer probes with the build account itself and reports which it chose and
+# why. `--as-user` / `--as-root` override the probe; `--as-user` on a host that
+# denies namespaces means an unsandboxed agent, and the script says so.
+#
+# When it does run as the build account, three pieces of state are handed over so a
+# fresh install works on the first click:
 #
 #   ./builds/             chowned to the builder — it is the only writer
 #   .factory/build-queue/ group-writable, with an ACL for Studio's uid (1001),
@@ -37,10 +45,11 @@
 #                         than a widened mode: the file holds the Vault and
 #                         Authentik secrets and only the runner needs those keys
 #
-#   scripts/install-build-runner.sh              # install and start
+#   scripts/install-build-runner.sh              # install and start (probes)
 #   scripts/install-build-runner.sh --uninstall
 #   scripts/install-build-runner.sh --no-start   # write the unit only
-#   scripts/install-build-runner.sh --as-root    # opt back into running as root
+#   scripts/install-build-runner.sh --as-user    # force the build account
+#   scripts/install-build-runner.sh --as-root    # force root
 #   systemctl status olympus-build-runner
 #   journalctl -u olympus-build-runner -f
 #   python3 scripts/build-runner.py --list
@@ -61,15 +70,17 @@ die()  { printf '\033[1;31m==> \033[0m%s\n' "$*" >&2; exit 1; }
 
 uninstall=false
 start=true
-run_as_root=false
+account_pref=auto
 for arg in "$@"; do
     case "$arg" in
         --uninstall) uninstall=true ;;
         --no-start)  start=false ;;
-        --as-root)   run_as_root=true ;;
-        *) die "unknown argument: $arg (expected --uninstall, --no-start and/or --as-root)" ;;
+        --as-root)   account_pref=root ;;
+        --as-user)   account_pref=user ;;
+        *) die "unknown argument: $arg (expected --uninstall, --no-start, --as-user and/or --as-root)" ;;
     esac
 done
+run_as_root=false
 
 if $uninstall; then
     systemctl disable --now "$UNIT.service" 2>/dev/null || true
@@ -98,23 +109,56 @@ else
 fi
 
 # ---- the build account --------------------------------------------------------
-# Everything below is skipped under --as-root, so the flag is a real escape hatch
-# and not just a comment: the unit, the ownership and the PATH all follow it.
+# The account is created either way: it is what the probe runs as, and it is what a
+# later `--as-user` needs.
+getent group "$BUILD_GROUP" >/dev/null 2>&1 || groupadd --system "$BUILD_GROUP"
+if ! id -u "$BUILD_USER" >/dev/null 2>&1; then
+    useradd --system --gid "$BUILD_GROUP" --home-dir "$BUILD_HOME" \
+        --shell /usr/sbin/nologin --comment "Olympus app builds" "$BUILD_USER"
+    say "created service account $BUILD_USER ($BUILD_GROUP)"
+fi
+install -d -o "$BUILD_USER" -g "$BUILD_GROUP" -m 0750 "$BUILD_HOME"
+
+# The probe is the whole decision: can this account, on this host, create a user
+# namespace? If not, bubblewrap cannot start and Codex's `workspace-write` sandbox
+# is unavailable to it.
+userns_ok=false
+if command -v runuser >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1; then
+    if runuser -u "$BUILD_USER" -- unshare -U true 2>/dev/null; then
+        userns_ok=true
+    fi
+fi
+
+case "$account_pref" in
+    root) run_as_root=true ;;
+    user) run_as_root=false ;;
+    auto)
+        if $userns_ok; then
+            run_as_root=false
+        else
+            run_as_root=true
+            warn "unprivileged user namespaces are denied here, so bubblewrap cannot run as"
+            warn "  $BUILD_USER — Codex's sandbox would be unavailable and the agent would"
+            warn "  execute unsandboxed. Installing as root instead, which keeps the agent"
+            warn "  sandboxed. Enable unprivileged user namespaces (or pass --as-user, with"
+            warn "  the sandbox then disabled) to run builds as $BUILD_USER."
+        fi
+        ;;
+esac
+
+if ! $run_as_root && $userns_ok; then
+    say "build account: $BUILD_USER (user namespaces available — agent stays sandboxed)"
+elif ! $run_as_root; then
+    warn "--as-user: builds run as $BUILD_USER, but bubblewrap cannot start for it, so the"
+    warn "  agent runs WITHOUT its sandbox. Containment is then this account's permissions."
+fi
+
 if $run_as_root; then
     SERVICE_USER=root
     SERVICE_GROUP=root
     SERVICE_HOME=/root
     SERVICE_PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    warn "--as-root: builds will run as root (uv from /root/.local/bin)"
 else
-    getent group "$BUILD_GROUP" >/dev/null 2>&1 || groupadd --system "$BUILD_GROUP"
-    if ! id -u "$BUILD_USER" >/dev/null 2>&1; then
-        useradd --system --gid "$BUILD_GROUP" --home-dir "$BUILD_HOME" \
-            --shell /usr/sbin/nologin --comment "Olympus app builds" "$BUILD_USER"
-        say "created service account $BUILD_USER ($BUILD_GROUP)"
-    fi
-    install -d -o "$BUILD_USER" -g "$BUILD_GROUP" -m 0750 "$BUILD_HOME"
-
     SERVICE_USER="$BUILD_USER"
     SERVICE_GROUP="$BUILD_GROUP"
     SERVICE_HOME="$BUILD_HOME"
