@@ -362,6 +362,52 @@ native Codex build on the free tier, so the build node retries against a concret
 > it the export answers `503` naming the fix instead of failing obscurely. The
 > uid is `STUDIO_UID` if you have changed it (default `1001`).
 
+## Build it — running `make app` from the browser
+
+"Export to factory" hands off a spec. **Build it** goes one step further and runs
+`make app` — but not inside this container, which cannot: the runtime image is a
+traced Next.js bundle with no Archon CLI, no Codex CLI, no `uv`, no checkout and
+no `python3`. Those live on the host, so the button queues a request and the host
+runner does the work:
+
+```
+Studio (uid 1001)                    host runner (systemd)
+  POST /api/projects/<id>/build        olympus-build-runner.service
+    → writes build-requests/<slug>.md    → claims <job>.request.json
+    → writes <job>.request.json          → re-validates every field
+  GET  .../build[?job=]                  → runs scripts/manufacture.sh
+    ← reads <job>.status.json            → writes <job>.status.json + .log
+```
+
+The queue is `.factory/build-queue/` (bind-mounted at `/app/build-queue`,
+`STUDIO_BUILD_QUEUE_DIR`). Nothing but a request file crosses the boundary, and
+the runner re-derives the spec path, the slug and the build directory from it —
+the queue is writable by Studio's uid, so everything in it is treated as
+untrusted. A request naming `../../etc/passwd`, or a slug shaped like a path, is
+refused by name and marked failed rather than acted on.
+
+| | |
+| --- | --- |
+| Install | `sudo make build-runner-install` (`scripts/install-build-runner.sh`; `--uninstall` to remove) |
+| Service | `olympus-build-runner.service`, enabled at boot, `Restart=always` |
+| Env | `BUILD_QUEUE_DIR`, `BUILD_POLL_SECONDS`, `BUILD_TIMEOUT_SECONDS` (default 1800s per build) |
+| Progress | The runner rewrites the status every 5s with elapsed time and a log tail; Studio polls it every 3s while a build runs |
+| No runner | `POST` answers `503` naming the service rather than queueing a build nobody will claim |
+| `replace` | One flag covers both overwrites — an existing spec and an existing `builds/<slug>`. Without it either is a `409` and the UI asks |
+| Result | `builds/<slug>/` on the host, with `MANIFEST.json` recording the spec's SHA-256 and the model |
+
+Both the exporter and the runner read and write the same files, so the two sides
+can be checked against each other independently: `python3 scripts/build-runner.py
+--list` shows the queue as the runner sees it, and `--check` shows the gateway,
+model and tools it will use. The runner's own tests assert the refusals —
+traversal, path-shaped slugs, symlinks out of `build-requests/` — plus the
+environment allow-list that keeps the Vault and Authentik tokens out of a build.
+
+> **Permissions.** `.factory/build-queue/` needs the same uid 1001 treatment as
+> `build-requests/`: `make studio-build-queue-dir`, run by `setup.sh` and by the
+> runner's installer. If it is root-owned the button answers `503` with the
+> command to run.
+
 ## Security posture
 
 - **Sandboxed preview.** The frame runs with `allow-scripts` but *not*
