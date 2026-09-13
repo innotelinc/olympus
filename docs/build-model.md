@@ -45,6 +45,9 @@ Ten provider connections were restored into the gateway that serves this stack
 | `gemini` | live — then `429 quota_exhausted`, model-only lockout `1800s`, `all credentials cooling down` for 15–30 min |
 | free pool (`oc/*`) | answers, and *does* call tools — including on a follow-up turn |
 
+Those answers are what the providers say to a *simple* request. The next section is
+what they do with the request Codex actually sends, which is a different question.
+
 Two conclusions worth keeping:
 
 1. **Connections are not capacity.** Restoring a gateway's provider list repairs
@@ -55,6 +58,75 @@ Two conclusions worth keeping:
    a one-line prompt, with a three-tool prompt, and on a second turn. Whatever made
    that build write nothing was the multi-turn path below, not the model. Treat
    model anecdotes in a discussion as hypotheses, and this page as the record.
+
+## What the real payload adds (13 Sep 2026)
+
+`make build-model-check` asks the gateway a small question: call this one tool, then
+call it again. That is necessary and not sufficient — **every model that passed the
+probe and then failed did so on the first real turn**, so the probe alone will not
+tell you a model can build. The check that settles it is the invocation
+`build-app.py` composes, pointed at a one-file prompt:
+
+```bash
+codex exec -C "$tmp" --skip-git-repo-check --sandbox workspace-write -m "$model" \
+  -c 'model_provider="omniroute"' \
+  -c 'model_providers.omniroute.name="OmniRoute"' \
+  -c 'model_providers.omniroute.base_url="http://127.0.0.1:20128/v1"' \
+  -c 'model_providers.omniroute.wire_api="responses"' \
+  -c 'model_providers.omniroute.requires_openai_auth=true' \
+  "Create a file named index.html containing <h1>Hello</h1>. Use the shell tool."
+```
+
+What that ran, in one pass over every provider this deployment holds a credential
+for — the failures are the interesting half, because each of them is a shape a
+future reader would otherwise re-try:
+
+| Model | Result |
+| --- | --- |
+| `oc/mimo-v2.5-free` | **wrote the file, ~9s** |
+| `oc/big-pickle` | **wrote the file, ~9s** |
+| `oc/nemotron-3-ultra-free` | **wrote the file, ~179s** |
+| `oc/muse-spark-1.2` | `402` — needs a separate opencode API key |
+| `oc/north-mini-code-free`, `oc/hy3-free` | `401 Model … is not supported` |
+| `oc/deepseek-v4-flash-free` | `400 Model is unavailable` |
+| `gemini/*` (4 models, incl. the previous pin) | `429` — model-only lockout `1800s`, per model |
+| `nvidia/*` | `400` not in the active live catalog; when the combo pins one, `400 This model only supports single tool-calls at once!` |
+| `alibaba/*` | `403` — account not eligible for the model |
+| `ollama-cloud/*` | `401` credits exhausted, or `402` needs a subscription |
+| `agentrouter/*` | `400 unknown variant 'custom'` — the gateway's tool shape, not the model |
+| `openai/*` | `402` — the alias routes through an account that never purchased credits |
+| `cfp/*` | `502` — needs Playwright, i.e. a browser session, not an API |
+| `zc/*`, `aug/*` | `502 Stream ended before producing a non-ping SSE event` |
+| `dva/*` | retries exhausted — provider busy |
+| `tllm/*` | `403` — blocked by the CDN for this server's egress IP |
+| `ddgw/*` | `418` — upstream anti-abuse challenge |
+| `v0-vercel/*` | `404` |
+
+Three things follow, and they are the reason this section exists:
+
+1. **The free pool is the only thing here that builds.** Every credentialed provider
+   on this host is out of credit, not eligible, or serving a tool-call shape Codex
+   cannot use. This is the capacity finding above, restated as an experiment.
+2. **The probe passing means "try it", not "trust it".** Four gemini models passed
+   `make build-model-check` minutes before the real invocation answered `429` on all
+   four. A probe you can run in ten seconds is a filter, not a verdict.
+3. **A model that finishes one file is not a build.** So the candidate that survived
+   was then asked for a two-file app from a spec, and finally the real thing: a
+   queued build through the runner.
+
+Measured outcome of that last step, with `.env` pinned to `oc/mimo-v2.5-free` and
+`gemini/gemini-3-flash-preview` as the fallback:
+
+```
+succeeded e00bc0837b0928e4  Built builds/todo-list — 2 file(s), 4150 bytes, entry index.html
+agent exit=0 attempt=1 model=oc/mimo-v2.5-free       # 145s queued -> finished
+```
+
+the fallback was never used, and the app met its spec: `index.html` + `app.js`, the
+Add/Clear/Remove controls, an empty state, and every element the script looks up
+present in the markup. Which is also the note to carry forward: a free model that
+was previously written off here built the app on the first attempt — **the pin was
+wrong, not the pool.**
 
 ## Why `auto/coding` makes the outcome luck
 
@@ -159,10 +231,16 @@ but poor at tools produces prose — the same silent failure, now on your own bo
 
 ### D. Keep the fallback and rely on the check
 
-The current state, deliberately: pin the best model you have, fall back to the
-combo, and let `make build-model-check` tell you the day the chain goes quiet
-instead of the day an app comes out empty. Builds are unreliable but never
-silently so. *Cost:* failed builds burn minutes. *Fixes:* the silence.
+The current state, deliberately: pin the model measured to finish a build, name a
+concrete second entry for when the first goes quiet, and let
+`make build-model-check` say the day the chain goes quiet instead of the day an app
+comes out empty. Never the combo — a combo member is chosen by the gateway, which
+is how a turn ends up on a provider that refuses Codex's tool calls.
+
+*Current pin:* `OMNIROUTE_MODEL=oc/mimo-v2.5-free`,`OMNIROUTE_MODEL_FALLBACK=gemini/gemini-3-flash-preview`.
+The first is the model measured to build; the second is the better model, kept for
+when the first writes nothing. *Cost:* the free pool has no quota guarantee.
+*Fixes:* the silence.
 
 ## Changing the model
 
@@ -184,8 +262,14 @@ Known-bad on this deployment, so nobody re-measures them:
 * `gemini/gemini-2.5-flash` — answers a hand-made tool request, then returns
   `400 Function calling config is set without function_declarations` under the tool
   payload Codex actually sends. A gateway-side translation gap.
-* `oc/big-pickle` — *not* known-bad (see the correction above); it is simply the
-  free pool's usual pick, with no quota guarantee behind it.
+* `gemini/gemini-2.5-pro` — `404 This model is no longer available to new users`.
+* Everything in the sweep table above that is not `oc/`, with its reason. The
+  refusals are provider-account facts, not model-quality judgements: re-check the
+  account before concluding a model is bad.
+* `oc/big-pickle` — *not* known-bad. It was recorded as "never calls a tool", then
+  as "writes prose instead of files"; both were wrong. It calls tools and it built
+  the two-file probe app. The lesson the sweep does support is narrower: a free
+  model with no quota behind it is a schedule, not a guarantee.
 
 ## Related
 
