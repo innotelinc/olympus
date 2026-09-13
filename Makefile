@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -44,6 +44,20 @@ new-request: ## Scaffold build-requests/$(NAME).md from factory/APP_SPEC_TEMPLAT
 
 builds: ## List factory output (./builds, gitignored)
 	@ls -la builds 2>/dev/null || echo "builds/: empty (run make app) — output is gitignored per .gitignore:builds/"
+
+## ---- Build runner (Studio's "Build it" executor) --------------------------
+
+build-runner-install: ## Install the host build runner as a systemd service (needs root)
+	bash scripts/install-build-runner.sh
+
+build-runner-check: ## Check the build runner's environment without building anything
+	python3 scripts/build-runner.py --check
+
+build-runner-list: ## Show the build queue and where each job got to
+	python3 scripts/build-runner.py --list
+
+test-runner: ## Run the build runner's unit tests (validation, env allow-list, status)
+	python3 -m unittest discover -s scripts/tests -t scripts/tests -v
 
 ## ---- Compose (Vault profile) ----------------------------------------------
 
@@ -118,6 +132,9 @@ studio-test: ## Run the Studio test suite (vitest — parser, gateway route, OID
 
 studio-export-dir: ## Make build-requests/ writable by the Studio container (Export to factory)
 	bash scripts/studio-export-dir.sh
+
+studio-build-queue-dir: ## Make .factory/build-queue/ writable by the Studio container (Build it)
+	STUDIO_DIR_LABEL=build-queue bash scripts/studio-export-dir.sh .factory/build-queue
 
 studio-check: ## Typecheck + test Studio (run make studio-install first)
 	cd web/studio && npx tsc --noEmit && npm test

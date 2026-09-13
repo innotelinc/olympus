@@ -48,12 +48,22 @@ jobs:
           bash -n scripts/vault-renew-alert.sh
           bash -n scripts/install-token-check-timer.sh
           bash -n scripts/studio-export-dir.sh
+          bash -n scripts/install-build-runner.sh
+          python3 -m compileall -q scripts/build-runner.py
           python3 -m compileall -q scripts/vault-bootstrap.py scripts/authentik-studio-app.py
           python3 -m compileall -q scripts/authentik-studio-token.py
           # The rotation program is generated, so it has to stay valid Python.
           python3 scripts/authentik-studio-token.py --snippet > /tmp/studio-token-snippet.py
           python3 -c "compile(open('/tmp/studio-token-snippet.py').read(), 'snippet', 'exec')"
           python3 -m compileall -q factory harness 2>/dev/null || echo "nothing to compile — ok"
+
+      - name: Build runner tests
+        run: |
+          set -euo pipefail
+          # The runner turns a file written by a browser-facing service into a
+          # command run as root. These assert the refusals — traversal, path-shaped
+          # slugs, symlinks out of build-requests/ — rather than discovering them.
+          python3 -m unittest discover -s scripts/tests -t scripts/tests
 
       - name: App-builder workflow checks
         run: |
