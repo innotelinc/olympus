@@ -263,6 +263,19 @@ class TheBuildersContract(unittest.TestCase):
         block = project_plan.plan_prompt_block(project_plan.normalize_plan(plan(notes="Uses SQLite only.")))
         self.assertIn("Uses SQLite only.", block)
 
+    def test_it_forbids_packaging_and_names_the_specs_own_instructions(self) -> None:
+        # The one rule that has to beat the spec. A spec carries delivery notes written
+        # for whoever hands the build off, and the agent reads them as instructions: a
+        # spec saying "package the client with `package-app.py`" makes the agent write
+        # the fixed React/Node scaffold over the stack this plan just chose. That is
+        # what the first planned factory build did, and the app it produced served a
+        # directory its own image did not contain.
+        block = project_plan.plan_prompt_block(project_plan.normalize_plan(plan()))
+        self.assertIn("Do not run a packager", block)
+        self.assertIn("Next steps", block)
+        for packager in ("package-app.py", "package-website.py", "package-project.py"):
+            self.assertIn(packager, block)
+
     def test_a_website_with_no_install_says_so_rather_than_leaving_a_gap(self) -> None:
         block = project_plan.plan_prompt_block(
             project_plan.normalize_plan(
