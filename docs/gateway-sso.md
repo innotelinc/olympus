@@ -11,10 +11,14 @@ browser ──https──▶ NPM edge (192.168.1.71)
                        │  gateway.olympus.innotel.us  (CNAME → innotel.us → 73.68.203.71)
                        ▼  http://192.168.1.10:20129
                  gateway-sso (oauth2-proxy) ──▶ Authentik OIDC + group check
+                       │  └──▶ redis at 127.0.0.1:16379   (the session lives here)
                        │  http://127.0.0.1:20128
                        ▼
                     omniroute (dashboard, still loopback-only)
 ```
+
+Sessions are **server-side**, in redis, and that is load-bearing rather than a
+preference — see [Why the session is not a cookie](#why-the-session-is-not-a-cookie).
 
 The proxy is the front door; the gateway is unchanged and still published on the
 host's loopback only. OmniRoute's **own** OIDC stays disabled, for the reason in
@@ -26,6 +30,7 @@ the next section — that is not a preference, it is the one path that cannot wo
 | Certificate | Let's Encrypt, issued by Cerulean (its row #16), exported to NPM as certificate #174 |
 | Edge | NPM proxy host #198 → `http://192.168.1.10:20129`, TLS enforced, websockets on |
 | Proxy | `olympus-gateway-sso` (`quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine`), host networking, listens `0.0.0.0:20129` |
+| Session store | `olympus-gateway-sso-sessions` (`redis:7-alpine`), loopback only on `127.0.0.1:16379`, password from `GATEWAY_SSO_REDIS_PASSWORD` |
 | Upstream | `http://127.0.0.1:20128` (the gateway's loopback binding) |
 | LAN path | `/v1/*` and `/healthz` pass through; everything else — dashboard included — requires Authentik |
 | Authentik application | `OmniRoute Gateway` (slug `omniroute`, provider pk 30) |
@@ -188,14 +193,11 @@ Verified against the live deployment:
 | One OmniRoute only | one container, one listener on `20128`; the `olympus` container no longer publishes that port and no longer starts a bundled gateway |
 | `make gateway-edge` re-run | reports all three steps already done; writes nothing |
 | Scanner traffic | internet scanners that found the new name (it is minutes old) get the same `302` to Authentik, never the dashboard |
+| A completed sign-in | driven end to end through the Authentik flow executor: identification → password → authorize → `/oauth2/callback` → `302 /`, then `/dashboard` answered by OmniRoute. The session's group list contained `cerulean-platform`, so `--allowed-group` matched rather than being reasoned about |
 
-**Not verified: a completed sign-in.** This environment holds no Authentik user
-credential, so the handshake stops at the login screen. The `groups` claim and
-the `--allowed-group` gate are therefore reasoned from the provider's own scope
-mapping — `profile` returns `groups` as a list of group **names**, which is what
-`--allowed-group` matches — and from Studio's working configuration, not observed.
-If the group name were wrong the failure is **fail-closed**: every login is
-refused with a 403, nothing is exposed.
+The sign-in is no longer the thing that is unverified — that paragraph used to say
+it was, and then the broken version of exactly that step (see the next section)
+went unnoticed for want of it. Driving it is what found the 502.
 
 Two further layers remain, deliberately. The dashboard's own password still
 applies *behind* the proxy, so a session needs both Authentik and that password
@@ -203,15 +205,63 @@ applies *behind* the proxy, so a session needs both Authentik and that password
 Cerulean Vault — `scripts/omniroute-vault.sh`). And the proxy only ever sees
 credentials over HTTPS because the edge terminates TLS.
 
+## Why the session is not a cookie
+
+**Symptom:** `https://gateway.olympus.innotel.us` loads the Authentik login, you
+sign in, and the browser gets **`502 Bad Gateway`** from the edge. Every probe at
+the front door says the name is fine, because it is: the name, the certificate,
+the edge and the proxy are all healthy. The request that fails is the one that
+would have finished the login.
+
+**Cause:** oauth2-proxy was storing the session in a cookie. A cookie session
+carries the email, the ID token and **every group the identity claims** — and
+`dhunter` is in thirty Authentik groups, so the serialized session exceeds the 4KB
+a cookie can hold. The proxy says so on every login and splits the session across
+several cookies:
+
+```
+WARNING: Multiple cookies are required for this session as it exceeds the 4kb
+cookie limit. Please use server side session storage (eg. Redis) instead.
+```
+
+Those extra `Set-Cookie` headers make the callback's **response header** larger
+than the edge's `proxy_buffer_size`, and nginx refuses rather than truncate. In
+NPM's log for proxy host #198:
+
+```
+upstream sent too big header while reading response header from upstream
+  request: "GET /oauth2/callback?code=7e7eaf2ac62e496c894e3669eee0b5e6&state=…"
+  upstream: "http://192.168.1.10:20129/oauth2/callback?code=…"
+```
+
+That is a `502`, and it lands on the callback, so it reads as "the gateway is
+down" — while the gateway was up and the URL worked perfectly.
+
+**Fix:** `--session-store-type=redis`, with `olympus-gateway-sso-sessions` holding
+the sessions and the browser holding one opaque id. The ceiling is gone rather
+than raised: it no longer matters how many groups an identity accumulates. Measured
+on the same callback through the same edge, after the change: 2 cookies, 367 bytes
+of `Set-Cookie` in total, 687 bytes of response headers.
+
+Raising the edge's buffer was the other candidate and was rejected: it treats the
+symptom, and the cookie would still have to be *sent back* on every request, where
+nginx's `large_client_header_buffers` is the next limit to hit. Server-side sessions
+remove the class of failure.
+
+The store is loopback-only, holds nothing but sessions, and has no volume —
+losing it costs a re-login and nothing else, which is why it is the one container
+here that is safe to restart unattended.
+
 ## "It's not resolving" — check the chain, don't guess
 
-The name is four things in series, and every one of them fails with the same
+The name is five things in series, and every one of them fails with the same
 sentence in a browser:
 
 ```
 DNS        gateway.olympus.innotel.us  CNAME  innotel.us  → A  73.68.203.71
 edge       NPM (192.168.1.71) :443     →  http://192.168.1.10:20129
 proxy      oauth2-proxy                →  Authentik, for everything but /ping
+session    oauth2-proxy                →  redis at 127.0.0.1:16379
 gateway    omniroute, loopback only     →  127.0.0.1:20128
 ```
 
@@ -231,9 +281,18 @@ $ make gateway-edge-check
     ok   tls    YR2 · expires Dec 12 12:24:25 2026 GMT (89d)
     ok   edge   HTTP 302 · openresty · redirects to the identity provider, as the SSO proxy should
     ok   proxy  HTTP 200 · OK
+    ok   session 127.0.0.1:16379 · sessions in redis · up and answering PING
 
 ok: gateway.olympus.innotel.us is reachable and gated as expected.
 ```
+
+The `session` link is the odd one out and the reason it was added: it is the only
+part of the chain that **cannot be reached with `curl`**, because the failure only
+exists after you authenticate. So it checks the two things that make a login work —
+the store answers `PING` with the configured password, and the running proxy is
+pointed at it rather than at a cookie — and it says which of those it could not
+verify (`not verified — no docker on this host`) instead of implying the rest. It
+is left out entirely under `--no-sso`, since a published site has no login to fail.
 
 Exit `0` is reachable, `1` is broken with the link named, `2` is "the check could
 not run". `--host` checks another name (a published site, say, with `--no-sso`),
@@ -284,9 +343,9 @@ bigger change than the exposure it closes.
 
 ## Related
 
-* `compose.gateway-sso.yml` — the proxy, and why it needs host networking.
+* `compose.gateway-sso.yml` — the proxy, the session store, and why the proxy needs host networking.
 * `scripts/cerulean-edge.py` — DNS + certificate + edge host, and `make gateway-edge`.
-* `scripts/gateway-edge-check.py` — the four-link check above, and `make gateway-edge-check`.
+* `scripts/gateway-edge-check.py` — the five-link check above, and `make gateway-edge-check`.
 * `scripts/authentik-studio-app.py` — the client registration, and `make gateway-oidc`.
 * `docs/stack.md` — how the stack fits together.
 * `scripts/omniroute-vault.sh` — where the dashboard password comes from.

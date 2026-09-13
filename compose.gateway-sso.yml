@@ -61,6 +61,10 @@ services:
       OAUTH2_PROXY_CLIENT_ID: ${GATEWAY_OIDC_CLIENT_ID}
       OAUTH2_PROXY_CLIENT_SECRET: ${GATEWAY_OIDC_CLIENT_SECRET}
       OAUTH2_PROXY_COOKIE_SECRET: ${GATEWAY_SSO_COOKIE_SECRET}
+      # The session store's address and password in one value, in the environment
+      # rather than in `command` for the same reason as the three above it. See
+      # the `--session-store-type` note further down for why this is not a cookie.
+      OAUTH2_PROXY_REDIS_CONNECTION_URL: redis://:${GATEWAY_SSO_REDIS_PASSWORD:-}@127.0.0.1:${GATEWAY_SSO_REDIS_PORT:-16379}/0
     command:
       - --provider=oidc
       # Trailing slash included, because that is the issuer Authentik publishes
@@ -135,7 +139,29 @@ services:
       # this provider — was rejected because that asserts something Authentik
       # explicitly decided it cannot know, on the platform's behalf.
       - --insecure-oidc-allow-unverified-email
-      - --session-store-type=cookie
+      # SERVER-SIDE SESSIONS, AND THIS IS LOAD-BEARING. The cookie store puts the
+      # whole session in the browser: the email, the ID token, and every group the
+      # identity claims. An account in a few dozen Authentik groups — `dhunter` is
+      # in thirty — exceeds the 4KB a cookie can hold, so oauth2-proxy splits the
+      # session across several cookies and says so on every login:
+      #
+      #   WARNING: Multiple cookies are required for this session as it exceeds
+      #   the 4kb cookie limit. Please use server side session storage (eg. Redis).
+      #
+      # Those several `Set-Cookie` headers make the callback's response header
+      # larger than the edge's `proxy_buffer_size`, and nginx answers the request
+      # that would have completed the login with `502 Bad Gateway` —
+      # "upstream sent too big header while reading response header from upstream".
+      # The login fails, and it fails in the one place that looks like the gateway
+      # being down rather than like a cookie being large. Measured on the edge
+      # (proxy host #198) before this flag changed; see docs/gateway-sso.md.
+      #
+      # Moving the session out of the cookie also removes the ceiling entirely:
+      # it does not matter how many groups are added to it later.
+      - --session-store-type=redis
+      # That is the whole configuration here: `OAUTH2_PROXY_REDIS_CONNECTION_URL`
+      # in `environment` above carries the address and the password, so there is
+      # no second copy of either to drift from it.
       # Pass the identity on to the dashboard so its logs name a person rather
       # than an anonymous session.
       - --set-xauthrequest=true
@@ -157,3 +183,59 @@ services:
     # Deliberately NOT labelled `autoheal`. Autoheal acts on a failing
     # healthcheck, and this container's job is to refuse traffic — a restart
     # loop would turn every closed door into something that looks like a crash.
+
+  # The session store. Neither the browser nor the edge ever sees this: the proxy
+  # writes the session here and hands the browser a single opaque id, which is what
+  # keeps the callback's response header small enough for the edge to pass — the
+  # thing `--session-store-type=redis` above exists to fix. Sessions are the only
+  # thing in it, and losing them costs a re-login and nothing else, so there is no
+  # volume and no persistence: `--save "" --appendonly no`.
+  #
+  # Loopback only. The proxy is host-networked and reaches it at 127.0.0.1; nothing
+  # on the LAN can, which is the same posture as the gateway itself.
+  gateway-sso-sessions:
+    image: redis:7-alpine
+    container_name: olympus-gateway-sso-sessions
+    restart: unless-stopped
+    labels:
+      # Unlike the proxy, this one CAN be restarted usefully: it holds no state a
+      # restart would discard, and a wedged store fails every login.
+      - "autoheal=true"
+    environment:
+      GATEWAY_SSO_REDIS_PASSWORD: ${GATEWAY_SSO_REDIS_PASSWORD:-}
+    # The password reaches redis through this container's environment rather than
+    # through its command line, so `docker inspect` does not carry it. Verified
+    # rather than assumed: the shell inside expands it, and there is no
+    # `${VAR:?}` here because `make check-compose` renders every overlay against
+    # `.env.example` — where this is empty — and a required-variable syntax would
+    # turn that into a failure of the repository's own validation instead of a
+    # safeguard. The refusal belongs at start-up, which is what this does.
+    command:
+      - sh
+      - -c
+      - |
+        if [ -z "$$GATEWAY_SSO_REDIS_PASSWORD" ]; then
+          echo "gateway-sso-sessions: GATEWAY_SSO_REDIS_PASSWORD is empty; refusing to start a session store with no password." >&2
+          echo "Add one with:  printf 'GATEWAY_SSO_REDIS_PASSWORD=%s\n' \$$(openssl rand -hex 32) >> .env" >&2
+          exit 2
+        fi
+        exec redis-server \
+          --requirepass "$$GATEWAY_SSO_REDIS_PASSWORD" \
+          --save "" \
+          --appendonly no \
+          --maxmemory-policy noeviction
+    # `--maxmemory-policy noeviction` on purpose: an LRU policy on a session store
+    # would silently log people out under memory pressure, which is worse than
+    # failing to write at all.
+    ports:
+      - "127.0.0.1:${GATEWAY_SSO_REDIS_PORT:-16379}:6379"
+    healthcheck:
+      # `$$` so compose passes the literal `$` through and the container's shell
+      # expands GATEWAY_SSO_REDIS_PASSWORD from its own environment. `-a` with a
+      # value from the environment rather than inlined here, so the healthcheck
+      # command itself carries no secret.
+      test: ["CMD-SHELL", "redis-cli -a \"$$GATEWAY_SSO_REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

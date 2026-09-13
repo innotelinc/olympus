@@ -172,10 +172,19 @@ gateway-sso-up: ## Put the gateway dashboard behind Cerulean Authentik (oauth2-p
 		v=$$(sed -n "s/^$$k=//p" .env | tail -1); \
 		if [[ -z "$$v" ]]; then echo "$$k is not set in .env — run 'make gateway-oidc ARGS=--rotate-secret' first" >&2; exit 2; fi; \
 	done; \
-	docker compose -f docker-compose.yml -f compose.gateway-sso.yml up -d --no-deps gateway-sso
+	r=$$(sed -n 's/^GATEWAY_SSO_REDIS_PASSWORD=//p' .env | tail -1); \
+	if [[ -z "$$r" ]]; then \
+		echo "GATEWAY_SSO_REDIS_PASSWORD is not set in .env." >&2; \
+		echo "The proxy keeps its sessions there rather than in a cookie — a cookie" >&2; \
+		echo "session overflows on an identity with many groups and the edge answers" >&2; \
+		echo "the login callback with 502. Add one with:" >&2; \
+		echo "  printf 'GATEWAY_SSO_REDIS_PASSWORD=%s\\n' \$$(openssl rand -hex 32) >> .env" >&2; \
+		exit 2; \
+	fi; \
+	docker compose -f docker-compose.yml -f compose.gateway-sso.yml up -d --no-deps --wait gateway-sso-sessions gateway-sso
 
-gateway-sso-down: ## Stop the dashboard SSO proxy (the gateway itself keeps running)
-	docker compose -f docker-compose.yml -f compose.gateway-sso.yml rm -sf gateway-sso
+gateway-sso-down: ## Stop the dashboard SSO proxy and its session store (the gateway keeps running)
+	docker compose -f docker-compose.yml -f compose.gateway-sso.yml rm -sf gateway-sso gateway-sso-sessions
 
 # Publishes GATEWAY_PUBLIC_HOST at the edge. The SSO proxy makes the dashboard
 # safe to reach; this is what makes it REACHABLE — the CNAME, a certificate, and
