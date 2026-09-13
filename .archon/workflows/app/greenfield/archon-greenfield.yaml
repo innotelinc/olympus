@@ -103,6 +103,11 @@ nodes:
   # on rate-limited free providers, so a refused request can end a turn before a single
   # file is written. Once anything exists the retry stops, because the next thing that
   # should see a partial app is verify, not another agent.
+  #
+  # It also runs the plan's own install and build against what the agent wrote, once,
+  # and hands a non-zero exit back to the agent while it is still in the room. Without
+  # that, a tree that installs and then fails to compile reached packaging untouched and
+  # surfaced as a compiler error with nobody left to act on it.
   - id: build
     script: build-app
     runtime: uv
@@ -118,6 +123,11 @@ nodes:
         exit_code: { type: integer }
         model: { type: string }
         attempts: { type: integer }
+        # The plan's own build, run in the node before packaging runs it in the image.
+        # Non-zero means the tree exists and does not compile — a different failure
+        # from "the agent wrote nothing", and the one the repair turn answers.
+        build_exit: { type: integer }
+        repairs: { type: integer }
         log: { type: string }
       required: [exit_code, model, attempts, log]
 

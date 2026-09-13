@@ -205,6 +205,20 @@ purpose: ahead of it the configured model is the deliberate choice, behind it lu
 better than nothing. The **planning** node uses the same chain, in the same order, so a
 spec cannot plan with one model and generate with another.
 
+**A tree that installs and then fails to compile goes back to the agent that wrote it.**
+The build node runs the plan's own install and build against what the agent wrote — the
+same commands the Dockerfile will run — and a non-zero exit becomes the next instruction
+to the same agent, with the compiler's output attached and the plan still in front of it,
+once. Nothing used to run the plan's build: `verify-app` runs a check the *spec* declares,
+and the packager runs the plan in the image, after the node is gone — so a project that
+wrote itself and did not compile was reported built and failed later as a packaging error
+with nobody left to act on it. A build the node cannot run is skipped rather than blamed
+on the agent, since the packager installs its own toolchain in the image — and so is a
+plan in a language whose install would write *outside* the project (`pip install` would
+land in whatever interpreter is on PATH), because this node runs on the host. Those are
+still built and repaired in their image. The outcome is recorded as `build_exit` and
+`repairs` so "the agent gave up" and "the tree does not compile" stay distinguishable.
+
 Pin a **concrete, tool-calling model**. A model that answers in prose still "completes"
 while writing nothing, which shows up as a build that runs for minutes and leaves an
 empty directory with no error to read:
