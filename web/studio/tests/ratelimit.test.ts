@@ -8,6 +8,7 @@ import {
   readRateLimitConfig,
   resetRateLimits,
 } from "@/lib/ratelimit";
+import { resetModelCache } from "@/lib/omniroute";
 
 // The route calls loadRepoEnv(), which reads the repo-root .env. Deleting a key
 // from process.env does not make it absent — the loader puts it straight back
@@ -40,6 +41,9 @@ beforeEach(() => {
   }
   process.env.OMNIROUTE_API_KEY = "sk-valid-looking-key";
   resetRateLimits();
+  // The route reads the gateway's model catalogue, which is cached for a minute.
+  // A catalogue left over from the previous case would decide this one.
+  resetModelCache();
 });
 
 afterEach(() => {
@@ -49,6 +53,7 @@ afterEach(() => {
   }
   vi.unstubAllGlobals();
   resetRateLimits();
+  resetModelCache();
 });
 
 function post(payload: string, headers: Record<string, string> = {}): Promise<Response> {
@@ -166,14 +171,24 @@ describe("rate limit accounting", () => {
   it("does not reject a route request when the limit is disabled", async () => {
     process.env[RATE_LIMIT_ENV] = "off";
     process.env.STUDIO_ACCESS_TOKEN = "shared-secret";
-    const fetchMock = stubFetch(async () => sseResponse(OK_STREAM));
+    // A generation request makes two gateway calls: the model catalogue is read
+    // to check the picked model, then the completion itself. The catalogue is
+    // cached, so only the completions count — the assertion is that all three
+    // requests reached the gateway, not how many reads that took.
+    const fetchMock = stubFetch(async (url) =>
+      String(url).endsWith("/models")
+        ? Response.json({ data: [{ id: "auto/coding", owned_by: "combo" }] })
+        : sseResponse(OK_STREAM),
+    );
+    const completions = () =>
+      fetchMock.mock.calls.filter(([url]) => String(url).includes("/chat/completions")).length;
     const headers = { "x-studio-token": "shared-secret" };
 
     for (let index = 0; index < 3; index += 1) {
       const response = await post(JSON.stringify({ prompt: "a counter" }), headers);
       expect(response.status).toBe(200);
     }
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(completions()).toBe(3);
   });
 });
 

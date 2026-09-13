@@ -1,14 +1,14 @@
 import {
   buildMessages,
   chatCompletionsUrl,
+  chooseModel,
   isPlaceholderSecret,
   readConfig,
   sseToTextStream,
   type PriorFile,
 } from "@/lib/omniroute";
 import { parseKind } from "@/lib/projects";
-import { authorizeRequest } from "@/lib/auth";
-import { createHash } from "node:crypto";
+import { authorizeRequest, identityKey } from "@/lib/auth";
 import { checkRateLimit } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
@@ -80,10 +80,7 @@ export async function POST(request: Request): Promise<Response> {
   // operators with different tokens get separate budgets without the secret
   // ever becoming a map key. Input and auth are already checked; this is the
   // last gate before the only request that costs money.
-  const identity = gate.session?.sub
-    ? `oidc:${gate.session.sub}`
-    : `token:${createHash("sha256").update(process.env.STUDIO_ACCESS_TOKEN ?? "").digest("hex").slice(0, 16)}`;
-  const rate = checkRateLimit(identity);
+  const rate = checkRateLimit(identityKey(gate));
   if (!rate.ok) {
     return Response.json(
       {
@@ -106,6 +103,23 @@ export async function POST(request: Request): Promise<Response> {
   const kind = parseKind(body.kind);
   const url = chatCompletionsUrl(config);
 
+  // The model comes from the caller, because the picker lists what the gateway has
+  // linked in and that list changes without Studio being redeployed. It is checked
+  // against that list rather than trusted: a name that is not linked in is a 400
+  // here, where the user can see it, instead of a gateway error mid-stream or —
+  // worse — a silent fallback that builds something they did not ask for.
+  //
+  // The catalog being unreachable is not allowed to break generation, though: with
+  // no catalog there is nothing to validate against, so the request goes through
+  // and the gateway owns the answer. Failing here would turn a read-only hiccup
+  // into an outage.
+  const requestedModel = typeof body.model === "string" ? body.model.trim().slice(0, 200) : "";
+  const chosen = await chooseModel(config, requestedModel);
+  if (chosen.reject) {
+    return fail(`${chosen.reject} Pick one from the list, or leave it on the default.`, 400);
+  }
+  const model = chosen.model;
+
   let upstream: Response;
   try {
     upstream = await fetch(url, {
@@ -115,7 +129,7 @@ export async function POST(request: Request): Promise<Response> {
         authorization: `Bearer ${config.apiKey}`,
       },
       body: JSON.stringify({
-        model: config.model,
+        model,
         messages: buildMessages(prompt, priorFiles, kind),
         stream: true,
         temperature: 0.4,
@@ -141,7 +155,7 @@ export async function POST(request: Request): Promise<Response> {
       upstream.status === 401 || upstream.status === 403
         ? " The configured OMNIROUTE_API_KEY was rejected."
         : "";
-    return fail(`Gateway responded ${upstream.status} for model "${config.model}".${hint}${suffix}`, 502);
+    return fail(`Gateway responded ${upstream.status} for model "${model}".${hint}${suffix}`, 502);
   }
 
   const contentType = upstream.headers.get("content-type") ?? "";

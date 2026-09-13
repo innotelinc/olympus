@@ -298,6 +298,22 @@ export function authorizeRequest(request: Request): GateResult {
   return { ok: true, session };
 }
 
+/**
+ * A stable key for "who is asking", for per-caller budgets.
+ *
+ * Lives beside `authorizeRequest` because it reads the same gate result, and two
+ * routes that key their rate limits differently would let one caller spend two
+ * budgets on one account. An OIDC caller is keyed by their verified subject; the
+ * shared-token case is keyed by a hash of the token, so the secret never becomes
+ * a map key and two operators with different tokens still get separate budgets.
+ */
+export function identityKey(gate: Extract<GateResult, { ok: true }>): string {
+  if (gate.session?.sub) return `oidc:${gate.session.sub}`;
+
+  const token = process.env.STUDIO_ACCESS_TOKEN?.trim() ?? "";
+  return `token:${createHash("sha256").update(token).digest("hex").slice(0, 16)}`;
+}
+
 /* ---- discovery + jwks --------------------------------------------------- */
 
 let discoveryCache: { url: string; document: DiscoveryDocument; at: number } | null = null;
