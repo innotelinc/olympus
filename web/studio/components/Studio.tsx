@@ -250,6 +250,7 @@ export default function Studio({
   // Non-fatal: the plan said it would write a file and the turn did not. Worth
   // saying, not worth discarding a whole generation over.
   const [planWarning, setPlanWarning] = useState<string | null>(null);
+  const [projectPlan, setProjectPlan] = useState<BuildPlan | null>(null);
 
   // Live progress, driven by the stream itself: which file is open, how much
   // of it has arrived, when the build started, and when data last moved.
@@ -325,6 +326,11 @@ export default function Studio({
   const planRef = useRef<BuildPlan | null>(null);
   const planPromptRef = useRef("");
   const planBusyRef = useRef(false);
+  // The plan the project *is*, as opposed to the one being confirmed. It survives
+  // the generation that consumed it: build and publish need the language, the
+  // commands and the port, and those are facts about the project rather than about
+  // the turn that produced it.
+  const projectPlanRef = useRef<BuildPlan | null>(null);
 
   useEffect(() => {
     try {
@@ -622,6 +628,8 @@ export default function Studio({
       files: GeneratedFile[];
       /** Omitted on a revision, which keeps the kind the app was created with. */
       kind?: ProjectKind;
+      /** Omitted on a revision, which keeps the plan it has. */
+      plan?: BuildPlan | null;
     }) => {
       const response = await request("/api/projects", {
         method: "POST",
@@ -631,6 +639,10 @@ export default function Studio({
           title: input.title ?? "",
           prompt: input.prompt ?? "",
           kind: input.kind,
+          // The plan the files were built to. This is what makes Build It and
+          // Publish It possible on a reloaded project: without it the runner has
+          // nothing but the older packagers to fall back on.
+          plan: input.plan ?? undefined,
           files: input.files.map((file) => ({ path: file.path, contents: file.contents })),
         }),
       });
@@ -654,6 +666,9 @@ export default function Studio({
         // A saved app that has never existed sends its kind; an existing one keeps
         // whatever it was created as, and the server ignores this.
         kind: activeAppId ? undefined : kind,
+        // The plan this project is built to. Omitted only when there is not one,
+        // which is a project saved before the planner existed.
+        plan: projectPlanRef.current,
       });
       setActiveAppId(app.id);
       setAppTitle(app.title);
@@ -687,6 +702,9 @@ export default function Studio({
         prompt,
         files: activeFiles,
         kind: activeAppId ? undefined : kind,
+        // The plan this project is built to. Omitted only when there is not one,
+        // which is a project saved before the planner existed.
+        plan: projectPlanRef.current,
       });
       setActiveAppId(app.id);
       setAppTitle(app.title);
@@ -779,6 +797,9 @@ export default function Studio({
         prompt,
         files: activeFiles,
         kind: activeAppId ? undefined : kind,
+        // The plan this project is built to. Omitted only when there is not one,
+        // which is a project saved before the planner existed.
+        plan: projectPlanRef.current,
       });
       setActiveAppId(app.id);
       setAppTitle(app.title);
@@ -860,6 +881,9 @@ export default function Studio({
         prompt,
         files: activeFiles,
         kind: activeAppId ? undefined : kind,
+        // The plan this project is built to. Omitted only when there is not one,
+        // which is a project saved before the planner existed.
+        plan: projectPlanRef.current,
       });
       setActiveAppId(app.id);
       setAppTitle(app.title);
@@ -930,6 +954,9 @@ export default function Studio({
         prompt,
         files: activeFiles,
         kind: activeAppId ? undefined : kind,
+        // The plan this project is built to. Omitted only when there is not one,
+        // which is a project saved before the planner existed.
+        plan: projectPlanRef.current,
       });
       setActiveAppId(app.id);
       setAppTitle(app.title);
@@ -1016,11 +1043,24 @@ export default function Studio({
             kind?: ProjectKind;
             prompt: string;
             files: GeneratedFile[];
+            plan?: BuildPlan | null;
           };
         };
         setFiles(payload.project.files);
         setPrompt(payload.project.prompt);
         setAppTitle(payload.project.title);
+        // The project's plan comes back with it, so Build It and Publish It work on a
+        // project reopened days later, and the panel can say what stack it is.
+        projectPlanRef.current = payload.project.plan ?? null;
+        setProjectPlan(payload.project.plan ?? null);
+        // Any plan awaiting confirmation belongs to the instruction that was in the
+        // box, which is not this project's. Dropping it avoids offering to confirm a
+        // plan for text that is no longer there.
+        planRef.current = null;
+        planPromptRef.current = "";
+        setPlan(null);
+        setPlanPrompt("");
+        setPlanModel("");
         // The kind comes from the saved record, so reopening a website does not
         // quietly turn the next instruction into an app revision.
         const opened = payload.project.kind === "website" ? "website" : "app";
@@ -1075,6 +1115,15 @@ export default function Studio({
     setError(null);
     setLibraryNote(null);
     setLibraryError(null);
+    // Nothing on screen means nothing to build, so the plan goes with the files.
+    projectPlanRef.current = null;
+    setProjectPlan(null);
+    planRef.current = null;
+    planPromptRef.current = "";
+    setPlan(null);
+    setPlanPrompt("");
+    setPlanModel("");
+    setPlanWarning(null);
   }, []);
 
   const stop = useCallback(() => {
@@ -1162,6 +1211,12 @@ export default function Studio({
     const turnPrompt = planPromptRef.current.trim();
     const plan = planRef.current;
     if (!turnPrompt || !plan) return;
+
+    // The project now *is* this plan. Everything that comes later — Build It,
+    // Publish It, saving, reopening — reads it from here, which is why the plan is
+    // not cleared with the confirmation that consumed it.
+    projectPlanRef.current = plan;
+    setProjectPlan(plan);
 
     busyRef.current = true;
     const controller = new AbortController();
@@ -1268,6 +1323,9 @@ export default function Studio({
               title: appTitleRef.current,
               prompt: turnPrompt,
               files: merged,
+              // The plan this turn was built to, not the mirror: the mirror is only
+              // updated at the top of the turn, and this is the value that turn used.
+              plan,
             });
             appTitleRef.current = app.title;
             setAppTitle(app.title);

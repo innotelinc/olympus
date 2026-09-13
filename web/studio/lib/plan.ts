@@ -382,6 +382,7 @@ Rules:
 - \`runtime.database\` is a datastore name, or null when the project keeps no data. Say "sqlite" rather than picking a client library, and prefer a file-backed database for a single-container project — there is no second service to connect to.
 - \`files\` is every file you intend to write, with a short purpose each. It is what the person reads to judge the plan, so list real paths, not directories.
 - \`notes\` is where a genuine caveat goes. Do not use it for a summary of the summary, and do not pad it.
+- "static" means there is no toolchain and no process to start — plain HTML, CSS and JavaScript that nginx serves. Leave \`install\` and \`build\` empty and make \`start\` exactly \`nginx -g 'daemon off;'\`. A React or Vite site is "node", because something has to bundle it.
 - A website must not have a database unless the request needs one.
 - No markdown fences, no prose before or after the JSON. The object is the whole reply.`;
 

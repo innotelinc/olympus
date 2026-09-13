@@ -32,6 +32,9 @@ function project(overrides: Partial<Project> = {}): Project {
     // what "finished" means, and a helper that left it out would hide that.
     kind: "app",
     prompt: "A markdown notes app with a live preview pane.",
+    // No plan: this is a project saved before the planner existed, which is exactly
+    // the case that still has to export a spec and still has to build.
+    plan: null,
     // A full-stack app: the data model the API is derived from, the interface, and
     // the styles. The three files the model is allowed to write, and no others.
     files: [

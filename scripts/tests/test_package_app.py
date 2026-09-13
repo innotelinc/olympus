@@ -148,15 +148,12 @@ class ServerContractTests(Fixture):
         self.assertIn('url.pathname === "/api/health"', pkg.SERVER_MAIN)
         self.assertIn("serveStatic", pkg.SERVER_MAIN)
 
-    def test_it_implements_every_endpoint_the_prompt_describes(self) -> None:
-        prompt = (
-            Path(__file__).resolve().parents[2] / "web" / "studio" / "lib" / "omniroute.ts"
-        ).read_text(encoding="utf-8")
-
-        for endpoint in ("GET /api/<table>", "POST /api/<table>", "PATCH /api/<table>/<id>"):
-            self.assertIn(endpoint, prompt)
-            break  # the prompt states them as prose; the verbs are what matters
-
+    def test_it_implements_every_verb_the_generated_api_promises(self) -> None:
+        # The prose contract this used to check against lived in Studio's prompt for
+        # the fixed stack, and that prompt is gone: generation is planned now, and a
+        # planned project writes its own server. This packager still *builds* the
+        # projects that were generated against it — the apps saved before the planner
+        # — so what is asserted is the API it generates, not a prompt that described it.
         for verb in ("GET", "POST", "PATCH", "PUT", "DELETE"):
             self.assertIn(f'request.method === "{verb}"', pkg.SERVER_MAIN)
 

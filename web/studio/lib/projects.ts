@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { loadRepoEnv, repoRoot } from "./env";
+import { parsePlanObject, type BuildPlan } from "./plan";
 
 /**
  * Saved apps, per identity.
@@ -71,6 +72,16 @@ export type Project = {
   /** The instruction that produced (or last revised) this app. */
   prompt: string;
   files: StoredFile[];
+  /**
+   * The plan this project was built to, or null for one saved before the planner
+   * existed.
+   *
+   * It is stored because it is what "build" and "publish" *mean* for this project:
+   * the language chooses the base image, the commands are what runs, and the port is
+   * where the result listens. Without it the runner can only fall back to the two
+   * stacks it used to know.
+   */
+  plan: BuildPlan | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -228,6 +239,23 @@ export function parseStoredFiles(value: unknown): StoredFile[] {
   return files;
 }
 
+/**
+ * A stored plan, re-validated, or null if there is not a usable one.
+ *
+ * Never throws. A plan that cannot be read is treated as "this project has no
+ * plan" rather than as a broken record, because that is the state it is in and the
+ * consequence is a project built by the older packagers — not a library entry the
+ * user cannot open.
+ */
+function readPlan(value: unknown, kind: ProjectKind): BuildPlan | null {
+  if (value === undefined || value === null) return null;
+  try {
+    return parsePlanObject(value, kind);
+  } catch {
+    return null;
+  }
+}
+
 function parseProject(value: unknown): Project | null {
   if (typeof value !== "object" || value === null) return null;
 
@@ -257,6 +285,12 @@ function parseProject(value: unknown): Project | null {
     kind: parseKind(record.kind),
     prompt: typeof record.prompt === "string" ? record.prompt : "",
     files,
+    // Re-read rather than trusted, and null when it is absent or unusable: a plan
+    // stored by an older version, or edited by hand, must not be able to send an
+    // arbitrary command to the runner. The route re-validates on the way out anyway.
+    // It is parsed against the project's own kind, so a plan cannot change what kind
+    // of thing this is.
+    plan: readPlan(record.plan, parseKind(record.kind)),
     createdAt: typeof record.createdAt === "string" ? record.createdAt : updatedAt,
     updatedAt,
   };
@@ -361,6 +395,10 @@ export function saveProject(namespace: string, input: Record<string, unknown>): 
     kind: input.kind === undefined ? (existing?.kind ?? "app") : parseKind(input.kind),
     prompt: prompt || existing?.prompt || "",
     files,
+    // A revision without a plan keeps the one it has, for the same reason a revision
+    // keeps its kind: the files on screen were built to it, and replacing the plan
+    // with nothing would make the project unbuildable.
+    plan: readPlan(input.plan, input.kind === undefined ? (existing?.kind ?? "app") : parseKind(input.kind)) ?? existing?.plan ?? null,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
   };

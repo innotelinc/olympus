@@ -296,6 +296,11 @@ export function queueBuild(
     // The runner has to know which contract to hold the build to: for a website,
     // writing files is not the finish line, packaging into `dist/` is.
     kind: project.kind,
+    // The plan travels with the request, and it is what the runner builds from:
+    // the language picks the base image, the commands are what runs, and the port
+    // is where the result listens. A project with no plan is one saved before the
+    // planner existed, and the runner's older packagers still build it.
+    plan: project.plan ?? undefined,
     publish,
   });
 
@@ -334,6 +339,7 @@ export function queuePublish(project: Project): QueuedBuild {
     requested_by: "studio",
     requested_at: new Date().toISOString(),
     kind: project.kind,
+    plan: project.plan ?? undefined,
     files: project.files.map((file) => ({ path: file.path, contents: file.contents })),
   });
 
