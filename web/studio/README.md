@@ -469,6 +469,12 @@ The image is a multi-stage standalone build (verified: non-root `nextjs` user,
 ```bash
 make docker-studio        # build the image
 docker compose up -d studio
+
+# when the gateway is published on loopback on this host (the common case at the
+# edge, and what .env's OMNIROUTE_BASE_URL assumes) Studio must run with host
+# networking — this target rebuilds it that way and then *proves* the gateway is
+# reachable from inside the container before returning:
+make docker-studio-up
 ```
 
 ### Connecting it to the gateway
@@ -477,12 +483,17 @@ This is the one thing that bites. `host.docker.internal` only reaches a gateway
 that is bound to a **routable** interface. A gateway published as
 `127.0.0.1:20128` is loopback-only and is *not* reachable from a bridge network.
 Pick the wiring that matches your topology — the first two were verified end to
-end from inside the container:
+end from inside the container. Getting it wrong is silent, which is why it is
+worth the sentence: a request to `127.0.0.1` from a bridge-networked Studio
+leaves the container, is answered by Studio itself, and every generation fails
+`ECONNREFUSED` while the UI keeps showing an empty pane. Measured here after a
+Studio rebuild dropped the host-networking override — the same rebuild that
+looked fine because Studio's healthcheck only asks whether Studio answers.
 
 | Topology | `OMNIROUTE_BASE_URL` |
 | --- | --- |
 | Gateway is a sibling container | `http://omniroute:20128/v1` — and attach Studio to that container's network |
-| Gateway is loopback-published on the host | Run Studio with host networking, then `http://127.0.0.1:20128/v1` |
+| Gateway is loopback-published on the host | Run Studio with host networking, then `http://127.0.0.1:20128/v1` — `make docker-studio-up` |
 | Gateway is on another machine | `http://<lan-ip>:20128/v1` |
 | Gateway is published on `0.0.0.0` | `http://host.docker.internal:20128/v1` (the compose default) |
 

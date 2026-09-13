@@ -132,6 +132,25 @@ docker-ps-host: ## List the host-networked stack's status
 # GATEWAY_* credentials from `make gateway-oidc`, and without them oauth2-proxy
 # would start and then refuse every login, which is the failure mode that looks
 # like a working deployment. See compose.gateway-sso.yml and docs/gateway-sso.md.
+# The gateway now lives in THIS repo's compose (profile `gateway`), published on
+# loopback so the host-side build runner and the SSO proxy can reach it and
+# nothing on the LAN can. It used to be a container from another project; moving
+# it here is what gives it a config that can be recreated. `OMNIROUTE_BASE_URL`
+# stays the loopback URL for that reason — host scripts read the same .env.
+gateway-up: ## Start the in-repo gateway (profile: gateway) and wait for it
+	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi
+	docker compose --profile gateway up -d omniroute
+	@port=$$(sed -n 's/^OMNIROUTE_PORT=//p' .env 2>/dev/null | tail -1 | tr -d "'\" " ); port=$${port:-20128}; \
+	for i in $$(seq 1 30); do \
+		code=$$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$$port/healthz" || true); \
+		if [[ "$$code" == "200" ]]; then echo "gateway: ok — live on 127.0.0.1:$$port"; exit 0; fi; \
+		sleep 2; \
+	done; \
+	echo "gateway: not answering /healthz on 127.0.0.1:$$port — check 'docker logs olympus-omniroute'" >&2; exit 1
+
+gateway-down: ## Stop the in-repo gateway (keeps its data volume)
+	docker compose --profile gateway rm -sf omniroute
+
 gateway-sso-up: ## Put the gateway dashboard behind Cerulean Authentik (oauth2-proxy)
 	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi; \
 	for k in GATEWAY_OIDC_CLIENT_SECRET GATEWAY_SSO_COOKIE_SECRET GATEWAY_PUBLIC_HOST; do \
@@ -184,6 +203,18 @@ docker-clean: ## Remove container + builds volume (irreversible)
 
 docker-studio: ## Build the Studio image (ghcr.io/innotelinc/olympus-studio:local)
 	docker compose build studio
+
+# Rebuild + restart Studio THE WAY THIS HOST RUNS IT. Not a convenience alias:
+# `docker compose up -d studio` starts Studio on the bridge network, where its
+# `OMNIROUTE_BASE_URL` (127.0.0.1 by default and in .env) resolves to Studio
+# itself — every generation then fails ECONNREFUSED with nothing in the UI that
+# says so. That is how this deployment broke once. Studio belongs in the same
+# host-networked group as `olympus` and the SSO proxy whenever the gateway is
+# published on loopback; see the header of compose.host-gateway.yml.
+docker-studio-up: ## Rebuild + restart Studio with host networking (the gateway is loopback-published)
+	docker compose -f docker-compose.yml -f compose.host-gateway.yml up -d --build studio
+	@echo "--- reachability (Studio -> gateway) ---"; \
+	docker exec olympus-studio node -e 'fetch(process.env.OMNIROUTE_BASE_URL.replace(/\/v1$$/,"")+"/healthz",{signal:AbortSignal.timeout(8000)}).then(r=>{console.log("gateway",r.status);process.exit(r.ok?0:1)}).catch(e=>{console.error("gateway unreachable:",e.cause?.code||e.name);process.exit(1)})'
 
 ## ---- Studio (vibe-coding web UI — web/studio) -----------------------------
 
