@@ -113,6 +113,12 @@ scripts/omniroute-restore-providers.py             # copy them, and clear the pi
 
 # or inside the stack
 docker compose up -d studio
+
+# ...but when the gateway is published on loopback on this host, Studio has to
+# share the host's network namespace: its OMNIROUTE_BASE_URL is 127.0.0.1, which
+# on a bridge network is Studio itself. Generation then fails ECONNREFUSED with
+# nothing in the UI saying so. This target cannot get that wrong:
+make docker-studio-up
 ```
 
 Studio needs a gateway and (optionally) OIDC. `make setup` scaffolds `.env`; the keys that matter are `OMNIROUTE_BASE_URL` + `OMNIROUTE_API_KEY` for generation, and `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URI` / `STUDIO_SESSION_SECRET` for sign-in. **Auth stays off until it is configured** — run `make studio-oidc` (or `python3 scripts/authentik-studio-app.py`) to create or repair the Cerulean Authentik application and provider for it. See [web/studio/README.md](web/studio/README.md) for the full contract.
@@ -203,7 +209,7 @@ python3 factory/doctor.py
 | --- | --- | --- |
 | Prerequisites | `make setup` | Preflight (git, curl, python3, node, docker where needed), installs the attribution guard hooks, generates `.env` with fresh secrets |
 | Environment | `.env.example` → `.env` | `make setup` never overwrites an existing `.env`; new keys are seeded on upgrade |
-| Gateway | `OMNIROUTE_BASE_URL`, `OMNIROUTE_API_KEY` | Remote gateway? point the URL at it. Publish it on loopback only? add `compose.host-gateway.yml` |
+| Gateway | `OMNIROUTE_BASE_URL`, `OMNIROUTE_API_KEY` | Run it here? `make gateway-up` (the `gateway` profile in `docker-compose.yml`, data in the `omniroute-data` volume). Remote gateway? point the URL at it. Loopback-published on this host? the things that talk to it — Studio, the SSO proxy — need `compose.host-gateway.yml` |
 | SecretOps | `compose.vault.yml` + `scripts/vault-bootstrap.py` | Cerulean Vault (KV v2). `VAULT_ADDR` / `VAULT_TOKEN` / `VAULT_PREFIX`; values may be `vault://<name>` references resolved at startup. Tokens are scoped to this stack's own path |
 | Identity | `scripts/authentik-studio-app.py` | Creates the Studio application/provider in Cerulean Authentik; Studio is public until OIDC is set. The gateway dashboard's client is registered the same way |
 | Gateway dashboard | `make gateway-oidc`, `gateway-sso-up`, `gateway-edge` | Puts the OmniRoute dashboard behind Authentik via an identity-aware proxy, restricted to a group, and publishes it — DNS record, certificate and NPM host — through Cerulean. See [docs/gateway-sso.md](docs/gateway-sso.md) |
@@ -225,7 +231,7 @@ contract, not an accident:
 
 - **Published:** `scripts/` (bootstrap, manufacture, Vault, secret scan, factory pin), `factory/doctor.py`,
   `factory/trigger.py`, `factory/APP_SPEC_TEMPLATE.md`, `web/studio/`, `web/landing/`, `docs/`,
-  `docker-compose.yml`, `compose.vault.yml`, `compose.host-gateway.yml`, `Dockerfile`, `Makefile`, `UPSTREAMS.md`
+  `docker-compose.yml`, `compose.vault.yml`, `compose.host-gateway.yml`, `compose.gateway-sso.yml`, `Dockerfile`, `Makefile`, `UPSTREAMS.md`
 - **Not published (gitignored):** `MISSION.md`, `FACTORY.md`, `FACTORY_RULES.md`, `harness/`,
   `.factory/` runtime state, `.archon/workflows/factory/`, and `core-modules/*` — the vendored upstreams are
   cloned by `setup.sh` / `bootstrap.sh` on first run, so provenance stays pinned in [UPSTREAMS.md](UPSTREAMS.md)

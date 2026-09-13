@@ -70,6 +70,32 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 > hatch here: this build calls bubblewrap the default and Landlock the legacy path,
 > and it refuses the fallback for the `workspace-write` profile.
 
+> **The gateway is part of this stack now.** It runs from `docker-compose.yml`
+> (profile `gateway`, `make gateway-up`) on the published `diegosouzapw/omniroute`
+> image, with its state in the `omniroute-data` volume and published on
+> `127.0.0.1:20128` only — the host-side build runner and the SSO proxy reach it on
+> loopback; nothing else can. It previously ran as a container belonging to
+> another project whose compose file no longer existed anywhere on the host, so
+> nothing could recreate it: stopping that container would have taken the whole
+> model plane with it, and no command in this repository could have brought it
+> back. Two consequences of the move are worth knowing before you touch it.
+>
+> * **`server.env` in that volume is the key to everything else in it.** It holds
+>   `STORAGE_ENCRYPTION_KEY` (and `API_KEY_SECRET`), which is what decrypts the
+>   provider connections stored in the `storage.sqlite` beside it. A volume copied
+>   with that file intact keeps working — verified by comparing all ten connections
+>   by id after the move; a volume rebuilt without it comes back with credentials
+>   that are not *missing* but unreadable. Back the file up wherever you would back
+>   up the providers themselves.
+> * **Whoever talks to the gateway inherits the topology problem.** `OMNIROUTE_BASE_URL`
+>   is one value in one `.env`, and host-side scripts need it to be the loopback URL,
+>   so a container cannot be handed a different one. On a host where the gateway is
+>   published on loopback, every service that talks to it runs with
+>   `compose.host-gateway.yml` — Studio included (`make docker-studio-up`). A Studio
+>   rebuilt without that override resolves `127.0.0.1:20128` to *itself*, answers
+>   `ECONNREFUSED` to its own requests, and stays `healthy` the whole time, because
+>   its healthcheck only asks whether Studio answers.
+>
 > **The gateway's provider connections are deployment state, not code.** OmniRoute
 > keeps them in the `storage.sqlite` of the data dir it was started with. Replace the
 > data dir — a container recreated on a fresh volume, or a move from a host-run server

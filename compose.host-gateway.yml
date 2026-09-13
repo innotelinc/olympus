@@ -15,12 +15,28 @@
 # host" — the sanctioned answer is host networking plus
 # `OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1`, which is what this file does.
 #
+# WHO NEEDS IT
+# ------------
+# Every service here that talks to the gateway, not just `olympus`: `studio` too.
+# The failure is silent and it was measured on this deployment — Studio was rebuilt
+# from the base file alone, landed on the bridge network, and resolved its own
+# `OMNIROUTE_BASE_URL` (`http://127.0.0.1:20128/v1`) to itself:
+#
+#   http://127.0.0.1:20128/healthz -> FAIL ECONNREFUSED   (from inside Studio)
+#   http://omniroute:20128/healthz -> 200                 (the sibling name)
+#
+# Studio stayed `healthy` throughout, because its healthcheck only asks whether
+# Studio answers. The UI showed an empty pane and the gateway log showed nothing
+# at all, since no request ever arrived. Use `make docker-studio-up` rather than
+# `docker compose up -d studio` so a rebuild cannot drop this.
+#
 # WHEN NOT TO USE IT
 # ------------------
-# Leave it out if your gateway is published on 0.0.0.0, if you run the
-# profile-gated sibling `omniroute` on the shared network, or if the gateway is
-# on another machine — the base file's defaults already cover those. Read the
-# caveat at the top of docker-compose.yml before changing anything here.
+# Leave it out if your gateway is published on 0.0.0.0, if every client runs on
+# the compose network (then use the sibling name `http://omniroute:20128/v1`), or
+# if the gateway is on another machine — the base file's defaults already cover
+# those. Read the caveat at the top of docker-compose.yml before changing
+# anything here.
 #
 # USAGE
 # -----

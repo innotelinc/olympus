@@ -18,6 +18,17 @@
 #   loopback-published on host   run that service with network_mode: host, use http://127.0.0.1:20128/v1
 #   gateway on another machine   OMNIROUTE_BASE_URL=http://<lan-ip>:20128/v1
 #   published on 0.0.0.0         OMNIROUTE_BASE_URL=http://host.docker.internal:20128/v1 (default below)
+#
+# The gateway is also a service in THIS file (`omniroute`, profile `gateway`), so
+# inside this project it is always reachable as `http://omniroute:20128/v1` and
+# the loopback row above stops being necessary — but only for services on the
+# compose network. Nothing here picks the URL for a service: `OMNIROUTE_BASE_URL`
+# is read from the same `.env` the host-side build runner uses, and that has to
+# stay the loopback URL. So the rule on this host is narrower than the table:
+# whenever the gateway is published on loopback, every service that talks to it
+# runs with `compose.host-gateway.yml`. `make docker-studio-up` is how Studio
+# gets there; starting Studio without it is silent — Studio resolves
+# `127.0.0.1:20128` to itself and every generation fails ECONNREFUSED.
 
 services:
   olympus:
@@ -131,36 +142,56 @@ services:
 
   # OmniRoute — the model gateway, brought inside the stack (opt-in).
   #
-  # Requires the vendored checkout: run ./setup.sh first, which clones
-  # core-modules/omniroute. Then:
+  # The PUBLISHED IMAGE, not a source build. `core-modules/omniroute` (which
+  # setup.sh keeps for the `omniroute` CLI and for reading upstream) is a
+  # reference checkout; what serves traffic is `diegosouzapw/omniroute:latest`.
+  # Running that same artefact here is what makes the settings API and
+  # scripts/omniroute-restore-providers.py talk to the deployed product rather
+  # than to a local build of it.
   #
   #   docker compose --profile gateway up -d omniroute
-  #   OMNIROUTE_BASE_URL=http://omniroute:20128/v1 docker compose up -d studio
   #
-  # Profile-gated so a plain `docker compose up` never depends on core-modules/.
+  # Profile-gated so a plain `docker compose up` neither pulls a ~3 GB image nor
+  # surprises a deployment whose gateway lives somewhere else.
+  #
+  # LOOPBACK ONLY, deliberately. The dashboard writes provider credentials and can
+  # read them back, so it is not a LAN service: reach it through the SSO proxy
+  # (compose.gateway-sso.yml) or a tunnel, never by widening this binding.
+  #
+  # `make gateway-up` starts this and waits for /healthz. The volume below is the
+  # whole gateway: provider connections, settings, the dashboard password hash —
+  # and `server.env`, whose STORAGE_ENCRYPTION_KEY is what decrypts the
+  # connections it sits beside. Lose the volume and the credentials are not
+  # "missing", they are unreadable; see docs/stack.md.
   omniroute:
-    image: node:22-bookworm-slim
+    image: diegosouzapw/omniroute:latest
     container_name: olympus-omniroute
     profiles: ["gateway"]
-    working_dir: /app/core-modules/omniroute
-    command: bash -c "npm ci && npm run start"
-    volumes:
-      - .:/app
-      - omniroute-node-modules:/app/core-modules/omniroute/node_modules
+    restart: unless-stopped
     labels:
       - "autoheal=true"
+    environment:
+      # Carried over from the gateway this replaced, so a session already signed
+      # in stays signed in. It signs the dashboard's cookies and lives in the
+      # environment rather than the volume, so it is the one thing the volume
+      # copy does not bring across.
+      JWT_SECRET: ${OMNIROUTE_JWT_SECRET:-}
+      # INITIAL_PASSWORD is NOT passed here on purpose. It only takes effect
+      # against an empty volume, and `.env` carries it as a `vault://` reference
+      # that compose cannot resolve — passing the literal string would set that
+      # literal as the dashboard password. Seed a fresh volume the documented
+      # way instead: scripts/omniroute-vault.sh reads the same reference.
+    volumes:
+      # Provider connections, settings and the dashboard password hash. Without
+      # this volume every image rebuild is a fresh gateway with no providers —
+      # exactly the state scripts/omniroute-restore-providers.py exists to repair.
+      - omniroute-data:/app/data
     ports:
-      - "${OMNIROUTE_PORT:-20128}:20128"
-    # The gateway exposes /healthz (200, no auth). Note: /health is NOT a route —
-    # it answers 404, so probing it silently degrades to whatever the fallback does.
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - node -e "fetch('http://127.0.0.1:20128/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
+      - "127.0.0.1:${OMNIROUTE_PORT:-20128}:20128"
+    # No healthcheck here on purpose: the image ships its own
+    # (`node healthcheck.mjs`, 30s interval), and `autoheal` watches that. An
+    # override would only pin us to a worse probe than upstream's and stop us
+    # inheriting their fixes.
 
   # Autoheal — restarts containers whose healthcheck reports "unhealthy".
   #
@@ -191,7 +222,8 @@ services:
 
 volumes:
   olympus-builds:
-  omniroute-node-modules:
+  # The gateway's state — providers, settings, dashboard password.
+  omniroute-data:
   # Studio's saved apps — per Authentik identity, one JSON file each.
   studio-data:
 
