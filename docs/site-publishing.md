@@ -15,19 +15,47 @@ finished when it is generated.
 Nothing about this is a preference. A React site is a build artifact, and an
 application is a process with a database. The only honest place to say so is here.
 
-## The four deliveries
+## The deliveries
 
-Studio offers four things you can do with a build, and each has exactly one job.
-They used to overlap — one button rebuilt *and* published — which made the words
-useless for deciding which to press.
+Studio offers one thing per delivery, and each has exactly one job. They used to
+overlap — one button rebuilt *and* published — which made the words useless for
+deciding which to press.
 
 | | What it does | What it does not do |
 |---|---|---|
 | **Build It** | The model writes, or adds on to, the app in Studio | It does not touch the factory |
 | **Factory Build** | Runs `make app` (Archon + the model) from a spec, then packages whatever came out | It does not publish a name |
+| **Preview It** | Packages **the files on screen**, runs them, and frames the running project on `<slug>-preview.<suffix>` | It does not rebuild, and it does not register the project's own name — see below |
 | **Publish It** | Packages **the files on screen**, runs an app, and puts the name in front of it | It does not rebuild. Publishing what a rebuild would produce, rather than what you are looking at, is a different build with the same name |
 | **Export It** | Writes a `build-requests/` spec for CI or a hand-off, with that kind's next steps | It does not build |
 | **Download It** | A zip of the source — and of the built output once packaged | It does not publish |
+
+### Preview It — the project running, under a name of its own
+
+```bash
+python3 scripts/package-project.py <slug>
+python3 scripts/app-runtime.py --up <slug> --build --preview
+python3 scripts/studio-sites.py --preview <slug>
+```
+
+The preview has to be reachable from the browser showing it: the pane is an https
+document, and an iframe of a plain-http address is blocked as mixed content. So a
+preview needs a name — just not the project's own. `--preview` writes a second
+vhost for the same container (`<slug>-preview.<suffix>`), and
+`studio-sites.py --preview` puts that name on the edge, covered by the same
+wildcard certificate so it is seconds rather than a certificate order. The project's
+own name is never added, which is the whole difference from **Publish It**: a
+preview of something nobody has published produces a name that is a preview and
+nothing else.
+
+Two consequences worth knowing:
+
+* The container is the project's own, so a project that **is** published serves the
+  previewed files on its real name until the next publish. One project, one
+  container — the preview is not a second copy of it.
+* A website with **no plan** is refused with `publish it to see it`. Static files
+  are not a process, so there is nothing to run, and framing the published site is
+  the behaviour the preview replaced.
 
 ## The pipeline: a website
 
@@ -129,6 +157,12 @@ every other name still falls through to the static tree. This is what keeps
 `studio-sites.py --publish <slug>` identical for both kinds: the edge hears one port
 for everything, forever.
 
+A preview adds a **second** vhost for the same container — `<slug>-preview.conf`,
+written by `app-runtime.py --up --preview` — so the project answers on two names and
+neither the edge nor the container has to change to add the second one. The two are
+separate files on purpose: removing a preview must not take the project's own name
+with it.
+
 ```bash
 make app-package SLUG=weight-tracker      # client build + archive
 make app-up      SLUG=weight-tracker      # image, container, vhost
@@ -176,6 +210,22 @@ wildcard when a name has one, so a site that later needs its own certificate can
 have one without this path fighting it. A wildcard covers exactly one label:
 `*.studio.olympus.innotel.us` covers `todo.studio.olympus.innotel.us` and neither
 `studio.olympus.innotel.us` nor `a.b.studio.olympus.innotel.us`.
+
+### The name hash has to fit the longest name
+
+nginx hashes every exact `server_name` when it starts, and it refuses to reload at
+all when one does not fit — `could not build server_names_hash, you should increase
+server_names_hash_bucket_size`. The default is 32/64 and a name here is long by
+construction: a slug of up to 60 characters, `-preview` for a preview, and the
+suffix. Because the failure is on the whole hash rather than on one vhost, **one
+over-long name stops every publish**, including ones already working.
+
+`deploy/nginx-sites.conf.template` sets `server_names_hash_bucket_size 128;`, which
+covers the longest name the slug limits allow. It is an http-level directive, so it
+lives at the top of that template — which the nginx image renders into
+`/etc/nginx/conf.d/`, and that directory is included *inside* the `http` block. A
+`server` block would reject it. Changing the template needs the container
+recreated, not reloaded: the rendered file is written at start.
 
 ## Configuration
 

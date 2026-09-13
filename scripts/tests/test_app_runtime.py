@@ -186,6 +186,39 @@ class VhostTests(Fixture):
         self.assertEqual(body.count("{"), body.count("}"))
         self.assertTrue(body.rstrip().endswith("}"))
 
+    def test_a_vhost_can_be_written_for_a_name_that_is_not_the_projects_own(self) -> None:
+        # A preview is framed on `<slug>-preview.<suffix>`, and that name reaches the
+        # container through a vhost of its own. Same container, same port, different
+        # name — the difference is the whole point, so it has to be a parameter rather
+        # than something the caller re-derives.
+        body = runtime_module.vhost(
+            self.runtime, "todo", 45906, self.runtime.preview_hostname("todo")
+        )
+        self.assertIn("server_name  todo-preview.studio.example.test;", body)
+        self.assertIn("proxy_pass         http://127.0.0.1:45906;", body)
+        # Not the project's own name: a preview must not answer on that one.
+        self.assertNotIn("server_name  todo.studio.example.test", body)
+
+    def test_the_preview_name_is_derived_from_the_slug_and_suffix(self) -> None:
+        self.assertEqual(
+            self.runtime.preview_hostname("weight-tracker"),
+            "weight-tracker-preview.studio.example.test",
+        )
+        self.assertEqual(
+            self.runtime.preview_url("weight-tracker"),
+            "https://weight-tracker-preview.studio.example.test",
+        )
+
+    def test_a_preview_vhost_has_its_own_file_so_it_can_go_separately(self) -> None:
+        # Two vhosts in one file would mean removing the preview removed the project's
+        # own name too, which is how a preview would take a live site down.
+        self.assertEqual(
+            self.runtime.preview_vhost_path("todo"), self.root / "nginx" / "todo-preview.conf"
+        )
+        self.assertNotEqual(
+            self.root / "nginx" / "todo.conf", self.runtime.preview_vhost_path("todo")
+        )
+
 
 class PlanTests(Fixture):
     """What the runtime reads out of the plan the project was packaged from.

@@ -293,15 +293,30 @@ def validate_request(repo: Path, payload: object) -> dict:
     plan = parse_plan(payload.get("plan"))
 
     action = payload.get("action")
-    if action not in (None, "build", "publish"):
-        raise RequestError(f"unknown action: {action!r} (expected 'build' or 'publish')")
+    if action not in (None, "build", "publish", "preview"):
+        raise RequestError(
+            f"unknown action: {action!r} (expected 'build', 'publish' or 'preview')"
+        )
     action = action or "build"
 
-    # A publish has no spec, and that is not a shorthand: a spec exists to tell the
-    # factory what to manufacture, and a publish manufactures nothing. Writing one
-    # anyway would leave factory input behind that a bare `make app` would later
-    # build — a publish with a build as a side effect.
-    if action == "publish":
+    # A preview runs the project in its own container and stops there: no DNS
+    # record, no proxy host, nothing announced. That needs something to *run*, and
+    # only two things are runnable — a planned project (its Dockerfile comes from
+    # the plan) and an app the older packager still builds. A website with no plan
+    # is a directory of static files with no process in it, and its only way to be
+    # seen is to be published, so that is what the operator is told.
+    if action == "preview" and plan is None and (kind or "app") != "app":
+        raise RequestError(
+            "a preview runs the project in its own container, and this website "
+            "predates the planner — publish it to see it"
+        )
+
+    # A publish and a preview have no spec, and that is not a shorthand: a spec
+    # exists to tell the factory what to manufacture, and neither of these
+    # manufactures anything. Writing one anyway would leave factory input behind
+    # that a bare `make app` would later build — a delivery with a build as a side
+    # effect.
+    if action in ("publish", "preview"):
         spec_target: Path | None = None
         spec_rel = ""
         slug = resolve_slug(payload, "")
@@ -311,14 +326,14 @@ def validate_request(repo: Path, payload: object) -> dict:
 
     title = payload.get("title")
 
-    # `publish` is the other action this queue carries, and it is a different job
-    # rather than a flag on the build job: it does not run the factory at all. It
-    # takes the files Studio has on screen, writes them into the app directory and
-    # packages *those* — which is what "Publish It" means. Running a factory build
-    # first would publish whatever Codex produced, which is a different app from
-    # the one the operator is looking at.
+    # `publish` and `preview` are the other actions this queue carries, and they
+    # are different jobs rather than flags on the build job: neither runs the
+    # factory at all. They take the files Studio has on screen, write them into the
+    # app directory and package *those* — which is what "Publish It" and "Preview
+    # It" mean. Running a factory build first would deliver whatever Codex
+    # produced, which is a different app from the one the operator is looking at.
     files = []
-    if action == "publish":
+    if action in ("publish", "preview"):
         files = parse_files(payload.get("files"))
 
     return {
@@ -749,6 +764,12 @@ class Runner:
     def write_status(self, job: str, **fields: object) -> None:
         payload = {"v": PROTOCOL_VERSION, "job": job, "updated_at": now_iso()}
         payload.update(fields)
+        # Both delivery addresses are always present, `null` when the job did not
+        # produce one. A reader then never has to tell "no address" from "the writer
+        # forgot the key", and the UI's preview picks between two fields rather than
+        # between two fields and their absence.
+        for name in ("published_url", "preview_url"):
+            payload.setdefault(name, None)
         try:
             write_json_atomic(self.status_path(job), payload)
         except OSError as error:
@@ -810,26 +831,37 @@ class Runner:
             log_tail="",
         )
 
-        # A publish is a different job, not a variation on a build: it takes the
-        # files it was given, packages them and puts them on a name. It never runs
-        # the factory, and it never writes a spec.
-        if spec.get("action") == "publish":
-            pub_code, detail, site, published_url = self.run_publish(job, spec)
-            succeeded = pub_code == 0
+        # A publish and a preview are different jobs, not variations on a build:
+        # they take the files they were given, package them and run them. Neither
+        # runs the factory, and neither writes a spec. The difference between them is
+        # one step — the name — and it is reported as what it is rather than as a
+        # build that did not happen.
+        action = spec.get("action")
+        if action in ("publish", "preview"):
+            site = None
+            published_url = None
+            preview_url = None
+            if action == "preview":
+                code, detail, site, _unused, preview_url = self.run_delivery(job, spec)
+            else:
+                code, detail, site, published_url, _unused = self.run_delivery(job, spec)
+            succeeded = code == 0
             self.write_status(
                 job,
                 **self.job_fields(spec),
                 state="succeeded" if succeeded else "failed",
                 started_at=started_at,
                 finished_at=now_iso(),
-                exit_code=pub_code,
+                exit_code=code,
                 message=detail,
                 artifact=None,
                 site=site,
                 published_url=published_url,
+                preview_url=preview_url,
                 log_tail=log_tail(self.log_path(job)),
             )
-            log(f"{'published' if succeeded else 'publish failed'} {slug}: {detail}")
+            done = "previewed" if action == "preview" else "published"
+            log(f"{done if succeeded else action + ' failed'} {slug}: {detail}")
             running.unlink(missing_ok=True)
             return
 
@@ -948,6 +980,10 @@ class Runner:
             "language": (str(runtime.get("language"))[:40] if runtime.get("language") else None),
             "requested_at": spec["requested_at"],
             "requested_by": spec["requested_by"],
+            # What kind of job this is, so a panel can say what a running job is doing
+            # rather than only that it is running. A build, a publish and a preview
+            # all take minutes, and "Building…" over a preview is the wrong word.
+            "action": spec.get("action") or "build",
         }
 
     def cancel_path(self, job: str) -> Path:
@@ -1088,17 +1124,28 @@ class Runner:
         """
         return str(self._load_dotenv().get("SITE_HOST_SUFFIX") or "").strip().strip('"').strip("'")
 
-    def run_publish(self, job: str, spec: dict) -> tuple[int, str, dict | None, str | None]:
-        """Publish what Studio has on screen, without running the factory.
+    def run_delivery(
+        self, job: str, spec: dict
+    ) -> tuple[int, str, dict | None, str | None, str | None]:
+        """Run — and, for a publish, name — what Studio has on screen, with no factory.
 
-        This is the second job the queue carries and it is deliberately not a flag
-        on the first one. A build runs the model: `make app`, Archon, Codex, then
-        packaging. A publish takes the files the operator is *looking at*, writes
-        them into the app directory and packages those, then puts the result on a
-        name. Running the factory first would publish whatever the model produced
-        instead, which is a different app from the one on screen.
+        Two jobs share this body because their first two steps are identical and the
+        difference is the third:
 
-        Returns `(exit_code, detail, site, published_url)`.
+          publish  packages the files, runs the container, then registers the name at
+                   the edge. The project is public.
+          preview  packages the files and runs the container, and stops. No DNS
+                   record, no proxy host, nothing announced. What it produces is a
+                   *running* project to put in the frame, which is what a preview is
+                   for: looking at the build without committing a name to it.
+
+        Neither runs the factory. A build runs the model: `make app`, Archon, Codex,
+        then packaging. These take the files the operator is *looking at*, write them
+        into the app directory and package those. Running the factory first would
+        deliver whatever the model produced instead, which is a different project from
+        the one on screen.
+
+        Returns `(exit_code, detail, site, published_url, preview_url)`.
         """
         slug = str(spec["slug"])
         kind = spec.get("kind") if spec.get("kind") in self.PACKAGERS else "app"
@@ -1106,12 +1153,18 @@ class Runner:
         files = spec.get("files") or []
         build_dir = resolve_build_dir(self.repo, slug)
 
-        steps = self.publish_steps(slug, kind, plan)
+        preview = spec.get("action") == "preview"
+        verb = "previewing" if preview else "publishing"
+        steps = (
+            self.preview_steps(slug, kind, plan)
+            if preview
+            else self.publish_steps(slug, kind, plan)
+        )
         what = plan.get("runtime", {}).get("language") if plan else kind
 
-        log(f"publishing {slug} from {len(files)} file(s) as {what}")
+        log(f"{verb} {slug} from {len(files)} file(s) as {what}")
         with self.log_path(job).open("ab") as sink:
-            sink.write(f"\n=== publishing {slug} ({what}) ===\n".encode())
+            sink.write(f"\n=== {verb} {slug} ({what}) ===\n".encode())
             sink.write(f"materialising {len(files)} file(s) into builds/{slug}\n".encode())
             sink.flush()
 
@@ -1136,8 +1189,9 @@ class Runner:
                 )
                 if code != 0:
                     detail = (
-                        f"Publishing stopped at `{Path(command[1]).name}` (exit {code}). "
-                        "The files are in builds/" + slug + " — see the log for what it said."
+                        f"{verb.capitalize()} stopped at `{Path(command[1]).name}` "
+                        f"(exit {code}). The files are in builds/" + slug
+                        + " — see the log for what it said."
                     )
                     # An app that reached its runtime step is *running* even when the
                     # last step failed, and the last step is the name. Saying only
@@ -1146,16 +1200,52 @@ class Runner:
                     if Path(command[1]).name == "studio-sites.py":
                         record = read_app_runtime(slug)
                         if record:
+                            retry = (
+                                f"run Preview It again — no rebuild needed."
+                                if preview
+                                else f"`make site-publish SLUG={slug}` — no rebuild needed."
+                            )
                             detail += (
                                 f" The application itself is running on 127.0.0.1:{record.get('port')}; "
-                                f"only the edge is missing. Retry with "
-                                f"`make site-publish SLUG={slug}` — no rebuild needed."
+                                f"only the edge is missing. Retry with {retry}"
                             )
-                    return code, detail, None, None
+                    return code, detail, None, None, None
 
         site = read_packaged(build_dir, kind)
         suffix = self.site_suffix()
         url = f"https://{slug}.{suffix}" if suffix else None
+
+        if preview:
+            # The address comes from the runtime's own record, never from a string
+            # composed here: what the frame will hold has to be where the project was
+            # actually started. `app-runtime.py --up` writes that record after the
+            # healthcheck answers, so a preview with no URL is a project that is not
+            # running — and framing an address nothing answers is the blank pane this
+            # whole path exists to replace.
+            record = read_app_runtime(slug)
+            running_url = (
+                str(record.get("preview_url"))
+                if record and record.get("preview_url")
+                else None
+            )
+            if running_url is None:
+                return (
+                    1,
+                    f"{slug} packaged but the runtime recorded no preview address — "
+                    "nothing to frame. See the log.",
+                    None,
+                    None,
+                    None,
+                )
+            detail = (
+                f"Previewing {slug} — running on {running_url}. Nothing was published: "
+                f"{slug}'s own name was not registered at the edge, and no DNS record was "
+                "made."
+            )
+            if site and site.get("image"):
+                detail += f" Running as {site.get('image')}."
+            return 0, detail, site, None, running_url
+
         detail = f"Published {slug}"
         if site:
             noun = f"{site.get('language')} file(s)" if site.get("language") else "file(s)"
@@ -1164,7 +1254,7 @@ class Runner:
         detail += f". Running as {image_tag_for(slug)}." if site and site.get("image") else "."
         if url:
             detail += f" Live at {url}."
-        return 0, detail, site, url
+        return 0, detail, site, url, None
 
     def publish_steps(self, slug: str, kind: str, plan: dict | None) -> list[list[str]]:
         """The commands a publish runs, in order.
@@ -1201,6 +1291,32 @@ class Runner:
             ["python3", str(scripts / "package-project.py"), slug],
             ["python3", str(scripts / "app-runtime.py"), "--up", slug, "--build"],
             ["python3", str(scripts / "studio-sites.py"), "--publish", slug],
+        ]
+
+    def preview_steps(self, slug: str, kind: str, plan: dict | None) -> list[list[str]]:
+        """The commands a preview runs: what a publish runs, on a name of its own.
+
+        The container is the same one a publish runs, and `--preview` gives it a
+        second vhost so the frame can reach it. The last step is the difference: a
+        publish registers `<slug>.<suffix>`, a preview registers
+        `<slug>-preview.<suffix>`. Registering is unavoidable — the pane is https and
+        an iframe of a plain-http address is blocked — so the choice is which name,
+        and the project's own name is the one a preview must not take.
+
+        None of this publishes anything: the project's real name is never added to
+        the edge, so a preview of a project nobody has published is a name that does
+        not exist.
+        """
+        scripts = self.repo / "scripts"
+        # A plan means the generic packager writes the Dockerfile; no plan means this
+        # project predates the planner and its own packager builds it. A website with
+        # no plan never reaches here — `validate_request` refuses it, because static
+        # files are not a process and there would be nothing to run.
+        packager = "package-project.py" if plan else "package-app.py"
+        return [
+            ["python3", str(scripts / packager), slug],
+            ["python3", str(scripts / "app-runtime.py"), "--up", slug, "--build", "--preview"],
+            ["python3", str(scripts / "studio-sites.py"), "--preview", slug],
         ]
 
     # Which script turns a generated build into something real, per kind. A website

@@ -19,6 +19,22 @@
 #
 # Both are read-only over /srv/sites; nothing here writes.
 #
+# THE NAME HASH HAS TO BE BIG ENOUGH FOR THE LONGEST NAME.
+#
+# nginx hashes every exact `server_name` at startup and refuses to start when one
+# does not fit its hash bucket — `could not build server_names_hash, you should
+# increase server_names_hash_bucket_size`. The default is 32/64, and a name here is
+# long by construction: a slug up to 60 characters, `-preview` for a preview name,
+# and the suffix. A preview is what surfaced it, because its name is the longest one
+# this deployment writes, and the failure is total rather than partial — nginx will
+# not reload with *any* generated vhost until the bucket fits, so one over-long name
+# stops every publish. 128 covers the longest name the slug limits allow.
+#
+# This file is rendered into /etc/nginx/conf.d/, which the image includes *inside*
+# the `http` block, so an http-level directive belongs here and would be rejected in
+# a `server` block.
+server_names_hash_bucket_size 128;
+
 # APPLICATIONS COME FIRST. A running Studio application gets one generated `server`
 # block per slug, written by scripts/app-runtime.py into /etc/nginx/app-conf.d and
 # included here. Its `server_name` is an exact name, and nginx resolves an exact name

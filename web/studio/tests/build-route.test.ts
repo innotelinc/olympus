@@ -415,6 +415,39 @@ describe("readBuildStatus", () => {
     expect(readBuildStatus("")).toBeNull();
   });
 
+  it("reads a preview's address and its action", () => {
+    statusFile("0123456789abcdef", {
+      state: "succeeded",
+      action: "preview",
+      slug: "markdown-notes",
+      message: "Previewing markdown-notes — running on https://markdown-notes.example.",
+      preview_url: "https://markdown-notes.example",
+      published_url: null,
+    });
+
+    const status = readBuildStatus("0123456789abcdef");
+    expect(status?.action).toBe("preview");
+    expect(status?.previewUrl).toBe("https://markdown-notes.example");
+    // A preview publishes nothing, and reading its address as a published one would
+    // show a name that was never registered at the edge.
+    expect(status?.publishedUrl).toBeNull();
+  });
+
+  it("calls a status written before the action field existed a build", () => {
+    // Every status on disk from before this field is a factory build. Guessing
+    // "publish" would relabel finished history as something it was not.
+    statusFile("0123456789abcdef", { state: "succeeded", slug: "markdown-notes" });
+
+    const status = readBuildStatus("0123456789abcdef");
+    expect(status?.action).toBe("build");
+    expect(status?.previewUrl).toBeNull();
+  });
+
+  it("does not read an unusable action as a preview", () => {
+    statusFile("0123456789abcdef", { state: "running", action: "previews" });
+    expect(readBuildStatus("0123456789abcdef")?.action).toBe("build");
+  });
+
   it("returns null for an unknown job and for junk on disk", () => {
     expect(readBuildStatus("0123456789abcdef")).toBeNull();
 
@@ -681,6 +714,18 @@ describe("the plan travels with the request", () => {
     expect(Array.isArray(request.files)).toBe(true);
   });
 
+  it("sends the stored plan with a preview", async () => {
+    // A preview packages the files on screen just as a publish does; the only
+    // difference is that it stops before the name.
+    const project = seed({ plan: PLAN });
+    beat();
+
+    const request = await requestFor(project, { action: "preview" });
+    expect(request.action).toBe("preview");
+    expect((request.plan as Record<string, unknown>).kind).toBe("app");
+    expect(Array.isArray(request.files)).toBe(true);
+  });
+
   it("omits the plan for a project that has none, rather than inventing one", async () => {
     // A project saved before the planner existed is built by its own packager. A
     // guessed plan would change what Publish It builds.
@@ -689,5 +734,6 @@ describe("the plan travels with the request", () => {
 
     expect(await requestFor(project)).not.toHaveProperty("plan");
     expect(await requestFor(project, { action: "publish" })).not.toHaveProperty("plan");
+    expect(await requestFor(project, { action: "preview" })).not.toHaveProperty("plan");
   });
 });
