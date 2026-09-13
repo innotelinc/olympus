@@ -1,5 +1,4 @@
 import {
-  buildMessages,
   chatCompletionsUrl,
   chooseModel,
   isPlaceholderSecret,
@@ -7,6 +6,7 @@ import {
   sseToTextStream,
   type PriorFile,
 } from "@/lib/omniroute";
+import { PlanError, generationMessages, parsePlanObject } from "@/lib/plan";
 import { parseKind } from "@/lib/projects";
 import { authorizeRequest, identityKey } from "@/lib/auth";
 import { checkRateLimit } from "@/lib/ratelimit";
@@ -97,10 +97,25 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const priorFiles = readPriorFiles(body.files);
-  // What is being built decides the system prompt — the app contract and the
-  // website contract are different products, not one with a flag. An unknown or
-  // absent value is an app, which is what every caller before the split meant.
+  // What is being built decides the plan's framing. An unknown or absent value is
+  // an app, which is what every caller before the split meant.
   const kind = parseKind(body.kind);
+
+  // The plan is required, and it is re-validated rather than trusted: it has been
+  // to the browser and back. Refusing a missing plan keeps one contract instead of
+  // two — a request without one would fall back to a stack the user never saw.
+  let plan;
+  try {
+    plan = parsePlanObject(body.plan, kind);
+  } catch (error) {
+    return fail(
+      error instanceof PlanError
+        ? `That build plan is not usable: ${error.message} Plan it again from the prompt.`
+        : "That build plan is not usable. Plan it again from the prompt.",
+      400,
+    );
+  }
+
   const url = chatCompletionsUrl(config);
 
   // The model comes from the caller, because the picker lists what the gateway has
@@ -130,7 +145,7 @@ export async function POST(request: Request): Promise<Response> {
       },
       body: JSON.stringify({
         model,
-        messages: buildMessages(prompt, priorFiles, kind),
+        messages: generationMessages(prompt, priorFiles, plan),
         stream: true,
         temperature: 0.4,
       }),

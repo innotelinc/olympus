@@ -999,6 +999,147 @@ pre.code-body {
   text-align: center;
 }
 
+/* ---- the plan ----------------------------------------------------------- */
+
+/* The step between "here is what I want" and "here is your code". It sits in the
+   composer because it is part of the instruction, not part of the result — and
+   it has to read as something to check, so it is a bordered card rather than
+   another panel of hints. */
+.plan {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+/* The prompt changed under it, so this plan answers a question nobody asked any
+   more. Dimmed rather than hidden: it is still worth reading, it just cannot be
+   confirmed. */
+.plan.stale {
+  opacity: 0.6;
+}
+
+.plan-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.plan-name {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.plan-slug {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.plan-summary {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.plan-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plan-stack li {
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* The commands are what the runner will execute, so they are monospaced and
+   given a row each: a person reviewing the plan is checking exactly these. */
+.plan-run {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.plan-run dt {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.plan-run dd {
+  margin: 0;
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.plan-files summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.plan-files ul {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plan-files li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.plan-files code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.plan-files em {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.plan-notes {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  border-left: 2px solid var(--line);
+  padding-left: 10px;
+}
+
 /* ---- the four deliveries ----------------------------------------------- */
 
 /* One row, because they are alternatives rather than a sequence: an operator

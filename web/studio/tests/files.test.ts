@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPreviewDocument, currentFileFrom, languageFor, parseFiles } from "@/lib/files";
+import { buildPreviewDocument, currentFileFrom, languageFor, mergeFiles, parseFiles } from "@/lib/files";
 
 const ONE_FILE = `<file path="index.html">
 <!doctype html><html><head><title>Counter</title></head>
@@ -235,5 +235,51 @@ describe("languageFor", () => {
     expect(languageFor("app.js")).toBe("javascript");
     expect(languageFor("nested/assets/logo.svg")).toBe("svg");
     expect(languageFor("notes.txt")).toBe("text");
+  });
+});
+
+describe("mergeFiles", () => {
+  it("replaces a file that was sent again, in place", () => {
+    const merged = mergeFiles(
+      [
+        { path: "a.ts", contents: "old a" },
+        { path: "b.ts", contents: "old b" },
+      ],
+      [{ path: "a.ts", contents: "new a" }],
+    );
+
+    expect(merged).toEqual([
+      { path: "a.ts", contents: "new a" },
+      { path: "b.ts", contents: "old b" },
+    ]);
+  });
+
+  it("keeps every file the turn did not mention", () => {
+    const merged = mergeFiles([{ path: "a.ts", contents: "a" }], [{ path: "b.ts", contents: "b" }]);
+    expect(merged.map((file) => file.path)).toEqual(["a.ts", "b.ts"]);
+  });
+
+  it("appends a new file after the existing ones", () => {
+    const merged = mergeFiles(
+      [{ path: "z.ts", contents: "z" }],
+      [{ path: "a.ts", contents: "a" }, { path: "z.ts", contents: "z2" }],
+    );
+    expect(merged.map((file) => file.path)).toEqual(["z.ts", "a.ts"]);
+    expect(merged[0].contents).toBe("z2");
+  });
+
+  it("returns the generated set untouched when there is no previous version", () => {
+    const produced = [{ path: "a.ts", contents: "a" }];
+    expect(mergeFiles([], produced)).toBe(produced);
+  });
+
+  it("does not mutate either input", () => {
+    const previous = [{ path: "a.ts", contents: "a" }];
+    const produced = [{ path: "a.ts", contents: "new" }];
+
+    mergeFiles(previous, produced);
+
+    expect(previous[0].contents).toBe("a");
+    expect(produced[0].contents).toBe("new");
   });
 });

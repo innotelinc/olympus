@@ -5,7 +5,10 @@ import {
   MIN_PORT,
   PlanError,
   extractJsonObject,
+  generationMessages,
+  missingPlannedFiles,
   parsePlan,
+  parsePlanObject,
   planMessages,
   slugify,
 } from "@/lib/plan";
@@ -250,5 +253,118 @@ describe("planMessages", () => {
 
   it("sends only the system prompt and the request for a new project", () => {
     expect(planMessages("a tracker", "app")).toHaveLength(2);
+  });
+});
+
+describe("parsePlanObject", () => {
+  it("reads an object that has been through the browser", () => {
+    const plan = parsePlanObject(JSON.parse(validPlan()), "app");
+    expect(plan.slug).toBe("weight-tracker");
+    expect(plan.run.port).toBe(3000);
+  });
+
+  it("re-reads the fields rather than trusting them, so a round trip cannot weaken one", () => {
+    const plan = parsePlanObject({ name: "x", run: { start: "npm start", port: 1 } }, "app");
+    expect(plan.run.port).toBe(DEFAULT_PORT);
+  });
+
+  it("refuses an object with no start command", () => {
+    expect(() => parsePlanObject({ name: "x", run: {} }, "app")).toThrow(PlanError);
+  });
+
+  it("refuses something that is not an object", () => {
+    expect(() => parsePlanObject("a plan", "app")).toThrow(PlanError);
+  });
+});
+
+describe("missingPlannedFiles", () => {
+  const plan = parsePlan(validPlan(), "app");
+
+  it("is null when every planned file was written", () => {
+    expect(
+      missingPlannedFiles([{ path: "package.json" }, { path: "src/App.tsx" }], plan),
+    ).toBeNull();
+  });
+
+  it("names the first planned file that is missing", () => {
+    expect(missingPlannedFiles([{ path: "src/App.tsx" }], plan)).toBe("package.json");
+  });
+
+  it("accepts a superset, because writing extra files honours the plan", () => {
+    expect(
+      missingPlannedFiles(
+        [{ path: "package.json" }, { path: "src/App.tsx" }, { path: "src/index.css" }],
+        plan,
+      ),
+    ).toBeNull();
+  });
+
+  it("tolerates a leading ./ in a generated path", () => {
+    expect(missingPlannedFiles([{ path: "./package.json" }, { path: "./src/App.tsx" }], plan)).toBeNull();
+  });
+
+  it("has nothing to report when the plan listed no files", () => {
+    const noFiles = parsePlan(validPlan({ files: [] }), "app");
+    expect(missingPlannedFiles([], noFiles)).toBeNull();
+  });
+});
+
+describe("generationMessages", () => {
+  const plan = parsePlan(validPlan(), "app");
+
+  function systemOf(messages: { role: string; content: string }[]): string {
+    return messages[0].content;
+  }
+
+  it("restates the plan the code has to match", () => {
+    const system = systemOf(generationMessages("a tracker", [], plan));
+
+    expect(system).toContain("Weight Tracker");
+    expect(system).toContain("npm install");
+    expect(system).toContain("npm run build");
+    expect(system).toContain("npm start");
+    expect(system).toContain("port 3000");
+    expect(system).toContain("package.json");
+    expect(system).toContain("src/App.tsx");
+  });
+
+  it("says the project is the model's to write, with no scaffold", () => {
+    const system = systemOf(generationMessages("a tracker", [], plan));
+    expect(system).toMatch(/THE PROJECT IS YOURS IN FULL/);
+    expect(system).toMatch(/no scaffold/i);
+  });
+
+  it("demands the port and a bind on every interface", () => {
+    // The failure this prevents is invisible from inside the container: the app
+    // works locally and the preview is unreachable.
+    const system = systemOf(generationMessages("a tracker", [], plan));
+    expect(system).toMatch(/bind every interface/i);
+  });
+
+  it("does not demand a database for a project that keeps no state", () => {
+    const stateless = parsePlan(validPlan({ runtime: { language: "static" } }), "website");
+    const system = systemOf(generationMessages("a shop", [], stateless));
+    expect(system).toMatch(/keeps no state/);
+    expect(system).toMatch(/Do not add a database/);
+  });
+
+  it("asks for every file on a first build", () => {
+    const messages = generationMessages("a tracker", [], plan);
+    expect(messages).toHaveLength(2);
+    expect(messages[0].content).toMatch(/Write every file the project needs/);
+    expect(messages[1].content).toBe("a tracker");
+  });
+
+  it("asks for only the changed files on an addition, and says omissions are kept", () => {
+    const messages = generationMessages("add charts", [{ path: "src/App.tsx", contents: "x" }], plan);
+    expect(messages).toHaveLength(3);
+    expect(messages[0].content).toMatch(/file you do not mention is kept/);
+    expect(messages[1].content).toMatch(/addition/);
+    expect(messages[1].content).toContain("src/App.tsx");
+  });
+
+  it("describes a website as one, with no server", () => {
+    const site = parsePlan(validPlan({ runtime: { language: "static" } }), "website");
+    expect(systemOf(generationMessages("a shop", [], site))).toMatch(/WEBSITE/);
   });
 });

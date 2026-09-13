@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { POST } from "@/app/api/generate/route";
+import { withPlan } from "./helpers/plan";
 
 // The route calls loadRepoEnv(), which reads the repo-root .env. Deleting a key
 // from process.env does not make it absent — the loader puts it straight back
@@ -45,7 +46,7 @@ function post(payload: string, headers: Record<string, string> = {}): Promise<Re
     new Request("http://studio.test/api/generate", {
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
-      body: payload,
+      body: withPlan(payload),
     }),
   );
 }

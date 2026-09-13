@@ -199,23 +199,27 @@ export function parsePlan(text: string, kind: ProjectKind): BuildPlan {
     throw new PlanError("The planner returned JSON that could not be parsed. Try again.");
   }
 
+  return parsePlanObject(payload, kind);
+}
+
+/**
+ * A plan that arrived as an already-parsed object.
+ *
+ * Used by the generation route, where the plan has been to the browser and back:
+ * the client confirms it and sends it with the build request. That round trip is
+ * exactly why the fields are re-read here rather than trusted — the same readers
+ * as `parsePlan`, so a plan cannot be weakened by the trip through the page.
+ */
+export function parsePlanObject(payload: unknown, kind: ProjectKind): BuildPlan {
   const root = asRecord(payload);
-  if (!root) throw new PlanError("The planner returned a plan that is not an object.");
+  if (!root) throw new PlanError("The plan is not an object.");
 
   const name = asText(root.name, MAX_NAME_CHARS) || (kind === "website" ? "New website" : "New app");
   const run = asRecord(root.run) ?? {};
   const runtime = asRecord(root.runtime) ?? {};
 
   const start = asCommand(run.start);
-  if (!start) {
-    // Refused rather than defaulted. Guessing a start command produces a project
-    // that builds and then serves nothing, which reads as a runner fault.
-    throw new PlanError(
-      "The plan has no start command, so nothing would run. Ask for it again with more detail about how the project runs.",
-    );
-  }
-
-  const files = readFiles(root.files);
+  if (!start) throw new PlanError("The plan has no start command, so nothing would run.");
 
   return {
     name,
@@ -234,9 +238,34 @@ export function parsePlan(text: string, kind: ProjectKind): BuildPlan {
       port: asPort(run.port),
       healthcheck: asHealthPath(run.healthcheck),
     },
-    files,
+    files: readFiles(root.files),
     notes: asText(root.notes, MAX_NOTES_CHARS) || null,
   };
+}
+
+/**
+ * The first planned file the generated set did not write.
+ *
+ * The plan's file list is the contract the user confirmed, so a plan that says it
+ * will write `package.json` and a reply that does not is a mismatch worth naming
+ * at the API boundary — the alternative is a build that fails minutes later on
+ * the runner, where the message is about a missing module and not about the file
+ * that was promised.
+ *
+ * A **superset** is fine: a model that writes extra files has still honoured the
+ * list, and refusing them would punish thoroughness. Only a missing planned file
+ * is reported, and only the first, because one sentence naming one file is
+ * actionable where a list is noise.
+ */
+export function missingPlannedFiles(
+  files: { path: string }[],
+  plan: BuildPlan,
+): string | null {
+  if (plan.files.length === 0) return null;
+
+  const written = new Set(files.map((file) => file.path.replace(/^\.?\//, "")));
+  const missing = plan.files.find((file) => !written.has(file.path));
+  return missing ? missing.path : null;
 }
 
 function readFiles(value: unknown): PlanFile[] {
@@ -385,6 +414,144 @@ export function planMessages(
         `stack unless the instruction asks you to change it, keep every feature that works, and ` +
         `list only the files this change touches or rewrites, noting in your summary that the rest ` +
         `is unchanged.`,
+    });
+  }
+
+  messages.push({ role: "user", content: prompt });
+
+  return messages;
+}
+
+/* ---- the generation contract --------------------------------------------- */
+
+/**
+ * How the project is described to the model that builds it.
+ *
+ * The plan is restated in full rather than referenced, because this is the only
+ * turn that writes code and the plan's details are what the code has to match:
+ * the run commands it must work with, the port it must listen on, the files the
+ * user saw listed, and the datastore it is allowed to assume.
+ */
+function describePlan(plan: BuildPlan): string {
+  const kindLine =
+    plan.kind === "website"
+      ? "a WEBSITE — static content served over HTTP: pages, styling, images, and at most a little client-side scripting. It has no server and keeps no state."
+      : "a FULL-STACK APPLICATION — software that runs on a server and keeps state, so what the user enters is there when they come back, from another device.";
+
+  const stack = [
+    plan.runtime.language,
+    ...plan.runtime.frameworks,
+    plan.runtime.database ? `database: ${plan.runtime.database}` : "no database",
+  ].join(" · ");
+
+  const files =
+    plan.files.length > 0
+      ? plan.files.map((file) => `- ${file.path}${file.purpose ? ` — ${file.purpose}` : ""}`).join("\n")
+      : "- (the planner listed no files; write what the project needs)";
+
+  const steps: string[] = [];
+  if (plan.run.install) steps.push(`install  \`${plan.run.install}\``);
+  if (plan.run.build) steps.push(`build    \`${plan.run.build}\``);
+  steps.push(`start    \`${plan.run.start}\``);
+
+  return [
+    `Name: ${plan.name}`,
+    `What it is: ${kindLine}`,
+    `Stack: ${stack}`,
+    `What it does: ${plan.summary}`,
+    `Files the plan listed:\n${files}`,
+    plan.notes ? `Notes from the plan: ${plan.notes}` : "",
+    [
+      "How it will be run — this is fixed, and your project must work with it, in this order:",
+      ...steps.map((step) => `  ${step}`),
+      `It is served at port ${plan.run.port}.`,
+    ].join("\n"),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/**
+ * The generation contract: build to the confirmed plan, whatever the stack is.
+ *
+ * This replaced two hardcoded contracts — one per kind — that specified React,
+ * a pinned scaffold and "no dependencies". That was the closest thing to a
+ * guarantee in the old design and the reason a request for anything else could
+ * not be honoured. The trade is deliberate and worth stating plainly: the
+ * project is now wholly the model's, so the safety that used to come from a
+ * generated scaffold now comes from the run contract being *tested* — the runner
+ * installs, builds and starts what the plan declared and reports the real error
+ * if it does not.
+ *
+ * The one instruction that is not negotiable is the port and the bind address.
+ * A server that listens on localhost only is unreachable from outside its
+ * container, and that failure is invisible from inside — it reads as "the preview
+ * is broken" rather than "the app is fine and the network is wrong".
+ */
+export function generationMessages(
+  prompt: string,
+  priorFiles: { path: string; contents: string }[],
+  plan: BuildPlan,
+): Array<{ role: "system" | "user"; content: string }> {
+  const isAddOn = priorFiles.length > 0;
+  const label = plan.kind === "website" ? "site" : "application";
+
+  const rules = [
+    "Output rules — follow them exactly:",
+    "- Reply with file blocks and nothing else. No prose, no preamble, no explanation, no markdown fences.",
+    '- Wrap every file exactly like this:\n<file path="src/main.ts">\n...file contents...\n</file>',
+    "- Rewrite each file you send in full. Never emit patches, diffs, or partial edits.",
+    isAddOn
+      ? "- Return every file you are adding or changing. A file you do not mention is kept exactly as it is, so do not re-send a file just to keep it — and do not drop a feature by leaving its file out."
+      : "- Write every file the project needs to install, build and run. Nothing exists yet.",
+  ].join("\n");
+
+  const ownership = [
+    "THE PROJECT IS YOURS IN FULL. There is no scaffold around your files and no dependency is installed for you: anything the project needs to install, build and run must be written by you, declared in that stack's own manifest (package.json, requirements.txt, Gemfile, go.mod, composer.json, pyproject.toml — whatever it uses).",
+    "- Declare dependency versions that exist. Do not invent a version number; if you are unsure of the current one, use a range that cannot resolve to nothing.",
+    `- The server must listen on port ${plan.run.port} and bind every interface, not just localhost. Binding 127.0.0.1 is the most common way a project that works locally is unreachable once it is running.`,
+    "- Read configuration from environment variables and fall back to a working default. There is no .env file to read and no secrets to be given.",
+    plan.runtime.database
+      ? `- Persistence is ${plan.runtime.database}. Keep what the user enters: a tracker that forgets is not a tracker. A file-backed database lives on disk next to the code and survives a restart.`
+      : "- This project keeps no state. Do not add a database or a server it does not need.",
+    "- Do not add a step that is not in the plan and do not change the commands above. Nothing else runs.",
+  ].join("\n");
+
+  const quality = [
+    "Design rules:",
+    "- This is something a person will use, not a demo: a real structure, real content, and finished states.",
+    "- Semantic HTML, responsive without a grid library, visible focus states, and every control reachable and operable by keyboard.",
+    "- Contrast that passes, one coherent colour palette, a real spacing scale, and a typographic hierarchy with sensible measure for text.",
+    "- Mobile-first: it has to read well at 360px and look composed at 1440px.",
+    "- A destructive action asks first.",
+    "- No placeholder lorem ipsum, no TODO comments, no \"coming soon\" sections, no handler behind a button that looks live.",
+    "- No external fonts, no CDN tags, no remote images. Inline SVG or CSS gradients.",
+    plan.kind === "website"
+      ? "- Ship the built output where the build step puts it; do not hardcode a dev-server-only URL."
+      : "- Handle the loading, empty and failure states explicitly. An empty list is a normal first screen, not an error.",
+  ].join("\n");
+
+  const messages: Array<{ role: "system" | "user"; content: string }> = [
+    {
+      role: "system",
+      content:
+        `You are Studio, the build agent inside Olympus. A plan for this project has been confirmed by the person who asked for it, and you now write it. Build what the plan describes — the stack, the structure and the behaviour — not a more familiar stack you would have chosen.\n\n` +
+        `THE PLAN\n${describePlan(plan)}\n\n${rules}\n\n${ownership}\n\n${quality}`,
+    },
+  ];
+
+  if (isAddOn) {
+    const rendered = priorFiles
+      .map((file) => `<file path="${file.path}">\n${file.contents}\n</file>`)
+      .join("\n\n");
+
+    messages.push({
+      role: "user",
+      content:
+        `Current version of the ${label}:\n\n${rendered}\n\n` +
+        `Develop it further according to the next instruction. This is an addition to a ${label} that ` +
+        `already exists and may already hold real data: keep every file, feature, table and column that ` +
+        `is already there unless the instruction asks you to remove it.`,
     });
   }
 

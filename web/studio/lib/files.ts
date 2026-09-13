@@ -274,3 +274,41 @@ ${items}
   </body>
 </html>`;
 }
+
+/**
+ * Fold a generated set into the project that already exists.
+ *
+ * A development turn returns **the files it is adding or changing**, not the whole
+ * project. Re-sending twenty files to change one is how a model runs out of room
+ * mid-file and silently truncates the twentieth — and a truncated file is a broken
+ * build that looks like a model quality problem. So a returned path replaces its
+ * previous copy and a path that was not returned is kept exactly as it was.
+ *
+ * Order matters and is preserved: existing files keep their position, and a new
+ * file is appended where the model put it relative to the files it sent. The file
+ * list is what the preview and the code tabs read, so a stable order is what keeps
+ * the view from reshuffling under someone between two turns.
+ *
+ * Deletion is deliberately not expressible here. There is no way to tell "I forgot
+ * this file" apart from "I meant to remove it", and guessing wrong loses work the
+ * user cannot get back. Removing a file is not something a development turn is
+ * asked to do; if it becomes one, it needs its own explicit marker.
+ */
+export function mergeFiles(previous: GeneratedFile[], produced: GeneratedFile[]): GeneratedFile[] {
+  if (previous.length === 0) return produced;
+
+  const merged = previous.map((file) => ({ ...file }));
+  const index = new Map(merged.map((file, position) => [file.path, position]));
+
+  for (const file of produced) {
+    const position = index.get(file.path);
+    if (position === undefined) {
+      index.set(file.path, merged.length);
+      merged.push({ ...file });
+    } else {
+      merged[position] = { ...file };
+    }
+  }
+
+  return merged;
+}
