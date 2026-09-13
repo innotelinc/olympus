@@ -159,6 +159,13 @@ make site-check HOST=todo-list.studio.olympus.innotel.us
 make site-unpublish SLUG=todo-list
 ```
 
+`make site-unpublish` deletes the NPM proxy host, which is the only thing that makes
+a name answer. The record stays — the wildcard already covers it — and the staged
+files stay on disk, so re-publishing is instant. What a client gets afterwards is
+not a 404: with no host bound to the name, no certificate is presented for it
+either, and the handshake fails with `unrecognized name`. That is the name being
+removed rather than a fault in the edge.
+
 The name is **derived, never typed**: it is always `<slug>.<SITE_HOST_SUFFIX>`, the
 same slug the build directory uses. A free-form name would be a second namespace to
 keep in sync with the first, and the requests that go wrong would go wrong
