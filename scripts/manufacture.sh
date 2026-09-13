@@ -22,6 +22,35 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SPEC="${1:-${SPEC:-}}"
 WORKFLOW="archon-greenfield"
 
+# --- the local environment -------------------------------------------------------
+# This script is both the runner's executor and the operator's `make app`. The runner
+# loads .env itself and passes on only OMNIROUTE_*/ARCHON_*; a hand-run `make app` has
+# no such loader, so without this it aims the agent at the gateway carrying no key and
+# fails as an auth error.
+#
+# Only the keys the build actually reads, and only the ones still unset — the
+# environment is the authority whenever it says anything, which is the same precedence
+# the runner applies to the file. Sourcing the file wholesale (`set -a; . ./.env`, as
+# scripts/bootstrap.sh does) would overwrite what the caller passed: measured,
+# `OMNIROUTE_MODEL=x make app` silently built with the file's model instead.
+if [ -f "$ROOT_DIR/.env" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in
+      OMNIROUTE_*|ARCHON_*) ;;
+      *) continue ;;
+    esac
+    # Trim the quoting .env files sometimes carry.
+    value="${value%\"}"; value="${value#\"}"
+    value="${value%'}"; value="${value#'}"
+    [ -n "$(printenv "$key" 2>/dev/null || true)" ] || export "$key=$value"
+  done < "$ROOT_DIR/.env"
+fi
+
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m==>\033[0m %s\n' "$*" >&2; exit 1; }
@@ -80,7 +109,9 @@ if [ -n "${OMNIROUTE_BASE_URL:-}" ]; then
   fi
   say "manufacture: gateway: $health"
 else
-  warn "manufacture: OMNIROUTE_BASE_URL is unset — the agent will use its own default gateway"
+  # Not fatal: build-app.py falls back to the endpoint this stack publishes the gateway
+  # on. The run may still fail on auth, so say what is actually missing.
+  warn "manufacture: OMNIROUTE_BASE_URL is unset and .env had no value — the agent will use the default gateway with no key"
 fi
 
 # --- run ------------------------------------------------------------------------

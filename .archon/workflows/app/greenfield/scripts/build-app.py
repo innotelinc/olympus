@@ -17,17 +17,19 @@ retry is driven by the artifact, never by the exit code: the moment any file exi
 node stops and hands the directory to verify, because re-running an agent over a
 half-written app is how you end up with a directory that is neither build.
 
-Why the model changes: `auto/coding` — the stack's designated coding model, and what
-OMNIROUTE_MODEL points at — is a gateway *combo*, and the gateway pins a native Codex
-turn to whichever combo member served the first turn. On this deployment the free
-provider has no credentials rows at all (`provider_connections` is empty), and the
-pinned path requires them, so every turn after the first answers 503 "No credentials for
-opencode" and the agent ends having written nothing. Measured: `/v1/responses | 16
-tools` through the combo -> 503, while the same request naming `oc/big-pickle` directly
--> 200, because a concrete model never enters the combo path and so is never pinned.
-So attempt 1 uses the configured model and later attempts use a concrete one. If the
-gateway is ever given real credentials for the combo's members, remove this and the
-primary model serves every attempt.
+Why the model changes: `auto/coding` is a gateway *combo*, and the gateway pins a native
+Codex turn to whichever combo member served the first turn — so the model that finishes a
+build is decided by which member happened to answer it, not by what the caller asked for.
+Two measured outcomes on this deployment, same spec, same node: routed to `oc/big-pickle`
+the agent wrote the file contents out as *chat text* with no function call and the app
+directory stayed empty for eight minutes; pinned to a concrete tool-calling model the same
+spec built in 2m18s with real `exec_command` calls. The combo path also 503s outright
+("No credentials for opencode") when its pinned member has no credentials rows, which is
+what the earlier empty `provider_connections` produced.
+
+So attempt 1 uses the configured model and later attempts use a concrete one. Pin
+OMNIROUTE_MODEL to a concrete tool-calling model (see .env.example) to make this
+deterministic rather than a coin toss.
 
 Reads (env):
     INPUTS_SPEC_PATH            the resolved spec
@@ -35,12 +37,19 @@ Reads (env):
     INPUTS_TITLE                the app's title
     OMNIROUTE_MODEL             primary model (default "auto/coding")
     OMNIROUTE_MODEL_FALLBACK    concrete model for retries (default "oc/big-pickle")
+    OMNIROUTE_BASE_URL          the gateway (default "http://127.0.0.1:20128/v1")
+
+Each `OMNIROUTE_*` is read from this node's environment and then from the checkout's
+`.env` — Archon strips the repo `.env` keys before the node runs, so the file is the copy
+that survives (see `repo_omniroute`). Set the model to a concrete id that can call tools:
+the auto policy can land on a free member that answers in prose and writes nothing.
 
 Emits {exit_code, model, attempts, log}.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
@@ -109,6 +118,69 @@ HIJACKS = ("OPENAI_BASE_URL", "OPENAI_API_BASE", "ANTHROPIC_BASE_URL",
            "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 
 
+def _search_roots() -> list[Path]:
+    """Where to look for the checkout that owns this build.
+
+    NOT this file's own directory. Archon copies the workflow into
+    `artifacts/runs/<id>/workflow-source/project/…` and runs it from there, so walking
+    up from `__file__` walks up a copy that has no `.env` — the first version of this
+    did exactly that and silently kept the code defaults. The app directory and the
+    spec are the two paths the workflow already resolved for us, and both live inside
+    the real checkout (`<repo>/builds/<slug>`, `<repo>/build-requests/<slug>.md`).
+    """
+    roots: list[Path] = []
+    for var in ("INPUTS_APP_DIR", "INPUTS_SPEC_PATH"):
+        value = (os.environ.get(var) or "").strip()
+        if not value:
+            continue
+        path = Path(value)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        roots.append(path if path.is_dir() else path.parent)
+    roots.append(Path(__file__).resolve().parent)
+    return roots
+
+
+@functools.lru_cache(maxsize=1)
+def repo_omniroute() -> dict[str, str]:
+    """`OMNIROUTE_*` from the checkout's `.env` — the copy Archon takes away from here.
+
+    Archon loads the target repo's `.env` and strips those keys before a script node
+    runs ("stripped 42 keys from /…/olympus (.env)"), so `os.environ` in this node
+    carries the *defaults*, not the deployment's configuration. Measured: a node
+    configured with `OMNIROUTE_MODEL=gemini/gemini-3-flash-preview` reported
+    `models auto/coding -> oc/big-pickle`, asked the gateway for `auto/coding`, and the
+    manifest recorded a model that was never configured — the combo then walked 1109
+    fallbacks before answering. The runner and CI hand the same values in through the
+    environment and one of the two always survives, so this reads the file rather than
+    assuming which layer won.
+
+    Only `OMNIROUTE_*` is read: this node needs a model and a gateway, not the stack's
+    tokens. Authentication is left to `CODEX_HOME/auth.json` on purpose.
+    """
+    for start in _search_roots():
+        for parent in (start, *start.parents):
+            candidate = parent / ".env"
+            if not candidate.is_file():
+                continue
+            parsed: dict[str, str] = {}
+            for line in candidate.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                if key.startswith("OMNIROUTE_"):
+                    parsed[key] = value.strip().strip('"').strip("'")
+            return parsed
+    return {}
+
+
+def setting(key: str) -> str:
+    """A configured value: this node's environment first, then the checkout's `.env`."""
+    return (os.environ.get(key) or "").strip() or repo_omniroute().get(key, "")
+
+
 def agent_env(gateway: str) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key in INHERIT}
     for key in HIJACKS:
@@ -129,9 +201,8 @@ def model_chain() -> list[str]:
     concrete fallback. Deduplicated, because retrying the same failing model twice is
     just waiting longer for the same answer.
     """
-    primary = (os.environ.get("OMNIROUTE_MODEL") or "").strip() or DEFAULT_MODEL
-    fallback = (os.environ.get("OMNIROUTE_MODEL_FALLBACK") or "").strip() \
-        or DEFAULT_FALLBACK_MODEL
+    primary = setting("OMNIROUTE_MODEL") or DEFAULT_MODEL
+    fallback = setting("OMNIROUTE_MODEL_FALLBACK") or DEFAULT_FALLBACK_MODEL
     chain = [primary]
     if fallback and fallback != primary:
         chain.append(fallback)
@@ -160,7 +231,7 @@ def gateway_overrides() -> list[str]:
     The default is the endpoint this stack publishes the gateway on, so a runner needs
     no codex config at all.
     """
-    base_url = (os.environ.get("OMNIROUTE_BASE_URL") or "").strip() or DEFAULT_GATEWAY
+    base_url = setting("OMNIROUTE_BASE_URL") or DEFAULT_GATEWAY
     return [
         "-c", 'model_provider="omniroute"',
         "-c", 'model_providers.omniroute.name="OmniRoute"',
@@ -250,7 +321,7 @@ def main() -> int:
 
     codex = (os.environ.get("CODEX_BIN") or "").strip() or shutil.which("codex") or "codex"
 
-    gateway = (os.environ.get("OMNIROUTE_BASE_URL") or "").strip() or DEFAULT_GATEWAY
+    gateway = setting("OMNIROUTE_BASE_URL") or DEFAULT_GATEWAY
     child_env = agent_env(gateway)
     chain = model_chain()
 

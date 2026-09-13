@@ -49,6 +49,7 @@ jobs:
           bash -n scripts/install-token-check-timer.sh
           bash -n scripts/studio-export-dir.sh
           bash -n scripts/install-build-runner.sh
+          bash -n scripts/manufacture.sh
           python3 -m compileall -q scripts/build-runner.py scripts/prune-builds.py scripts/omniroute-restore-providers.py
           python3 -m compileall -q scripts/vault-bootstrap.py scripts/authentik-studio-app.py
           python3 -m compileall -q scripts/authentik-studio-token.py
