@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   SYSTEM_PROMPT,
   buildMessages,
@@ -7,6 +7,14 @@ import {
   readConfig,
   sseToTextStream,
 } from "@/lib/omniroute";
+
+// readConfig() calls loadRepoEnv(), which reads the repo-root .env — and deleting a key
+// from process.env does not make it absent, because the loader reads the file straight
+// back. So without this the deployment's own values decide these assertions: a checkout
+// that pins OMNIROUTE_MODEL failed "falls back to the default model" for a reason that
+// has nothing to do with the code under test. Every test here sets what it needs.
+// (env.test.ts covers the loader itself against temp directories.)
+vi.mock("@/lib/env", () => ({ loadRepoEnv: () => {} }));
 
 const MANAGED = ["OMNIROUTE_BASE_URL", "OMNIROUTE_API_KEY", "OMNIROUTE_MODEL", "OMNIROUTE_CHAT_PATH"];
 
