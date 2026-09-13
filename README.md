@@ -206,7 +206,7 @@ python3 factory/doctor.py
 | Gateway | `OMNIROUTE_BASE_URL`, `OMNIROUTE_API_KEY` | Remote gateway? point the URL at it. Publish it on loopback only? add `compose.host-gateway.yml` |
 | SecretOps | `compose.vault.yml` + `scripts/vault-bootstrap.py` | Cerulean Vault (KV v2). `VAULT_ADDR` / `VAULT_TOKEN` / `VAULT_PREFIX`; values may be `vault://<name>` references resolved at startup. Tokens are scoped to this stack's own path |
 | Identity | `scripts/authentik-studio-app.py` | Creates the Studio application/provider in Cerulean Authentik; Studio is public until OIDC is set. The gateway dashboard's client is registered the same way |
-| Gateway dashboard | `make gateway-oidc` then `make gateway-sso-up` | Puts the OmniRoute dashboard behind Authentik via an identity-aware proxy, restricted to a group. See [docs/gateway-sso.md](docs/gateway-sso.md) |
+| Gateway dashboard | `make gateway-oidc`, `gateway-sso-up`, `gateway-edge` | Puts the OmniRoute dashboard behind Authentik via an identity-aware proxy, restricted to a group, and publishes it — DNS record, certificate and NPM host — through Cerulean. See [docs/gateway-sso.md](docs/gateway-sso.md) |
 | Trust / edge | `scripts/` (NPM + Cerulean) | DNS and TLS for the public names are managed through Cerulean and NPM Edge; see [docs/stack.md](docs/stack.md) |
 | Upgrade | `git pull && make setup` | Idempotent; `scripts/factory-pin.sh` pins the factory's upstream SHAs |
 | Verify | `make doctor`, `make studio-test`, `make ps` | Readiness, Studio test suite, supporting-service status |
