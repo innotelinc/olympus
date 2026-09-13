@@ -227,6 +227,20 @@ lives at the top of that template — which the nginx image renders into
 `server` block would reject it. Changing the template needs the container
 recreated, not reloaded: the rendered file is written at start.
 
+### A reload the edge refuses is not a lost build
+
+If `nginx -t` rejects the vhost just written, `scripts/app-runtime.py --up` takes **that
+file back out** — only the one this run created — asks the edge to reload again, and
+fails naming the container it left running. It does not remove the container, and that is
+the point: nginx keeps serving its last good config, so the app is up on its loopback
+port and no other site on the edge was ever affected. Removing it would turn a routing
+fault into a build you have to run again. A vhost that was already there is left in
+place, so a failed reload cannot drop a name that was working before the call.
+
+A reload that fails *after* `nginx -t` accepted the config is reported the same way —
+container left running, retry named — with the promise that the name starts working at
+the next reload, because the config on disk is valid.
+
 ## Configuration
 
 | Variable | Default | What it does |

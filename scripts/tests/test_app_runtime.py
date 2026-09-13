@@ -16,8 +16,10 @@ parts whose failures are silent:
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -373,6 +375,133 @@ class CliTests(Fixture):
 
         for key in ("slug", "container", "image", "port", "url"):
             self.assertIn(key, stored)
+
+
+class TheEdgeRefusingAVhostDoesNotKillTheApp(Fixture):
+    """A reload the sites edge refuses must not take the running container with it.
+
+    Measured: a name the edge could not hash made `nginx -s reload` fail, and the
+    runtime's answer was to remove the project's container — so a routing fault turned a
+    published, working app into a lost build. The rule that has to hold instead is
+    narrower than "retry": the container is left alone, and only the vhost *this run
+    created* is taken back out, because a vhost that was already there is a published
+    name that was working before the call.
+    """
+
+    SLUG = "probe"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.app_dir = self.root / "builds" / self.SLUG
+        self.app_dir.mkdir(parents=True)
+        (self.app_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        (self.app_dir / "project.manifest.json").write_text("{}", encoding="utf-8")
+        (self.app_dir / runtime_module.PLAN_NAME).write_text(
+            json.dumps(
+                {"name": "Probe", "run": {"start": "node x", "port": 3000, "healthcheck": "/"}}
+            ),
+            encoding="utf-8",
+        )
+        self.args = argparse.Namespace(
+            up=self.SLUG,
+            image=None,
+            container=None,
+            build=False,
+            dry_run=False,
+            preview=False,
+            wait=1,
+            env_file=None,
+            root=str(self.root),
+        )
+        self.calls: list[tuple[str, ...]] = []
+
+    def patch(self, **replacements: object) -> None:
+        """Swap module-level functions, and hand them back at the end of the test."""
+        for name, value in replacements.items():
+            self.addCleanup(setattr, runtime_module, name, getattr(runtime_module, name))
+            setattr(runtime_module, name, value)
+
+    def fake_docker(self, *args: str) -> subprocess.CompletedProcess:
+        self.calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="")
+
+    def refuse(self, dry_run: bool) -> str:
+        raise runtime_module.VhostInvalid("the generated vhost is not valid nginx config")
+
+    def run_up(self) -> int:
+        with self.assertRaises(SystemExit) as raised:
+            runtime_module.up(self.runtime, self.args)
+        return int(raised.exception.code or 0)
+
+    def test_the_container_is_not_removed_when_the_edge_refuses_the_vhost(self) -> None:
+        self.patch(
+            repo_root=lambda: self.root,
+            image_exists=lambda image: True,
+            already_packaged=lambda app_dir: True,
+            container_state=lambda name: "absent",
+            health=lambda *a, **k: True,
+            docker=self.fake_docker,
+            reload_sites=self.refuse,
+        )
+
+        self.assertEqual(self.run_up(), 1)
+        self.assertNotIn(
+            ("rm", "-f", f"olympus-app-{self.SLUG}"),
+            self.calls,
+            "a routing fault must not throw away the build",
+        )
+        # The rejected file comes back out, so the edge is not left holding config it
+        # would refuse again on the next reload.
+        self.assertFalse((self.root / "nginx" / f"{self.SLUG}.conf").exists())
+
+    def test_a_vhost_that_was_already_there_is_left_in_place(self) -> None:
+        nginx = self.root / "nginx"
+        nginx.mkdir(parents=True, exist_ok=True)
+        (nginx / f"{self.SLUG}.conf").write_text("server {}\n", encoding="utf-8")
+        self.patch(
+            repo_root=lambda: self.root,
+            image_exists=lambda image: True,
+            already_packaged=lambda app_dir: True,
+            container_state=lambda name: "absent",
+            health=lambda *a, **k: True,
+            docker=self.fake_docker,
+            reload_sites=self.refuse,
+        )
+
+        self.assertEqual(self.run_up(), 1)
+        self.assertTrue(
+            (nginx / f"{self.SLUG}.conf").exists(),
+            "an already-published name must not be dropped by a failed reload",
+        )
+
+    def docker_answering(self, *, check: int, reload_code: int):
+        """A docker that lists the sites container, then answers the two nginx calls."""
+
+        def fake(*args: str) -> subprocess.CompletedProcess:
+            if args[:1] == ("ps",):
+                return subprocess.CompletedProcess(args, 0, stdout=runtime_module.SITES_CONTAINER)
+            if "-t" in args:
+                return subprocess.CompletedProcess(args, check, stdout="nginx: bad config")
+            return subprocess.CompletedProcess(args, reload_code, stdout="")
+
+        return fake
+
+    def test_nginx_refusing_the_config_is_its_own_kind_of_failure(self) -> None:
+        # The caller distinguishes the two, so the distinction has to exist: only the
+        # config we just wrote is worth taking back out.
+        self.patch(docker=self.docker_answering(check=1, reload_code=1))
+        with self.assertRaises(runtime_module.VhostInvalid):
+            runtime_module.reload_sites(False)
+
+    def test_a_reload_that_fails_after_a_good_check_is_not_that_failure(self) -> None:
+        self.patch(docker=self.docker_answering(check=0, reload_code=1))
+        with self.assertRaises(RuntimeError) as raised:
+            runtime_module.reload_sites(False)
+        self.assertNotIsInstance(raised.exception, runtime_module.VhostInvalid)
+
+    def test_a_reload_that_works_says_so(self) -> None:
+        self.patch(docker=self.docker_answering(check=0, reload_code=0))
+        self.assertEqual(runtime_module.reload_sites(False), "reloaded olympus-sites")
 
 
 if __name__ == "__main__":

@@ -319,6 +319,16 @@ def write_vhost(
     return target
 
 
+class VhostInvalid(RuntimeError):
+    """The generated vhost is config nginx refuses to start with.
+
+    Its own type because the caller's response differs from a plain reload failure: this
+    one names a file *we* just wrote, so that file can be taken back out and the edge
+    returned to its previous configuration. "nginx would not reload" for any other
+    reason means the config was accepted and something else went wrong.
+    """
+
+
 def reload_sites(dry_run: bool) -> str:
     """Make `olympus-sites` re-read the generated vhosts.
 
@@ -339,7 +349,7 @@ def reload_sites(dry_run: bool) -> str:
         # The config is not applied if nginx would not start with it, which is the
         # one failure that must not be silent: a broken vhost takes down every other
         # site on the edge, not just this app.
-        raise RuntimeError(f"the generated vhost is not valid nginx config:\n{result.stdout}")
+        raise VhostInvalid(f"the generated vhost is not valid nginx config:\n{result.stdout}")
 
     result = docker("exec", SITES_CONTAINER, "nginx", "-s", "reload")
     if result.returncode != 0:
@@ -494,6 +504,12 @@ def up(runtime: Runtime, args: argparse.Namespace) -> int:
 
     # After the dry-run return, so a run that says it would do nothing does nothing:
     # the vhost files are the two things on this path that outlive the process.
+    #
+    # Whether each already existed is kept, because a reload the edge refuses has to be
+    # undone by taking back only what this run added: unlinking a published app's own
+    # vhost would drop a name that was working before this call.
+    vhost_existed = vhost_path.exists()
+    preview_existed = preview_vhost_path.exists() if preview_vhost_path is not None else False
     runtime.data_dir(slug).mkdir(parents=True, exist_ok=True)
     write_vhost(runtime, slug, port)
     if preview_vhost_path is not None:
@@ -536,9 +552,40 @@ def up(runtime: Runtime, args: argparse.Namespace) -> int:
 
     try:
         reload_note = reload_sites(False)
+    except VhostInvalid as error:
+        # The container stays up, and that is the point of this branch. What failed is
+        # the *edge* taking the new config — nginx is still serving its last good one,
+        # and this app is running on its loopback port — so removing the container would
+        # turn a routing fault into a lost build. The files written a moment ago are the
+        # only thing that changed, so the ones this run created come back out and the
+        # edge is asked again: if it reloads, every other site on it was never affected.
+        if not vhost_existed:
+            vhost_path.unlink(missing_ok=True)
+        if preview_vhost_path is not None and not preview_existed:
+            preview_vhost_path.unlink(missing_ok=True)
+        try:
+            reload_sites(False)
+        except RuntimeError:
+            note("the edge is still on its previous configuration")
+        fail(
+            f"{slug} is running on 127.0.0.1:{port}, but the edge would not take its "
+            f"name:\n{error}\n"
+            f"The container was left running and the rejected vhost was taken back out. "
+            f"Fix the cause and retry with `scripts/app-runtime.py --up {slug}`.",
+            1,
+        )
     except RuntimeError as error:
-        docker("rm", "-f", name)
-        fail(str(error), 1)
+        # The config passed `nginx -t`, so there is nothing here worth taking back out:
+        # the edge accepted the vhost and failed to finish the reload, and the name starts
+        # working at the next reload. The container still stays — a routing fault is not a
+        # reason to throw away a build — but it is reported as a failure, because the name
+        # is not live and a caller that treated this as success would publish to nothing.
+        fail(
+            f"{slug} is running on 127.0.0.1:{port}, but the edge did not reload:\n{error}\n"
+            f"The container was left running; the name starts working after the next "
+            f"reload. Retry with `scripts/app-runtime.py --up {slug}`.",
+            1,
+        )
 
     record = {
         "v": 1,
