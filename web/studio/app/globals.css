@@ -137,6 +137,12 @@ a.ghost {
   background: var(--danger);
 }
 
+/* A build that finished: present, but not the thing to look at. */
+.dot.idle {
+  background: var(--muted);
+  opacity: 0.55;
+}
+
 @keyframes pulse {
   0%,
   100% {
@@ -160,6 +166,23 @@ a.ghost {
 .ghost:hover {
   color: var(--text);
   border-color: var(--accent);
+}
+
+/* Stopping a build is destructive of work in progress, so it is styled like the
+   other bordered buttons but coloured against the panel rather than with it. */
+.danger {
+  background: transparent;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 5px 11px;
+  font-size: 12px;
+  color: var(--danger);
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+
+.danger:hover:not(:disabled) {
+  color: var(--bg);
+  background: var(--danger);
 }
 
 /* ---- layout ------------------------------------------------------------ */
@@ -673,6 +696,14 @@ kbd {
   gap: 8px;
 }
 
+/* The state in words, not only in the message: "running — 1:04" and "failed"
+   are the two facts the panel exists to convey. */
+.build-state {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+
 .build-message {
   margin: 0;
   font-size: 13px;
@@ -725,9 +756,13 @@ kbd {
   cursor: default;
 }
 
-.build-history summary {
-  cursor: pointer;
-  user-select: none;
+/* The build being shown in the history: the panel below belongs to it, so the
+   current entry has to look different from the ones that would replace it. */
+.link-button.current {
+  color: var(--text);
+  font-weight: 600;
+  cursor: default;
+  text-decoration: none;
 }
 
 .build-history ul {
@@ -745,15 +780,25 @@ kbd {
   overflow-wrap: anywhere;
 }
 
-.build-log summary {
-  cursor: pointer;
-  user-select: none;
+.build-log-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.build-log pre {
-  margin: 6px 0 0;
+.build-log-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Taller than the generation preview because this is the thing being watched: a
+   build shows its progress as output arriving, and a 180px window on that turns
+   "working" into "stuck". Scrollable rather than growing without bound. */
+.build-log-pane {
+  margin: 0;
   padding: 8px;
-  max-height: 180px;
+  max-height: 320px;
   overflow: auto;
   background: var(--bg);
   border: 1px solid var(--line);

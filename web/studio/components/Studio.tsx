@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import type { BuildStatus, RunnerState } from "@/lib/build-queue";
+import type { BuildLog, BuildStatus, RunnerState } from "@/lib/build-queue";
 import { EMPTY_DOCUMENT, buildPreviewDocument, currentFileFrom, parseFiles, type GeneratedFile } from "@/lib/files";
 import CodeView from "./CodeView";
 import Preview from "./Preview";
@@ -173,6 +173,13 @@ export default function Studio({ user = null }: { user?: string | null }) {
   const [runner, setRunner] = useState<RunnerState | null>(null);
   const [buildBusy, setBuildBusy] = useState(false);
   const [buildError, setBuildError] = useState<string | null>(null);
+  // The log of the build being shown, fetched on its own cadence: it is tens of
+  // kilobytes, so it does not belong in the status poll that runs every 3s.
+  const [buildLog, setBuildLog] = useState<BuildLog | null>(null);
+  // Visible by default: a build's output is the answer to "what is it doing?",
+  // and hiding the thing that moves is how a build looks stalled.
+  const [logHidden, setLogHidden] = useState(false);
+  const [logBusy, setLogBusy] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -309,8 +316,34 @@ export default function Studio({ user = null }: { user?: string | null }) {
     });
   }, [activeAppId, fetchBuild]);
 
+  /**
+   * Read one build's log. Separate from the status poll because of its size, and
+   * fetched for the build actually on screen — a history entry shows its own log,
+   * not the newest one.
+   */
+  const fetchBuildLog = useCallback(
+    async (appId: string, job: string) => {
+      setLogBusy(true);
+      try {
+        const response = await request(
+          `/api/projects/${encodeURIComponent(appId)}/build/log?job=${encodeURIComponent(job)}`,
+        );
+        const payload = (await response.json()) as BuildLog;
+        setBuildLog(payload);
+      } catch {
+        // The log is an extra: the status, message and artifact are still on
+        // screen, so a failed read must not turn into an error banner over them.
+        setBuildLog(null);
+      } finally {
+        setLogBusy(false);
+      }
+    },
+    [request],
+  );
+
   // Poll only while something is actually running. A build is minutes long, so a
-  // 3s cadence is responsive without being a busy loop.
+  // 3s cadence is responsive without being a busy loop. The log is refreshed on
+  // the same tick — that movement is the point of watching a build at all.
   useEffect(() => {
     if (!activeAppId || build?.state !== "running") return;
 
@@ -318,10 +351,21 @@ export default function Studio({ user = null }: { user?: string | null }) {
       void fetchBuild(activeAppId, build.job).catch(() => {
         /* transient — the next tick retries */
       });
+      void fetchBuildLog(activeAppId, build.job);
     }, 3000);
 
     return () => window.clearInterval(id);
-  }, [activeAppId, build?.state, build?.job, fetchBuild]);
+  }, [activeAppId, build?.state, build?.job, fetchBuild, fetchBuildLog]);
+
+  // Load the running (or last) build's log once it is known, so opening an app
+  // shows the build's output rather than an empty pane behind a button.
+  useEffect(() => {
+    if (!activeAppId || !build?.job) {
+      setBuildLog(null);
+      return;
+    }
+    void fetchBuildLog(activeAppId, build.job);
+  }, [activeAppId, build?.job, fetchBuildLog]);
 
   // ---- rate limit (operator setting) ------------------------------------
 
@@ -1048,6 +1092,109 @@ export default function Studio({ user = null }: { user?: string | null }) {
             </div>
           ) : null}
 
+          {build || buildError ? (
+            <section className={`build-panel ${build?.state ?? "failed"}`} aria-label="Factory build">
+              <div className="build-panel-head">
+                <span className={`dot ${build?.state === "running" ? "live" : "idle"}`} />
+                <span className="produced-head">Factory build</span>
+                <span className="topbar-spacer" />
+                {build?.state === "running" ? (
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => void cancelBuild()}
+                    disabled={cancelBusy}
+                    title="Stop this build on the host runner"
+                  >
+                    {cancelBusy ? "Stopping…" : "Cancel build"}
+                  </button>
+                ) : null}
+              </div>
+
+              <span className="build-state">{build ? buildStateLabel(build) : "not started"}</span>
+
+              <p className="build-message">{buildError ?? build?.message}</p>
+
+              {build?.state === "running" ? (
+                <div className="build-bar" aria-hidden="true">
+                  <span />
+                </div>
+              ) : null}
+
+              {build?.artifact ? (
+                <p className="hint">
+                  {build.artifact.files ?? 0} file(s), {kilobytes(build.artifact.bytes ?? 0)} — entry{" "}
+                  {build.artifact.entry ?? "unknown"} in {build.artifact.dir}
+                </p>
+              ) : null}
+
+              {runner && !runner.live ? (
+                <p className="hint">No build runner is responding — start olympus-build-runner.</p>
+              ) : null}
+
+              {/* The record, not the tail in the status file: the runner keeps
+                  4000 characters there for the 3s poll, and this route reads the
+                  log the build actually wrote. */}
+              {build?.job ? (
+                <div className="build-log-block">
+                  <div className="build-log-head">
+                    <span className="hint">
+                      {buildLog && !logHidden
+                        ? `Build log${buildLog.truncated ? " (tail)" : ""} · ${kilobytes(buildLog.bytes)}`
+                        : "Build log"}
+                    </span>
+                    <span className="topbar-spacer" />
+                    {logBusy ? <span className="hint">reading…</span> : null}
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => setLogHidden((hidden) => !hidden)}
+                    >
+                      {logHidden ? "Show" : "Hide"}
+                    </button>
+                  </div>
+                  {!logHidden ? (
+                    <pre className="build-log-pane">
+                      {buildLog?.text?.trim()
+                        ? buildLog.text
+                        : logBusy
+                          ? "Reading the build log…"
+                          : "This build has not written any output yet."}
+                    </pre>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {buildHistory.length > 1 ? (
+                <div className="build-history">
+                  <span className="hint">Earlier builds ({buildHistory.length - 1})</span>
+                  <ul>
+                    {buildHistory.slice(1).map((past) => (
+                      <li key={past.job}>
+                        <button
+                          type="button"
+                          className={`link-button${past.job === build?.job ? " current" : ""}`}
+                          onClick={() => {
+                            setBuild(past);
+                            if (activeAppId) void fetchBuildLog(activeAppId, past.job);
+                          }}
+                          title="Show this build's message and log"
+                        >
+                          {buildStateLabel(past)}
+                        </button>
+                        <span className="hint">
+                          {" "}
+                          {timestampLabel(past.finishedAt ?? past.startedAt ?? past.requestedAt ?? "")}
+                          {past.artifact ? ` — ${past.artifact.files ?? 0} file(s)` : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </section>
+          ) : null}
+
           <div className="library">
             <div className="library-head">
               <span className="produced-head">Saved apps</span>
@@ -1099,78 +1246,6 @@ export default function Studio({ user = null }: { user?: string | null }) {
                 {build?.state === "running" ? "Building…" : "Build it"}
               </button>
             </div>
-
-            {build || buildError ? (
-              <div className={`build-panel ${build?.state ?? "failed"}`}>
-                <div className="build-panel-head">
-                  <span className="produced-head">Factory build</span>
-                  <span className="topbar-spacer" />
-                  {build?.state === "running" ? (
-                    <button
-                      type="button"
-                      className="link-button"
-                      onClick={() => void cancelBuild()}
-                      disabled={cancelBusy}
-                      title="Stop this build on the host runner"
-                    >
-                      {cancelBusy ? "Stopping…" : "Cancel"}
-                    </button>
-                  ) : null}
-                  <span className="hint">{build ? buildStateLabel(build) : "not started"}</span>
-                </div>
-
-                <p className="build-message">{buildError ?? build?.message}</p>
-
-                {build?.state === "running" ? (
-                  <div className="build-bar" aria-hidden="true">
-                    <span />
-                  </div>
-                ) : null}
-
-                {build?.artifact ? (
-                  <p className="hint">
-                    {build.artifact.files ?? 0} file(s), {kilobytes(build.artifact.bytes ?? 0)} — entry{" "}
-                    {build.artifact.entry ?? "unknown"} in {build.artifact.dir}
-                  </p>
-                ) : null}
-
-                {build?.logTail ? (
-                  <details className="build-log">
-                    <summary className="hint">Build log</summary>
-                    <pre>{build.logTail}</pre>
-                  </details>
-                ) : null}
-
-                {runner && !runner.live ? (
-                  <p className="hint">No build runner is responding — start olympus-build-runner.</p>
-                ) : null}
-
-                {buildHistory.length > 1 ? (
-                  <details className="build-history">
-                    <summary className="hint">Earlier builds ({buildHistory.length - 1})</summary>
-                    <ul>
-                      {buildHistory.slice(1).map((past) => (
-                        <li key={past.job}>
-                          <button
-                            type="button"
-                            className="link-button"
-                            onClick={() => setBuild(past)}
-                            title="Show this build's message and log"
-                          >
-                            {buildStateLabel(past)}
-                          </button>
-                          <span className="hint">
-                            {" "}
-                            {past.finishedAt ?? past.startedAt ?? past.requestedAt ?? ""}
-                            {past.artifact ? ` — ${past.artifact.files ?? 0} file(s)` : ""}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                ) : null}
-              </div>
-            ) : null}
 
             {savedApps.length > 0 ? (
               <ul className="library-list">
