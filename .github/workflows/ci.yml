@@ -85,6 +85,15 @@ jobs:
             [ -f "$WF/scripts/$s.py" ] || { echo "::error::missing script node $s ($WF/scripts/$s.py)"; exit 1; }
           done
 
+      - name: Compose files render
+        run: |
+          set -euo pipefail
+          # Rendered against .env.example, never .env. A renamed or misspelled
+          # variable here breaks `make docker-up-host` / `make gateway-sso-up`
+          # with a message about an unset value rather than failing to start, so
+          # it is worth catching without a deployment.
+          make check-compose
+
   secrets:
     name: Credential scan
     runs-on: ubuntu-latest

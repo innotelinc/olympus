@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Register the Studio OIDC provider + application in Authentik.
+"""Register an OIDC provider + application in Authentik.
+
+Written for Studio, but the only Studio-specific things are its default slug and
+its default redirect URIs: `--slug`, `--client-id`, `--name` and `--redirect-uri`
+register any other client (the OmniRoute gateway dashboard among them, via
+`make gateway-oidc`).
 
 Authentik's API requires a Bearer token — a username/password will not work
 (the API answers 403 to basic auth). Create one in the Authentik UI under
@@ -11,16 +16,21 @@ Directory -> Tokens (or via the `ak` CLI), then:
     python3 scripts/authentik-studio-app.py             # create it
 
 Options:
-    --redirect-uri URL   what Studio will be reachable at (repeatable)
+    --redirect-uri URL   what the client will be reachable at (repeatable)
     --client-id ID       default: OIDC_CLIENT_ID from .env, else the slug
     --name NAME          provider + application name (default: capitalised slug)
     --slug SLUG          application slug (default: from OIDC_ISSUER_URL, else studio)
+    --env-prefix PFX     names to print as the client's settings (default OIDC_)
     --env-file PATH      configuration to read (default: repo-root .env)
     --insecure           skip TLS verification (self-signed lab certificates)
 
 Configuration falls back to the repo-root `.env` — the same file Studio reads —
 so `make studio-oidc` needs no exports. Real process env wins over the file, so
-CI can drive it without a file on disk.
+CI can drive it without a file on disk — with one exception, because that rule is
+what makes a malformed export dangerous: a `vault://` value *without* its `#key`
+fragment is unusable by definition, and if the environment supplied one it would
+shadow a perfectly good `.env` and blind this script. Such a value is skipped and
+said so, which is the same repair `scripts/studio-token-alert.sh` makes.
 
 `AUTHENTIK_TOKEN` may also be a `vault://<mount>/<path>#<key>` reference: on the
 platform the credential lives in Cerulean Vault and `.env` carries only the
@@ -81,6 +91,20 @@ def load_env_file(path: Path) -> dict[str, str]:
         values[key] = value.strip().strip('"').strip("'")
 
     return values
+
+
+def is_usable(value: str) -> bool:
+    """Whether a configured value can actually be used.
+
+    The one shape that cannot is a `vault://` reference with no `#key` fragment: the
+    fragment names the field to read, so the reference is malformed, and the
+    process environment beating `.env` (which is the rule everywhere in this
+    stack) would then make a malformed export blind a checkout whose file is
+    fine. A malformed value is therefore skipped rather than preferred.
+    """
+    if not value.startswith("vault://"):
+        return True
+    return "#" in value
 
 
 def resolve_vault_reference(value: str, setting, env_path: Path) -> str:
@@ -284,16 +308,52 @@ def main() -> int:
     parser.add_argument("--slug", default="")
     parser.add_argument("--insecure", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    # Authentik stores the secret write-only: once a provider exists, its value
+    # cannot be read back, so a NEW client that has to share it (the identity-aware
+    # proxy in front of the gateway dashboard) cannot be configured from an
+    # existing registration. Rotating is the only way to obtain a known value, and
+    # it is the safe direction — the previous secret stops working, so this is
+    # stated plainly rather than done quietly.
+    parser.add_argument(
+        "--rotate-secret",
+        action="store_true",
+        help="replace an existing provider's client secret and print the new value once",
+    )
     parser.add_argument("--api-base", default="")
     parser.add_argument("--token", default="")
     parser.add_argument("--env-file", default="")
+    parser.add_argument(
+        "--env-prefix",
+        default="OIDC_",
+        help="prefix to print the client's settings under (default OIDC_ for Studio)",
+    )
     args = parser.parse_args()
 
     env_path = Path(args.env_file) if args.env_file else Path(__file__).resolve().parent.parent / ".env"
     file_values = load_env_file(env_path)
 
+    skipped: set[str] = set()
+
     def setting(name: str, fallback: str = "") -> str:
-        return os.environ.get(name) or file_values.get(name) or fallback
+        """Process env, then the file, then the fallback — unusable values skipped.
+
+        Skipping is the only deviation from "the environment wins", and it exists
+        because a fragment-less `vault://` export is not a decision, it is a typo
+        — preferring it would fail with the file's good value sitting right there.
+        The skip is reported once per variable so it is not silent.
+        """
+        for candidate in (os.environ.get(name), file_values.get(name), fallback):
+            if candidate and is_usable(candidate):
+                return candidate
+            if candidate and name not in skipped:
+                skipped.add(name)
+                print(
+                    f"  note:       ignoring {name} from the process environment — it is a "
+                    "vault:// reference with no #key fragment, so it cannot be resolved; "
+                    "using the value from " + str(env_path),
+                    file=sys.stderr,
+                )
+        return ""
 
     api_base = args.api_base or setting("AUTHENTIK_URL")
     token = args.token or resolve_vault_reference(setting("AUTHENTIK_TOKEN"), setting, env_path)
@@ -378,12 +438,16 @@ def main() -> int:
         # An existing-but-unusable provider is worse than a missing one, so a
         # re-run repairs it instead of skipping it.
         patch: dict = {}
+        rotated_secret = ""
         if "authorization_code" not in current_grants:
             patch["grant_types"] = ["authorization_code", "refresh_token"]
         if missing_uris:
             patch["redirect_uris"] = [
                 {"matching_mode": "strict", "url": uri} for uri in [*current_uris, *missing_uris]
             ]
+        if args.rotate_secret:
+            rotated_secret = secrets.token_urlsafe(48)
+            patch["client_secret"] = rotated_secret
 
         if not patch:
             print(f"\n  provider already exists (pk {provider['pk']}) and is fully configured")
@@ -391,7 +455,7 @@ def main() -> int:
         elif args.dry_run:
             print(f"\n  provider exists (pk {provider['pk']}) — would PATCH:")
             for key, value in patch.items():
-                print(f"    {key}: {value}")
+                print(f"    {key}: {'<new secret, 64 chars>' if key == 'client_secret' else value}")
         else:
             repaired = api.request("PATCH", f"/providers/oauth2/{provider['pk']}/", patch)
             if "grant_types" in patch:
@@ -399,6 +463,11 @@ def main() -> int:
                 print("  (without this, Authentik answers 'Invalid grant_type for provider' at /authorize)")
             if missing_uris:
                 print(f"  registered redirect URI(s): {', '.join(missing_uris)}")
+            if rotated_secret:
+                print(f"  client_id:     {args.client_id}")
+                print(f"  client_secret: {rotated_secret}")
+                print("  ^ the PREVIOUS secret stopped working — update every client of this")
+                print("    provider now; Authentik will not show this value again.")
     elif args.dry_run:
         provider = None
         print("\n  would create provider with redirect_uris:")
@@ -432,11 +501,18 @@ def main() -> int:
         print(f"  created application '{args.name}' (slug {args.slug})")
 
     issuer = f"{api.base}/application/o/{args.slug}/"
-    print("\nSet these in .env for Studio:")
-    print(f"  OIDC_ISSUER_URL={issuer}")
-    print(f"  OIDC_CLIENT_ID={args.client_id}")
-    print("  OIDC_CLIENT_SECRET=<the value above, or the one already configured>")
-    print("  OIDC_REDIRECT_URI=            # empty — Studio derives the callback per request")
+    prefix = args.env_prefix
+    # The names differ per client because the two clients are configured in
+    # different places: Studio reads OIDC_* from its own environment, while the
+    # gateway dashboard's GATEWAY_OIDC_* pair with the identity-aware proxy in
+    # compose.gateway-sso.yml (and with the settings API, if OmniRoute's own OIDC
+    # is ever enabled — see docs/gateway-sso.md).
+    print(f"\nSet these for this client (prefix {prefix!r}):")
+    print(f"  {prefix}ISSUER_URL={issuer}")
+    print(f"  {prefix}CLIENT_ID={args.client_id}")
+    print(f"  {prefix}CLIENT_SECRET=<the value above, or the one already configured>")
+    if prefix == "OIDC_":
+        print("  OIDC_REDIRECT_URI=            # empty — Studio derives the callback per request")
     print(f"\nVerify discovery: {issuer}.well-known/openid-configuration")
 
     if args.dry_run:
