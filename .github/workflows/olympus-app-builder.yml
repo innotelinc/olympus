@@ -104,6 +104,31 @@ jobs:
       #
       # `scripts/manufacture.sh` is the SAME command `make app` runs, so the two
       # cannot drift into different behaviours.
+      # Reported, not enforced. This gateway has just been started by setup.sh and
+      # carries no provider credentials, so whether the model can call a tool at all
+      # is exactly the thing worth knowing *before* the build step spends minutes
+      # discovering it by producing nothing. It stays non-fatal because this job is
+      # the pipeline's demonstration path: a checkout with no gateway credentials is
+      # its normal state, and failing the job would say "the pipeline is broken"
+      # about a deployment that simply has no provider with quota.
+      - name: 🔎 Check the build model can call a tool
+        if: steps.spec.outputs.found == 'true'
+        continue-on-error: true
+        env:
+          OMNIROUTE_BASE_URL: http://127.0.0.1:20128/v1
+          OMNIROUTE_MODEL: auto/coding
+          OMNIROUTE_MODEL_FALLBACK: oc/big-pickle
+          OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
+        run: |
+          set -uo pipefail
+          python3 scripts/build-model-check.py --json
+          rc=$?
+          case "$rc" in
+            0) echo "::notice::the build model calls tools — a build can write files" ;;
+            1) echo "::warning::no model in the chain calls a tool; the build below will exit 0 and write nothing. See docs/build-model.md" ;;
+            *) echo "::warning::the build model could not be verified (gateway or config); treat this job's output as unverified" ;;
+          esac
+
       - name: 🚀 Manufacture App from Specification
         if: steps.spec.outputs.found == 'true'
         env:

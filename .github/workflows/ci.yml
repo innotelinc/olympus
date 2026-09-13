@@ -46,25 +46,29 @@ jobs:
           bash -n scripts/notify-telegram.sh
           bash -n scripts/studio-token-alert.sh
           bash -n scripts/vault-renew-alert.sh
+          bash -n scripts/build-model-alert.sh
           bash -n scripts/install-token-check-timer.sh
           bash -n scripts/studio-export-dir.sh
           bash -n scripts/install-build-runner.sh
           bash -n scripts/manufacture.sh
           python3 -m compileall -q scripts/build-runner.py scripts/prune-builds.py scripts/omniroute-restore-providers.py
           python3 -m compileall -q scripts/vault-bootstrap.py scripts/authentik-studio-app.py
-          python3 -m compileall -q scripts/authentik-studio-token.py
+          python3 -m compileall -q scripts/authentik-studio-token.py scripts/build-model-check.py
           # The rotation program is generated, so it has to stay valid Python.
           python3 scripts/authentik-studio-token.py --snippet > /tmp/studio-token-snippet.py
           python3 -c "compile(open('/tmp/studio-token-snippet.py').read(), 'snippet', 'exec')"
           python3 -m compileall -q factory harness 2>/dev/null || echo "nothing to compile — ok"
 
-      - name: Script unit tests (runner + prune)
+      - name: Script unit tests (runner, prune, model check)
         run: |
           set -euo pipefail
           # The runner turns a file written by a browser-facing service into a
-          # command run on the host, and prune deletes built apps. These assert the
-          # refusals — traversal, path-shaped
-          # slugs, symlinks out of build-requests/ — rather than discovering them.
+          # command run on the host, prune deletes built apps, and the model check
+          # decides whether a build can write anything at all. These assert the
+          # refusals — traversal, path-shaped slugs, symlinks out of
+          # build-requests/, a 200 that answers in prose — rather than discovering
+          # them. No gateway is needed: the check's classification is pure and its
+          # exit codes are driven against a closed port.
           python3 -m unittest discover -s scripts/tests -t scripts/tests
 
       - name: App-builder workflow checks

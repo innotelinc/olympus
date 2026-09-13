@@ -70,10 +70,20 @@ build-runner-check: ## Check the build runner's environment without building any
 prune: ## Report old builds + finished queue files (ARGS="--yes" to delete, "--older-than 0" for all)
 	python3 scripts/prune-builds.py $(ARGS)
 
+## ---- Build model (the one thing that decides whether a build writes anything) --
+
+build-model-check: ## Can the configured build model call a tool, and be asked twice? (exit 1 = builds write nothing)
+	@# Exit 0 usable, 1 broken, 2 could not tell. A build fails silently when this
+	@# exits 1: Codex exits 0, the app directory stays empty, nothing says why.
+	python3 scripts/build-model-check.py $(ARGS)
+
+build-model-alert: ## Run the check and alert (Telegram) when the chain cannot build
+	bash scripts/build-model-alert.sh $(ARGS)
+
 build-runner-list: ## Show the build queue and where each job got to
 	python3 scripts/build-runner.py --list
 
-test-runner: ## Run the script unit tests (runner validation/env/status, prune selection)
+test-runner: ## Run the script unit tests (runner, prune, model check, restore)
 	python3 -m unittest discover -s scripts/tests -t scripts/tests -v
 
 ## ---- Compose (Vault profile) ----------------------------------------------
