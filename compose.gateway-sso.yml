@@ -98,6 +98,18 @@ services:
       - --email-domain=*
       - --allowed-group=${GATEWAY_SSO_ALLOWED_GROUP:-cerulean-platform}
       - --skip-provider-button=true
+      # Authentik's OWN `email` scope mapping sets `email_verified: false` — a
+      # deliberate change in Authentik 2025.10, because it has no authoritative
+      # source for whether an address is verified. oauth2-proxy refuses such a
+      # token by default ("email in id_token … isn't verified"), so this flag is
+      # what makes the handshake finish.
+      #
+      # It is not a weak spot here: the door is `--allowed-group`, and
+      # `--email-domain=*` means the address grants nothing on its own. The
+      # alternative — a custom scope mapping asserting `email_verified: true` for
+      # this provider — was rejected because that asserts something Authentik
+      # explicitly decided it cannot know, on the platform's behalf.
+      - --insecure-oidc-allow-unverified-email
       - --session-store-type=cookie
       # Pass the identity on to the dashboard so its logs name a person rather
       # than an anonymous session.
