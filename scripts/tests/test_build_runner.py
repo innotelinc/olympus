@@ -451,6 +451,129 @@ class TestPublishRequest(RepoFixture):
             )
 
 
+class TestPreviewRequest(RepoFixture):
+    """The preview action: a publish with one step less, and its own refusals."""
+
+    def preview(self, **overrides: object) -> dict:
+        payload = {
+            "v": 1,
+            "job": "0123456789abcdef",
+            "action": "preview",
+            "slug": "todo",
+            "title": "Todo",
+            "kind": "app",
+            "requested_by": "studio",
+            "requested_at": "2026-09-13T00:00:00+00:00",
+            "files": [{"path": "src/App.tsx", "contents": "export default () => null;\n"}],
+        }
+        payload.update(overrides)
+        return payload
+
+    def planned(self) -> dict:
+        return {
+            "name": "Todo",
+            "kind": "app",
+            "runtime": {"language": "node", "frameworks": ["react"], "database": None},
+            "run": {
+                "install": "npm install",
+                "build": "npm run build",
+                "start": "npm start",
+                "port": 3000,
+                "healthcheck": "/",
+            },
+            "files": [{"path": "src/App.tsx", "purpose": "the app"}],
+        }
+
+    def test_a_preview_needs_no_spec(self) -> None:
+        job = runner.validate_request(self.repo, self.preview(plan=self.planned()))
+        self.assertEqual(job["action"], "preview")
+        self.assertEqual(job["spec"], "")
+        self.assertIsNone(job["spec_path"])
+
+    def test_a_preview_carries_the_files_it_will_run(self) -> None:
+        job = runner.validate_request(self.repo, self.preview(plan=self.planned()))
+        self.assertEqual([entry["path"] for entry in job["files"]], ["src/App.tsx"])
+
+    def test_files_are_required(self) -> None:
+        for value in (None, [], "nope", {}):
+            with self.assertRaises(runner.RequestError, msg=repr(value)):
+                runner.validate_request(
+                    self.repo, self.preview(plan=self.planned(), files=value)
+                )
+
+    def test_a_planned_website_can_be_previewed(self) -> None:
+        # A planned website is an image with nginx in it, so there is a process to run
+        # and therefore something to frame.
+        job = runner.validate_request(
+            self.repo, self.preview(kind="website", plan=self.planned())
+        )
+        self.assertEqual(job["kind"], "website")
+
+    def test_a_website_with_no_plan_is_refused_and_says_why(self) -> None:
+        # Static files are not a process. Framing the published site and calling it a
+        # preview would hide that nothing was run.
+        with self.assertRaises(runner.RequestError) as caught:
+            runner.validate_request(self.repo, self.preview(kind="website"))
+        self.assertIn("publish it to see it", str(caught.exception))
+
+    def test_an_app_with_no_plan_is_still_previewable(self) -> None:
+        # The older packager builds apps too, so this is where a project saved before
+        # the planner gets a preview.
+        job = runner.validate_request(self.repo, self.preview())
+        self.assertEqual(job["action"], "preview")
+
+
+class TestPreviewSteps(RepoFixture):
+    """What a preview runs — and the command it must never run."""
+
+    def steps(self, kind: str, plan: dict | None = None) -> list[str]:
+        instance = runner.Runner(self.repo, self.queue, poll_seconds=1)
+        return [" ".join(command) for command in instance.preview_steps("todo", kind, plan)]
+
+    def planned(self) -> dict:
+        return runner.parse_plan(
+            {
+                "name": "Todo",
+                "kind": "app",
+                "runtime": {"language": "python", "database": "sqlite"},
+                "run": {
+                    "install": "pip install -r requirements.txt",
+                    "build": "",
+                    "start": "python app.py",
+                    "port": 8000,
+                    "healthcheck": "/healthz",
+                },
+            }
+        )
+
+    def test_a_preview_packages_runs_and_takes_a_name_of_its_own(self) -> None:
+        steps = self.steps("app", self.planned())
+        self.assertIn("package-project.py todo", steps[0])
+        self.assertIn("app-runtime.py --up todo --build --preview", steps[1])
+        self.assertIn("studio-sites.py --preview todo", steps[2])
+        self.assertEqual(len(steps), 3)
+
+    def test_a_preview_never_registers_the_projects_own_name(self) -> None:
+        # The whole difference from a publish. Registering the project's own name is
+        # a public act, and a preview that did it would announce an intermediate state
+        # of a project under the name people already know it by.
+        for kind in ("app", "website"):
+            for step in self.steps(kind, self.planned()):
+                self.assertNotIn("studio-sites.py --publish", step)
+
+    def test_the_container_is_told_to_answer_on_the_preview_name(self) -> None:
+        # `--preview` is what writes the second vhost. Without it the edge has a name
+        # that routes to a site container which then has nothing to serve for it.
+        run = [step for step in self.steps("app", self.planned()) if "app-runtime.py" in step]
+        self.assertEqual(len(run), 1)
+        self.assertIn("--preview", run[0])
+
+    def test_a_project_with_no_plan_is_packaged_by_its_own_packager(self) -> None:
+        steps = self.steps("app")
+        self.assertIn("package-app.py todo", steps[0])
+        self.assertIn("app-runtime.py --up todo --build --preview", steps[1])
+
+
 class TestMaterialize(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -623,6 +746,27 @@ class TestStatusWriting(RepoFixture):
         self.assertEqual(json.loads(path.read_text())["state"], "running")
         # Leave no partial write behind.
         self.assertEqual(list(self.queue.glob(".*tmp")), [])
+
+    def test_both_delivery_addresses_are_always_present(self) -> None:
+        # The UI picks between "the address a preview reported" and "the address a
+        # publish reported". Writing neither when a job produced neither is what keeps
+        # that a choice between two fields rather than two fields and their absence.
+        instance = runner.Runner(self.repo, self.queue)
+        instance.write_status("0123456789abcdef", state="running", message="ok")
+
+        payload = json.loads(instance.status_path("0123456789abcdef").read_text())
+        self.assertIsNone(payload["published_url"])
+        self.assertIsNone(payload["preview_url"])
+
+    def test_a_preview_url_survives_the_field_defaulting(self) -> None:
+        instance = runner.Runner(self.repo, self.queue)
+        instance.write_status(
+            "0123456789abcdef", state="succeeded", preview_url="https://todo.example"
+        )
+
+        payload = json.loads(instance.status_path("0123456789abcdef").read_text())
+        self.assertEqual(payload["preview_url"], "https://todo.example")
+        self.assertIsNone(payload["published_url"])
 
     def test_log_tail_reads_the_end_of_a_long_log(self) -> None:
         instance = runner.Runner(self.repo, self.queue)

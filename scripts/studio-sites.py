@@ -14,6 +14,9 @@ So there are two operations here and they are deliberately unequal:
                    under it. Slow, and it happens once.
     --publish      per build. Adds a proxy host pointing at whatever is serving
                    this slug. No DNS, no certificate, no waiting — seconds.
+    --preview      the same, on `<slug>-preview.<suffix>`. A preview is framed in
+                   the browser, and an https page cannot frame a plain-http one, so
+                   a preview needs a name at the edge — just not the project's own.
 
 The wildcard is a *deliberately shared* certificate, and `cerulean_api` prefers a
 dedicated one when a name has it, so a site that later needs its own certificate
@@ -28,6 +31,7 @@ site's host.
     scripts/studio-sites.py --wildcard
     scripts/studio-sites.py --publish todo-list --forward-port 20130
     scripts/studio-sites.py --publish weight-tracker --forward-port 21301 --repoint
+    scripts/studio-sites.py --preview weight-tracker
     scripts/studio-sites.py --list
     scripts/studio-sites.py --remove todo-list
 
@@ -156,6 +160,17 @@ def hostname_for(config: Config, slug: str) -> str:
     return f"{normalise_slug(slug)}.{config.suffix}"
 
 
+def preview_hostname_for(config: Config, slug: str) -> str:
+    """The name a preview is framed on: `<slug>-preview.<suffix>`.
+
+    Derived here for the same reason a published name is: it becomes a DNS label, and
+    a second place that builds one is a second place that can build it wrongly. The
+    `-preview` label is also what keeps a preview from being mistaken for a published
+    site when someone reads the edge's host list.
+    """
+    return f"{normalise_slug(slug)}-preview.{config.suffix}"
+
+
 def connect(config: Config, insecure: bool) -> Api:
     api = Api(config.api_base, insecure)
     api.login(config.password)
@@ -237,6 +252,49 @@ def publish(api: Api, config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def preview(api: Api, config: Config, args: argparse.Namespace) -> int:
+    """Put `<slug>-preview.<suffix>` on the edge, pointing where a publish points.
+
+    A preview has to be reachable from the browser it is shown in: the pane is an
+    https document, and an iframe of a plain-http address is blocked as mixed
+    content. So it needs a name. What it must *not* need is the project's own name —
+    registering that is publishing, which is the decision a preview exists to defer.
+
+    The target is the same service a publish targets, which is why this is the same
+    call with a different name and no new machinery: the per-app vhost in
+    `olympus-sites` is what routes the preview name to the container's port.
+
+    `repoint` is on here and off for a publish, and the difference is ownership: the
+    preview name belongs to this project and always points at the same place, so an
+    entry that disagrees is stale rather than somebody else's live site.
+    """
+    slug = normalise_slug(args.preview)
+    fqdn = preview_hostname_for(config, slug)
+    forward_host = config.require_forward(args.forward_host)
+    forward_port = args.forward_port or config.port
+
+    cert_id = ensure_wildcard_ready(api, config)
+    print(f"Certificate: id {cert_id} covers {fqdn}")
+
+    report = ensure_proxy_host(
+        api,
+        fqdn,
+        forward_host,
+        forward_port,
+        cert_id,
+        args.dry_run,
+        repoint=True,
+    )
+    print(f"Edge: {report}")
+
+    if args.dry_run:
+        print(f"\ndry run — https://{fqdn}/ would serve http://{forward_host}:{forward_port}")
+        return 0
+
+    print(f"\nhttps://{fqdn}/  —  a preview name. Nothing is published under {slug}.{config.suffix}.")
+    return 0
+
+
 def remove(api: Api, config: Config, args: argparse.Namespace) -> int:
     fqdn = hostname_for(config, args.remove)
     hosts = list_proxy_hosts(api)
@@ -281,6 +339,11 @@ def build_parser() -> argparse.ArgumentParser:
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--wildcard", action="store_true", help="create the wildcard DNS record + certificate (once)")
     action.add_argument("--publish", metavar="SLUG", help="point <slug>.<suffix> at a service")
+    action.add_argument(
+        "--preview",
+        metavar="SLUG",
+        help="point <slug>-preview.<suffix> at the same service, for a preview to be framed on",
+    )
     action.add_argument("--remove", metavar="SLUG", help="remove a published name from the edge")
     action.add_argument("--list", action="store_true", help="list what is published")
 
@@ -312,6 +375,8 @@ def main() -> int:
 
     if args.publish:
         return publish(api, config, args)
+    if args.preview:
+        return preview(api, config, args)
     if args.remove:
         return remove(api, config, args)
     return listing(api, config)

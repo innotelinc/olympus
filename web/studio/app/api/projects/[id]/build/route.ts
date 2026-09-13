@@ -5,6 +5,7 @@ import {
   latestBuildStatus,
   listBuildHistory,
   queueBuild,
+  queuePreview,
   queuePublish,
   readBuildStatus,
   readRunnerState,
@@ -97,6 +98,10 @@ export async function POST(request: Request, context: Context): Promise<Response
   //   `action: "publish"` — takes the files on screen and puts them on a name. No
   //   factory run, no spec. This is what makes "Publish It" publish what the
   //   operator is looking at rather than whatever a rebuild would produce.
+  //
+  //   `action: "preview"` — the same files, packaged and *run*, and nothing else.
+  //   No factory run, no spec, no name registered. It is what fills the Preview
+  //   pane with a running project instead of an explanation of one.
   let replace = false;
   let publish = false;
   let action = "build";
@@ -106,14 +111,26 @@ export async function POST(request: Request, context: Context): Promise<Response
       const body = payload as Record<string, unknown>;
       replace = body.replace === true;
       publish = body.publish === true;
-      if (body.action === "publish") action = "publish";
+      if (body.action === "publish" || body.action === "preview") action = body.action;
     }
   } catch {
     /* no body — a plain build */
   }
 
   try {
-    const queued = action === "publish" ? queuePublish(project) : queueBuild(project, { replace, publish });
+    const queued =
+      action === "publish"
+        ? queuePublish(project)
+        : action === "preview"
+          ? queuePreview(project)
+          : queueBuild(project, { replace, publish });
+
+    // Which packager a preview runs. The planner's is the one that writes the
+    // Dockerfile from the plan; a project saved before the planner has its own.
+    // Said as the command that will actually run rather than as one of them.
+    const previewNext =
+      `python3 scripts/${project.plan ? "package-project.py" : "package-app.py"} ` +
+      `${queued.slug} && python3 scripts/app-runtime.py --up ${queued.slug} --build`;
     return Response.json(
       {
         job: queued.job,
@@ -127,11 +144,13 @@ export async function POST(request: Request, context: Context): Promise<Response
         // What the runner will actually do, said out loud — a website build ends
         // with a packaging step an app's never has.
         next:
-          action === "publish"
-            ? `python3 scripts/package-website.py ${queued.slug} --publish && python3 scripts/studio-sites.py --publish ${queued.slug}`
-            : queued.kind === "website"
-              ? `make app SPEC=${queued.spec} && python3 scripts/package-website.py ${queued.slug}${queued.publish ? " --publish" : ""}`
-              : `make app SPEC=${queued.spec}`,
+          action === "preview"
+            ? previewNext
+            : action === "publish"
+              ? `python3 scripts/package-website.py ${queued.slug} --publish && python3 scripts/studio-sites.py --publish ${queued.slug}`
+              : queued.kind === "website"
+                ? `make app SPEC=${queued.spec} && python3 scripts/package-website.py ${queued.slug}${queued.publish ? " --publish" : ""}`
+                : `make app SPEC=${queued.spec}`,
       },
       { status: 202, headers: NO_STORE },
     );

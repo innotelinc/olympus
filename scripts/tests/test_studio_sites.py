@@ -78,6 +78,33 @@ class HostnameTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             sites.hostname_for(Config(), "../../etc/passwd")
 
+    def test_the_preview_name_is_a_name_of_its_own(self) -> None:
+        # A preview is framed in the browser, so it needs a name at the edge — but not
+        # the project's own, because registering that is publishing and a preview
+        # exists to defer exactly that decision.
+        preview = sites.preview_hostname_for(Config(), "todo-list")
+        self.assertEqual(preview, "todo-list-preview.studio.olympus.innotel.us")
+        self.assertNotEqual(preview, sites.hostname_for(Config(), "todo-list"))
+
+    def test_a_preview_name_is_under_the_same_suffix_so_the_wildcard_covers_it(self) -> None:
+        # The wildcard certificate is what makes a preview instant. A name outside it
+        # would need its own certificate, which is the minute-long path this avoids.
+        self.assertTrue(
+            sites.host_suffix(
+                {"domain_names": [sites.preview_hostname_for(Config(), "todo-list")]}, Config()
+            )
+        )
+        self.assertTrue(
+            api.certificate_covers(
+                ["*.studio.olympus.innotel.us"],
+                sites.preview_hostname_for(Config(), "todo-list"),
+            )
+        )
+
+    def test_a_bad_slug_never_becomes_a_preview_name_either(self) -> None:
+        with self.assertRaises(SystemExit):
+            sites.preview_hostname_for(Config(), "../../etc/passwd")
+
 
 class HostSuffixTests(unittest.TestCase):
     def test_matches_only_names_under_the_suffix(self) -> None:

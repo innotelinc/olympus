@@ -56,10 +56,13 @@ export type BuildState = "running" | "succeeded" | "failed" | "cancelled";
  * Which job the queue is carrying.
  *
  * `build` runs the factory on a spec (`make app`). `publish` takes the files
- * Studio has on screen, packages them and puts them on a name — it manufactures
- * nothing and writes no spec, which is why "publish" is not a flag on "build".
+ * Studio has on screen, packages them and puts them on a name. `preview` takes the
+ * same files and packages them the same way, then stops before the name — the
+ * project runs, so the frame has something real behind it, but nothing is
+ * announced. None of the three is a flag on another: they manufacture different
+ * things, and one of them manufactures nothing at all.
  */
-export type BuildAction = "build" | "publish";
+export type BuildAction = "build" | "publish" | "preview";
 
 export type BuildArtifact = {
   dir: string;
@@ -88,6 +91,8 @@ export type BuildSite = {
 export type BuildStatus = {
   job: string;
   state: BuildState;
+  /** What kind of job this is. A status written before the field existed is a build. */
+  action: BuildAction;
   slug: string | null;
   title: string | null;
   spec: string | null;
@@ -109,6 +114,13 @@ export type BuildStatus = {
   site: BuildSite | null;
   /** Present only for a publish job that put the site on a name. */
   publishedUrl: string | null;
+  /**
+   * Present only for a preview job: the address the project was started on, as
+   * `app-runtime.py` recorded it. Deliberately not the published URL — a preview
+   * has no published URL, and reading one as the other would show a name that was
+   * never registered.
+   */
+  previewUrl: string | null;
   logTail: string;
 };
 
@@ -363,6 +375,46 @@ export function queuePublish(project: Project): QueuedBuild {
 }
 
 /**
+ * Package the files on screen and run them, without putting them on a name.
+ *
+ * The same request as a publish with one step missing, and the same files: what is
+ * previewed has to be what is on screen, or the frame shows a project that no
+ * longer exists. `preview` is its own action rather than a publish with a flag
+ * because the difference is a public act — registering a name at the edge — and a
+ * preview must be able to happen without it.
+ */
+export function queuePreview(project: Project): QueuedBuild {
+  const dir = buildQueueDir();
+  const slug = specSlug(project.title);
+  const job = newJobId();
+
+  const { runner, target } = submitRequest(dir, job, {
+    v: 1,
+    job,
+    action: "preview",
+    slug,
+    title: project.title.slice(0, 120),
+    requested_by: "studio",
+    requested_at: new Date().toISOString(),
+    kind: project.kind,
+    plan: project.plan ?? undefined,
+    files: project.files.map((file) => ({ path: file.path, contents: file.contents })),
+  });
+
+  return {
+    job,
+    slug,
+    filename: "",
+    spec: "",
+    path: target,
+    replaced: false,
+    runner,
+    kind: project.kind,
+    publish: false,
+  };
+}
+
+/**
  * The two ways this fails in practice, named so the fix is in the message: the
  * queue is not mounted, or it is mounted but owned by someone uid 1001 cannot
  * write as.
@@ -396,6 +448,7 @@ function toBuildStatus(raw: unknown): BuildStatus | null {
   return {
     job,
     state,
+    action: parseAction(record.action),
     slug: asString(record.slug),
     title: asString(record.title),
     spec: asString(record.spec),
@@ -428,8 +481,20 @@ function toBuildStatus(raw: unknown): BuildStatus | null {
           }
         : null,
     publishedUrl: asString(record.published_url),
+    previewUrl: asString(record.preview_url),
     logTail: asString(record.log_tail) ?? "",
   };
+}
+
+/**
+ * Which job a status describes.
+ *
+ * An unrecognised or absent value is a build, which is what every status written
+ * before this field existed describes — and guessing "publish" for one of those
+ * would relabel finished history.
+ */
+function parseAction(value: unknown): BuildAction {
+  return value === "publish" || value === "preview" ? value : "build";
 }
 
 /**

@@ -70,21 +70,28 @@ browser ──POST /api/projects/<id>/build──▶ build-queue file
                                                    │
                               scripts/build-runner.py (on the host, where the
                               toolchain and docker are) ──▶ package ──▶ run
+                                                   │
+                     status file ──▶ the Preview tab frames the address the
+                                     runner started the project on
 ```
 
-There is no live preview in the browser yet. It is the next step, and it is a
-host-side one: the project runs in its own container, so the preview is that
-container's URL in a frame rather than anything the browser can build itself.
+The preview is host-side, and it has to be: the project is a process in its own
+container, so the frame holds that container's address rather than anything the
+browser could build itself. **Preview It** packages the files on screen, runs
+them and registers `<slug>-preview.<suffix>` at the edge; **Publish It** does the
+same and registers the project's own name instead. Nothing is framed until one of
+them has run — a frame pointed at a hostname nobody was told to answer on is the
+blank pane this replaced.
 
 The gateway key lives only in the route handler. It is never sent to the browser
 and never appears in the client bundle.
 
 | Piece | File |
 | --- | --- |
-| Workspace UI (prompt, plan, stream, tabs, the four deliveries) | `components/Studio.tsx` |
+| Workspace UI (prompt, plan, stream, tabs, the five deliveries) | `components/Studio.tsx` |
 | File browser + copy | `components/CodeView.tsx` |
 | Saved-app library, build queue client, build status | `lib/projects.ts`, `lib/build-queue.ts` |
-| Sandboxed frame (unused while neither kind can preview) | `components/Preview.tsx` |
+| Sandboxed frame — what the pane was before the preview ran a real project | `components/Preview.tsx` |
 | Streaming gateway proxy | `app/api/generate/route.ts` |
 | Planning turn | `app/api/plan/route.ts`, `lib/plan.ts` |
 | The linked-model catalogue | `app/api/models/route.ts`, `lib/omniroute.ts` |
@@ -508,6 +515,43 @@ environment allow-list that keeps the Vault and Authentik tokens out of a build.
 > `build-requests/`: `make studio-build-queue-dir`, run by `setup.sh` and by the
 > runner's installer. If it is root-owned the button answers `503` with the
 > command to run.
+
+## Preview it — the project running, without publishing it
+
+**Preview It** takes the files on screen, packages them, runs them and frames the
+result. It is a third queue action, not a flag on a publish, because the two end
+differently: a publish registers the project's own name at the edge, a preview
+does not.
+
+```
+package-project.py <slug>              # the Dockerfile from the plan, install, build
+app-runtime.py --up <slug> --preview   # run it; it also answers on <slug>-preview.<suffix>
+studio-sites.py --preview <slug>       # put that preview name on the edge
+```
+
+A preview has to be reachable from the browser it is shown in — the pane is an
+https document, and an iframe of a plain-http address is blocked as mixed content —
+so it needs a name. It gets one of its own: `<slug>-preview.<suffix>`, covered by
+the same wildcard certificate, so a preview is seconds and never waits on a
+certificate. The project's own name is never added to the edge by a preview, so
+previewing a project nobody has published produces a name that exists only as a
+preview.
+
+| | |
+| --- | --- |
+| Action | `POST /api/projects/<id>/build` with `{ "action": "preview" }` |
+| Files | The ones on screen, saved first, exactly as a publish takes them |
+| Address | `<slug>-preview.<suffix>`, from the runtime's own record — never composed in the browser |
+| Status | `preview_url` on the job's status; `action: "preview"` says which kind of job it was |
+| Publish after it | The same container; `Publish It` adds the project's own name to the edge |
+| What it does not do | No factory run, no spec written, no name registered under the project's own host |
+
+Two consequences worth knowing. The preview runs the slug's **own container**, so a
+project that is already published serves the previewed files on its real name until
+the next publish — the container is one container. And a website with no plan is
+refused by the runner with `publish it to see it`: static files are not a process,
+so there is nothing to run and framing the published site is the behaviour the
+preview replaced.
 
 ## Security posture
 

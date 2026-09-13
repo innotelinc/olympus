@@ -88,6 +88,22 @@ function slugPreview(slug: string | null, suffix: string): string {
   return slug && suffix ? `https://${slug}.${suffix}` : "a name under the site suffix";
 }
 
+/**
+ * The newest address any of this project's jobs left behind.
+ *
+ * Newest-first is the order the history arrives in, and within one job there is only
+ * ever one address — a preview reports no published URL, a publish reports no preview
+ * URL — so the choice is between jobs. The newest job is the one that ran the files
+ * most recently, which is the one the pane should be showing.
+ */
+function latestDeliveryUrl(history: BuildStatus[]): string | null {
+  for (const past of history) {
+    if (past.previewUrl) return past.previewUrl;
+    if (past.publishedUrl) return past.publishedUrl;
+  }
+  return null;
+}
+
 /** m:ss elapsed label. */
 function clock(seconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
@@ -290,8 +306,10 @@ export default function Studio({
   const [buildError, setBuildError] = useState<string | null>(null);
   // Publishing is its own in-flight state, not a flavour of building: the two go
   // to different places and a single "busy" would make one button's spinner
-  // explain the other's.
+  // explain the other's. Previewing is a third for the same reason — it neither
+  // builds with the factory nor puts anything on a name.
   const [publishBusy, setPublishBusy] = useState(false);
+  const [previewBusy, setPreviewBusy] = useState(false);
   // The log of the build being shown, fetched on its own cadence: it is tens of
   // kilobytes, so it does not belong in the status poll that runs every 3s.
   const [buildLog, setBuildLog] = useState<BuildLog | null>(null);
@@ -514,6 +532,22 @@ export default function Studio({
     }
     void fetchBuildLog(activeAppId, build.job);
   }, [activeAppId, build?.job, fetchBuildLog]);
+
+  // Reload the frame when a preview finishes.
+  //
+  // A frame re-fetches when its `src` changes, and a project's preview address is
+  // the same one every time — `<slug>-preview.<suffix>`, by design, so that the name
+  // stays stable across previews. Without this, pressing Preview It a second time
+  // would run the new build and leave the previous one on screen, which reads as the
+  // preview not working. Keyed on the job id so it fires once per run rather than on
+  // every poll.
+  const previewedJobRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (build?.action !== "preview" || build.state !== "succeeded") return;
+    if (previewedJobRef.current === build.job) return;
+    previewedJobRef.current = build.job;
+    setPreviewNonce((nonce) => nonce + 1);
+  }, [build?.action, build?.job, build?.state]);
 
   // ---- which model builds this ------------------------------------------
 
@@ -1002,6 +1036,79 @@ export default function Studio({
   ]);
 
   /**
+   * Package the files on screen, run them, and show the result — without publishing.
+   *
+   * This is what the Preview tab needs and could never have: the project itself,
+   * served by its own process, not a re-render of its markup. A publish produces the
+   * same running container and then registers the name; a preview stops before that,
+   * because looking at a build is not a decision to announce it.
+   *
+   * Saved first, like a publish, and for the same reason: the request carries the
+   * saved files, and a preview that disagreed with the library would show a build
+   * nobody can reopen.
+   */
+  const previewApp = useCallback(async () => {
+    if (activeFiles.length === 0 || status === "streaming") return;
+
+    setPreviewBusy(true);
+    setBuildError(null);
+    setLibraryError(null);
+    setLibraryNote(null);
+
+    try {
+      const app = await persistApp({
+        id: activeAppId,
+        title: appTitle || titleFromPrompt(prompt),
+        prompt,
+        files: activeFiles,
+        kind: activeAppId ? undefined : kind,
+        plan: projectPlanRef.current,
+      });
+      setActiveAppId(app.id);
+      setAppTitle(app.title);
+      await listSavedApps();
+
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (token) headers["x-studio-token"] = token;
+
+      const response = await fetch(`/api/projects/${encodeURIComponent(app.id)}/build`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ action: "preview" }),
+      });
+
+      const payload = (await response.json()) as {
+        job?: string;
+        runner?: RunnerState;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(payload.error ?? `Preview failed to start (${response.status}).`);
+
+      setRunner(payload.runner ?? null);
+      // The pane is where the answer will arrive, so go there now rather than after
+      // the build: the operator asked to see it, and the run's progress is visible
+      // under the same tab while the container comes up.
+      setTab("preview");
+      if (payload.job) await fetchBuild(app.id, payload.job);
+    } catch (thrown) {
+      setBuildError(thrown instanceof Error ? thrown.message : "Could not start the preview.");
+    } finally {
+      setPreviewBusy(false);
+    }
+  }, [
+    activeAppId,
+    activeFiles,
+    appTitle,
+    fetchBuild,
+    kind,
+    listSavedApps,
+    persistApp,
+    prompt,
+    status,
+    token,
+  ]);
+
+  /**
    * Ask the runner to stop the build, then wait for the status to say so.
    *
    * The 202 this gets back means "the request is on disk", not "stopped" — the
@@ -1473,11 +1580,15 @@ export default function Studio({
   const planStale = plan !== null && prompt.trim() !== planPrompt;
   const planReady = plan !== null && !planStale && !busy;
   // Where the project is actually running, as the runner reported it — never a URL
-  // this component composes, so what is framed is what was published.
-  const previewUrl =
-    build?.publishedUrl ??
-    buildHistory.find((past) => past.publishedUrl)?.publishedUrl ??
-    null;
+  // this component composes, so what is framed is what was started. The current job's
+  // own status comes first (it is the newest thing that happened), then the newest
+  // address in the history, so reopening an app shows its last run rather than
+  // forgetting it ever had one.
+  const previewUrl = build?.previewUrl ?? build?.publishedUrl ?? latestDeliveryUrl(buildHistory);
+  // A job that packages and runs the files on screen and stops before the name. The
+  // pane has to tell this apart from a factory build: one ends in a frame, the other
+  // in a directory, and they take about the same time to get there.
+  const previewing = build?.state === "running" && build.action === "preview";
   const hasFiles = activeFiles.length > 0;
   // Recomputed each render; the 1-second interval (and every chunk) re-renders
   // while streaming, so all of these move live.
@@ -2141,13 +2252,14 @@ export default function Studio({
               * rather than from a kind:
               *
               *   Build It       install, build and start the project to see it run
+              *   Preview It     run it and show it here, announcing nothing
               *   Publish It     put the built project on its own name
               *   Export It      write a build-requests spec for CI or a hand-off
               *   Download It    a zip of the source, and of the build output once built
               *
-              * Publish It deliberately does NOT run the factory. Publishing what a
-              * rebuild would produce, rather than what the operator is looking at,
-              * is a different project with the same name.
+              * None of them runs the factory. Delivering what a rebuild would
+              * produce, rather than what the operator is looking at, is a different
+              * project with the same name.
               */}
             <div className="deliveries">
               <button
@@ -2158,6 +2270,17 @@ export default function Studio({
                 title="Install, build and start this project on the build host, using the commands in its plan"
               >
                 {buildBusy ? "Building…" : "Build It"}
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => void previewApp()}
+                disabled={
+                  !hasFiles || busy || libraryBusy || previewBusy || build?.state === "running"
+                }
+                title="Package these files, run the project and show it in the pane — no name is registered and nothing is published"
+              >
+                {previewing || previewBusy ? "Previewing…" : "Preview It"}
               </button>
               <button
                 type="button"
@@ -2376,11 +2499,16 @@ export default function Studio({
                * The frame used to hold a sandboxed document with no network and no
                * bundler, which could only ever show a self-contained HTML page — and
                * neither kind is one: a project's source needs its own toolchain, and an
-               * app needs its API running before any client can render. So the preview
-               * points at the project itself, on the name it was published under and
-               * which the runner reported. What that costs is stated rather than
-               * hidden: publishing is what makes a project reachable, so there is
-               * nothing to frame until it has been published once.
+               * app needs its API running before any client can render. So the frame
+               * holds the project itself, on the address the runner reported after it
+               * started it.
+               *
+               * Two jobs put an address there, and they differ in one thing: Preview It
+               * runs the project and stops, Publish It runs it and registers the name at
+               * the edge. Neither composes a URL here — what is framed is where the
+               * project was actually started, because a frame pointed at a hostname
+               * nothing has been told to answer on is exactly the blank pane this
+               * replaced.
                */
               previewUrl ? (
                 <div className="preview">
@@ -2411,15 +2539,18 @@ export default function Studio({
               ) : (
                 <div className="site-note">
                   <strong>
-                    {build?.state === "running"
-                      ? "Building — the preview appears when it is running"
-                      : "Nothing is running yet"}
+                    {previewing
+                      ? "Previewing — the project appears when it answers"
+                      : build?.state === "running"
+                        ? "Building — the preview appears if this run puts it on a name"
+                        : "Nothing is running yet"}
                   </strong>
                   <span>
-                    The preview is the project itself, served from its own container, so it shows
-                    up once the project has been published. Read the source under <em>Code</em>,
-                    then use <em>Publish It</em> — that builds it, starts it and puts the name in
-                    front of it.
+                    The preview is the project itself, served from its own container. Use{" "}
+                    <em>Preview It</em> to package these files, run them and show them here —
+                    that registers no name and publishes nothing. Use <em>Publish It</em> to do
+                    the same and put the name in front of it. Read the source under <em>Code</em>
+                    meanwhile.
                     {projectPlan ? (
                       <>
                         {" "}
