@@ -1,0 +1,118 @@
+# compose.gateway-sso.yml — put the OmniRoute dashboard behind Cerulean Authentik.
+#
+# WHY THIS EXISTS
+# ---------------
+# The gateway dashboard manages provider credentials and can read them, so it
+# should not be reachable on a shared password. OmniRoute has OIDC support of its
+# own, but it cannot validate an Authentik ID token: its callback strips the
+# trailing slash from the configured issuer and then requires an exact match,
+# and Authentik's `iss` always ends with one. `docs/gateway-sso.md` carries the
+# evidence. So the dashboard is fronted by a conformant client instead, and
+# OmniRoute's own `oidcEnabled` stays off.
+#
+#   browser ──https──▶ edge (NPM, another host)
+#                          │  gateway.olympus.innotel.us
+#                          ▼  http://<this host>:20129
+#                    gateway-sso (oauth2-proxy) ──▶ Authentik OIDC + group check
+#                          │  http://127.0.0.1:20128
+#                          ▼
+#                       omniroute (dashboard, still loopback-only)
+#
+# USAGE
+# -----
+#   make gateway-sso-up      # or, by hand:
+#   docker compose -f docker-compose.yml -f compose.gateway-sso.yml up -d gateway-sso
+#
+# HOST NETWORKING IS NOT OPTIONAL HERE. The gateway is published on the host's
+# loopback only (`127.0.0.1:20128`), and Docker publishes a loopback binding to
+# the loopback interface alone — a bridge container cannot reach it at all. This
+# is the case `docker-compose.yml` calls "loopback-published on host", whose
+# sanctioned answer is host networking; `compose.host-gateway.yml` already makes
+# that trade for Studio. The same namespace then gives the proxy both the
+# upstream and a LAN-facing listener, so `ports` is cleared rather than left to
+# be silently discarded.
+
+services:
+  gateway-sso:
+    # Pinned by tag, not digest: unlike the autoheal container this one holds no
+    # Docker socket, so a bad upstream release cannot restart anything — it can
+    # only fail closed behind the edge.
+    #
+    # The `-alpine` variant specifically: the default tag is distroless and has no
+    # shell, which makes the healthcheck below impossible to express (a `wget`
+    # healthcheck on it reports the container unhealthy forever — measured). A
+    # shell in the image is the price of a liveness signal; the container is the
+    # only thing on 20129 and it never runs the shell itself.
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine
+    container_name: olympus-gateway-sso
+    restart: unless-stopped
+    network_mode: host
+    ports: !override []
+    # The gateway's own network is not this stack's, so there is nothing to join
+    # and nothing to add it to.
+    networks: !override []
+    env_file:
+      - .env
+    environment:
+      # oauth2-proxy reads OAUTH2_PROXY_* from the environment. The repo-idiomatic
+      # GATEWAY_* names stay in .env; this block is the only place the two
+      # vocabularies meet, so the credentials are never repeated in `command`
+      # where `docker inspect` would show them alongside everything else.
+      OAUTH2_PROXY_CLIENT_ID: ${GATEWAY_OIDC_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${GATEWAY_OIDC_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${GATEWAY_SSO_COOKIE_SECRET}
+    command:
+      - --provider=oidc
+      # Trailing slash included, because that is the issuer Authentik publishes
+      # in the discovery document. (This is exactly the value OmniRoute mishandles.)
+      - --oidc-issuer-url=${GATEWAY_OIDC_ISSUER_URL}
+      - --oidc-groups-claim=groups
+      - --scope=openid email profile
+      # Authentik advertises S256; oauth2-proxy leaves PKCE off unless asked, and
+      # it says so on every start. A public-Redirect-URI code flow should use it.
+      - --code-challenge-method=S256
+      - --upstream=${GATEWAY_SSO_UPSTREAM:-http://127.0.0.1:20128}
+      # 0.0.0.0 because the edge is on another host and reaches this over the LAN.
+      - --http-address=0.0.0.0:${GATEWAY_SSO_PORT:-20129}
+      - --redirect-url=https://${GATEWAY_PUBLIC_HOST}/oauth2/callback
+      # The edge terminates TLS, so the session cookie is only ever sent over
+      # HTTPS even though this listener speaks plain HTTP.
+      - --cookie-secure=true
+      - --cookie-samesite=lax
+      # Honours X-Forwarded-Proto/Host, which is how the session cookie stays
+      # `Secure` and the OAuth redirects come back on the public name instead of
+      # on the LAN address. The cost: oauth2-proxy trusts those headers from
+      # anyone who can reach 20129, and on the LAN that is not only the edge. A
+      # direct caller could claim `https`. It buys no access — every path still
+      # requires an Authentik session in an allowed group — but once the edge's
+      # address is fixed, `--trusted-ip` should name it and close that gap.
+      - --reverse-proxy=true
+      # Any verified email may pass the OIDC step; the group below is the actual
+      # door. OmniRoute's own allow-list cannot express this at all — it takes
+      # subjects and emails, so "anyone in cerulean-platform" is not a sentence it
+      # can say.
+      - --email-domain=*
+      - --allowed-group=${GATEWAY_SSO_ALLOWED_GROUP:-cerulean-platform}
+      - --skip-provider-button=true
+      - --session-store-type=cookie
+      # Pass the identity on to the dashboard so its logs name a person rather
+      # than an anonymous session.
+      - --set-xauthrequest=true
+      - --pass-user-headers=true
+      # Trim what a dashboard never needs to see.
+      - --pass-access-token=false
+      - --pass-authorization-header=false
+      - --silence-ping-logging=true
+    healthcheck:
+      # /ping is oauth2-proxy's own unauthenticated liveness route. Probing the
+      # dashboard instead would make this container's health depend on the
+      # gateway being up, which is how a healthy proxy gets restarted for
+      # somebody else's outage.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${GATEWAY_SSO_PORT:-20129}/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    # Deliberately NOT labelled `autoheal`. Autoheal acts on a failing
+    # healthcheck, and this container's job is to refuse traffic — a restart
+    # loop would turn every closed door into something that looks like a crash.

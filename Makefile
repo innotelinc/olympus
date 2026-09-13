@@ -128,6 +128,42 @@ docker-ps: ## List Olympus container status
 docker-ps-host: ## List the host-networked stack's status
 	docker compose -f docker-compose.yml -f compose.host-gateway.yml ps
 
+# The dashboard SSO proxy. Deliberately not folded into `docker-up`: it needs the
+# GATEWAY_* credentials from `make gateway-oidc`, and without them oauth2-proxy
+# would start and then refuse every login, which is the failure mode that looks
+# like a working deployment. See compose.gateway-sso.yml and docs/gateway-sso.md.
+gateway-sso-up: ## Put the gateway dashboard behind Cerulean Authentik (oauth2-proxy)
+	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi; \
+	for k in GATEWAY_OIDC_CLIENT_SECRET GATEWAY_SSO_COOKIE_SECRET GATEWAY_PUBLIC_HOST; do \
+		v=$$(sed -n "s/^$$k=//p" .env | tail -1); \
+		if [[ -z "$$v" ]]; then echo "$$k is not set in .env — run 'make gateway-oidc ARGS=--rotate-secret' first" >&2; exit 2; fi; \
+	done; \
+	docker compose -f docker-compose.yml -f compose.gateway-sso.yml up -d --no-deps gateway-sso
+
+gateway-sso-down: ## Stop the dashboard SSO proxy (the gateway itself keeps running)
+	docker compose -f docker-compose.yml -f compose.gateway-sso.yml rm -sf gateway-sso
+
+# Asserts the two things that distinguish "wired up" from "running": the proxy
+# answers liveness, and an unauthenticated request is handed to Authentik with
+# OUR client id. A dashboard served directly would pass the first and fail the
+# second — which is exactly the misconfiguration worth catching.
+gateway-sso-check: ## Confirm the proxy redirects to Authentik instead of serving the dashboard
+	@port=$$(sed -n 's/^GATEWAY_SSO_PORT=//p' .env 2>/dev/null | tail -1 | tr -d "'\" " ) ; port=$${port:-20129}; \
+	code=$$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:$$port/ping" || true); \
+	if [[ "$$code" != "200" ]]; then echo "proxy: not answering — HTTP $$code from http://127.0.0.1:$$port/ping" >&2; exit 1; fi; \
+	echo "proxy: ok — live on 127.0.0.1:$$port"; \
+	loc=$$(curl -s -o /dev/null -w '%{redirect_url}' -m 10 "http://127.0.0.1:$$port/" || true); \
+	issuer=$$(sed -n 's/^GATEWAY_OIDC_ISSUER_URL=//p' .env 2>/dev/null | tail -1 | tr -d "'\" "); \
+	client=$$(sed -n 's/^GATEWAY_OIDC_CLIENT_ID=//p' .env 2>/dev/null | tail -1 | tr -d "'\" "); \
+	base=$${issuer%/}; base=$${base%/application/o/*}; \
+	if [[ "$$loc" != "$$base/application/o/authorize/"* ]]; then \
+		echo "sso: FAILED — / did not redirect to Authentik (got '$$loc')" >&2; exit 1; \
+	fi; \
+	if [[ -n "$$client" && "$$loc" != *"client_id=$$client"* ]]; then \
+		echo "sso: FAILED — redirect names a different client than GATEWAY_OIDC_CLIENT_ID" >&2; exit 1; \
+	fi; \
+	echo "sso: ok — / redirects to $$base/application/o/authorize/ as client '$$client'"
+
 docker-shell: ## Shell into the running Olympus container
 	docker compose exec olympus bash
 
@@ -176,6 +212,36 @@ studio-e2e: ## Drive the real Authentik handshake (needs STUDIO_E2E_* vars; see 
 studio-oidc: ## Register/repair Studio's OIDC app in Cerulean Authentik (ARGS="--dry-run" to preview)
 	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi
 	python3 scripts/authentik-studio-app.py $(ARGS)
+
+# The gateway dashboard's OIDC client. Registered separately from Studio's
+# because the issuer path IS the application slug, and the dashboard is a second
+# application with its own callbacks. GATEWAY_PUBLIC_HOST is what the browser
+# uses, so each callback is built from it and Authentik must have it on file.
+#
+# TWO callbacks are registered on purpose:
+#   /oauth2/callback        the identity-aware proxy that is actually deployed
+#   /api/auth/oidc/callback OmniRoute's own OIDC, which cannot validate an
+#                           Authentik ID token today (docs/gateway-sso.md) but
+#                           needs no re-registration if upstream fixes it
+#
+# ARGS="--rotate-secret" is the only way to obtain a client secret at all:
+# Authentik stores them write-only, so an existing provider has no readable
+# value. It prints the new secret once, and the previous one stops working.
+gateway-oidc: ## Register/repair the gateway dashboard's OIDC client in Cerulean Authentik (ARGS="--dry-run")
+	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi; \
+	host=$$(sed -n 's/^GATEWAY_PUBLIC_HOST=//p' .env | tail -1 | tr -d '"' | tr -d "'" | tr -d '[:space:]'); \
+	if [[ -z "$$host" ]]; then \
+		echo "set GATEWAY_PUBLIC_HOST in .env (e.g. gateway.olympus.innotel.us) — it is the redirect URI Authentik registers" >&2; \
+		exit 2; \
+	fi; \
+	slug=$$(sed -n 's/^GATEWAY_SLUG=//p' .env | tail -1 | tr -d '"' | tr -d "'" | tr -d '[:space:]'); \
+	python3 scripts/authentik-studio-app.py \
+		--slug "$${slug:-omniroute}" \
+		--client-id "$${slug:-omniroute}" \
+		--name "OmniRoute Gateway" \
+		--env-prefix GATEWAY_OIDC_ \
+		--redirect-uri "https://$$host/oauth2/callback" \
+		--redirect-uri "https://$$host/api/auth/oidc/callback" $(ARGS)
 
 studio-oidc-check: ## Confirm the issuer answers discovery, and the credential is not lapsing
 	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi; \
@@ -244,10 +310,12 @@ check-compose: ## Validate every compose file (rendered against .env.example, ne
 			echo "compose config: FAILED ($$f)" >&2; status=1; \
 		fi; \
 	done; \
-	if docker compose --env-file "$$tmp_env" -f docker-compose.yml -f compose.host-gateway.yml config --quiet 2>/dev/null; then \
-		echo "compose config: ok (docker-compose.yml + compose.host-gateway.yml)"; \
-	else \
-		echo "compose config: FAILED (host-gateway overlay)" >&2; status=1; \
-	fi; \
+	for overlay in compose.host-gateway.yml compose.gateway-sso.yml; do \
+		if docker compose --env-file "$$tmp_env" -f docker-compose.yml -f "$$overlay" config --quiet 2>/dev/null; then \
+			echo "compose config: ok (docker-compose.yml + $$overlay)"; \
+		else \
+			echo "compose config: FAILED ($$overlay)" >&2; status=1; \
+		fi; \
+	done; \
 	rm -f "$$tmp_env"; \
 	exit $$status
