@@ -52,7 +52,12 @@ services:
     # and nothing to add it to.
     networks: !override []
     env_file:
-      - .env
+      # Optional, because a render has to work without one: `make check-compose`
+      # validates this file against `.env.example` in a checkout that has no `.env`,
+      # and a missing env_file is an error rather than a warning. A deployment has
+      # one, and it is loaded exactly as before.
+      - path: .env
+        required: false
     environment:
       # oauth2-proxy reads OAUTH2_PROXY_* from the environment. The repo-idiomatic
       # GATEWAY_* names stay in .env; this block is the only place the two

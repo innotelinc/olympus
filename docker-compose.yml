@@ -43,7 +43,12 @@ services:
     labels:
       - "autoheal=true"
     env_file:
-      - .env
+      # Optional, because a render has to work without one: `make check-compose`
+      # validates these files against `.env.example` in a checkout that has no
+      # `.env`, and a missing env_file is an error rather than a warning. A
+      # deployment has one, and it is loaded exactly as before.
+      - path: .env
+        required: false
     environment:
       OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://host.docker.internal:20128/v1}
       OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
@@ -88,7 +93,12 @@ services:
     labels:
       - "autoheal=true"
     env_file:
-      - .env
+      # Optional, because a render has to work without one: `make check-compose`
+      # validates these files against `.env.example` in a checkout that has no
+      # `.env`, and a missing env_file is an error rather than a warning. A
+      # deployment has one, and it is loaded exactly as before.
+      - path: .env
+        required: false
     # See the OmniRoute caveat at the top of this file before changing the base URL.
     environment:
       OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://host.docker.internal:20128/v1}
