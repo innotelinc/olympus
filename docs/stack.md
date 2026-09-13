@@ -136,7 +136,9 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 > evidence it did anything (Codex exits **0** after a refused request), and if you do
 > fall back to a concrete model name rather than the combo — naming a model keeps the
 > turn off the combo path entirely (`OMNIROUTE_MODEL` / `OMNIROUTE_MODEL_FALLBACK` in
-> `.env.example` are the app-builder's case of this).
+> `.env.example` are the app-builder's case of this). [build-model.md](build-model.md)
+> covers the capacity side: which connections were measured as unusable, what
+> `make build-model-check` proves and does not, and the options for a durable fix.
 
 > **Scope of this checkout.** This repository is the deployment surface. The
 > factory state machine, the harness, and the Archon workflow definitions
@@ -251,10 +253,17 @@ make studio-token-rotate AUTHENTIK_HOST=<host>   # rebuild and re-date it
 On the deployment host the check runs daily without anyone remembering it:
 
 ```bash
-scripts/install-token-check-timer.sh             # both timers: 06:17 UTC + after boot
+scripts/install-token-check-timer.sh             # all three: 06:17 UTC + after boot
 systemctl start olympus-studio-token-check.service   # run the credential check now
 systemctl start olympus-vault-renew-check.service    # renew the Vault token now
+systemctl start olympus-build-model-check.service    # can builds produce anything now
 ```
+
+The third is the one that guards against silence rather than an outage: builds fail
+without an error when the gateway has no capacity to serve them, so
+`scripts/install-token-check-timer.sh TARGET=build-model` runs
+`scripts/build-model-check.py` daily and alerts when no model in the configured chain
+can call a tool. See [build-model.md](build-model.md).
 
 It alerts through Telegram when the credential is inside its warning window
 (`--warn-days`, 14 by default) or unusable, and repeats daily while it lapses —

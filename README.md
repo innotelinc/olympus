@@ -101,6 +101,7 @@ make studio-build-queue-dir        # let Studio queue builds (uid 1001)
 sudo make build-runner-install     # systemd service (idempotent; --uninstall to remove)
 make build-runner-check            # what the runner will use: gateway, model, tools
 make build-runner-list             # the queue, and where each build got to
+make build-model-check             # can the configured model call a tool, twice over?
 make test-runner                   # the runner's unit tests
 make prune                         # old builds + finished queue files (ARGS="--yes" to delete)
 
@@ -163,6 +164,13 @@ So: a concrete model first, a second entry for when the primary is cooling, and 
 candidate with a tool-calling request to `/v1/responses` — a 200 is not the check, a
 `function_call` in the response is. The shape is in `.env.example`, along with the models
 measured as unusable here.
+
+`make build-model-check` does that check for the whole configured chain — two turns, since
+the failure that cost the most here was on the second one — and exits `1` when a build
+would exit 0 having written nothing. `scripts/install-token-check-timer.sh
+TARGET=build-model` alerts on it daily. **The capacity story, the options for fixing it,
+and what a pass does not prove are in [docs/build-model.md](docs/build-model.md)** — worth
+reading before adding credentials, because a gateway's connection count is not its quota.
 
 Docker also runs the same `push` manufacture trigger in CI: `.github/workflows/olympus-app-builder.yml`
 (`on.push.paths: build-requests/*.md`).

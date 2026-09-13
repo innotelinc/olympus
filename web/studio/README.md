@@ -380,6 +380,7 @@ Studio (uid 1001)                    host runner (systemd, olympus-builder)
     → writes <job>.request.json          → re-validates every field
   GET  .../build[?job=]                  → runs scripts/manufacture.sh
     ← reads <job>.status.json + history  → writes <job>.status.json + .log
+  GET  .../build/log?job=                → the log itself, on demand
   POST .../build/cancel
     → writes <job>.cancel.json       → sees it on the next poll, stops the tree
 ```
@@ -401,6 +402,8 @@ refused by name and marked failed rather than acted on.
 | `replace` | One flag covers both overwrites — an existing spec and an existing `builds/<slug>`. Without it either is a `409` and the UI asks |
 | History | `GET` returns this app's builds newest-first (a running one pinned to the top), which the panel lists under the log — so a second attempt is comparable to the first instead of replacing it silently |
 | Cancel | `POST .../build/cancel` writes a marker the runner polls for. It answers `202`, not "stopped": the truth is the status file changing, which the panel is already following. Only a running build can be cancelled — anything else is a `409`, because rewriting a finished build's outcome is not a cleanup |
+| Log | `GET .../build/log?job=<id>` reads the job's `.log` file — the tail of it, `MAX_LOG_BYTES` (200 KB), stating the full size when it cuts. The status file keeps only a 4000-character tail, because the runner rewrites it every 5s and the panel polls it; the log is tens of kilobytes, so it is fetched separately and refreshed on the same 3s tick while a build runs. Choosing an entry in the history loads **that build's** log, not the newest one |
+| Log ownership | The queue is one directory shared by every tenant, so a job id alone would let any signed-in user read any other user's build. The job must belong to the requesting app's slug, and a mismatch answers the same `404` as a job that does not exist — telling them apart would confirm someone else's build |
 | Result | `builds/<slug>/` on the host, with `MANIFEST.json` recording the spec's SHA-256 and the model |
 
 Cancelling stops the whole build **tree**, not just the shell the runner spawned:
