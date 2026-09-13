@@ -20,28 +20,25 @@ git config core.hooksPath .githooks 2>/dev/null || true
 # Ensure local dev dirs exist (setup.sh also does this; cheap to repeat)
 mkdir -p builds build-requests .archon/cache factory 2>/dev/null || true
 
-# OmniRoute: if a gateway is expected at OMNIROUTE_BASE_URL (default inside compose: http://omniroute:20128),
-# try to ensure it's up — either it's an external service or the bundled one under core-modules/omniroute.
-OMNIROUTE_BASE_URL="${OMNIROUTE_BASE_URL:-http://localhost:20128}"
-if curl -fsS -m 2 "${OMNIROUTE_BASE_URL}/health" >/dev/null 2>&1; then
+# OmniRoute: REPORT, never start one.
+#
+# This used to start a bundled gateway from core-modules/omniroute whenever
+# OMNIROUTE_BASE_URL did not answer — and that made two OmniRoutes possible on one
+# host. The second one is never useful and is sometimes actively harmful: it has no
+# provider connections, so it answers on its free pool and looks like a working
+# gateway, while the machine that matters (the build runner, the SSO proxy, anything
+# else pointed at 127.0.0.1:20128) may find *it* instead of the deployment's real
+# gateway — with none of the credentials. The gateway is a service in
+# docker-compose.yml now (`make gateway-up`), so the single-owner rule can be
+# enforced rather than hoped for: exactly one OmniRoute exists, and this container
+# is not it.
+OMNIROUTE_BASE_URL="${OMNIROUTE_BASE_URL:-http://127.0.0.1:20128}"
+if curl -fsS -m 5 "${OMNIROUTE_BASE_URL%/v1}/healthz" >/dev/null 2>&1; then
   say "OmniRoute reachable at ${OMNIROUTE_BASE_URL}"
 else
-  if [ -d core-modules/omniroute ] && [ -f core-modules/omniroute/package.json ]; then
-    warn "OmniRoute not at ${OMNIROUTE_BASE_URL} — starting bundled gateway in background"
-    (cd core-modules/omniroute && npm run start >/tmp/omniroute.log 2>&1 &)
-    for _ in $(seq 1 15); do
-      if curl -fsS -m 2 "${OMNIROUTE_BASE_URL}/health" >/dev/null 2>&1; then
-        say "OmniRoute now reachable at ${OMNIROUTE_BASE_URL}"
-        break
-      fi
-      sleep 2
-    done
-    if ! curl -fsS -m 2 "${OMNIROUTE_BASE_URL}/health" >/dev/null 2>&1; then
-      warn "bundled OmniRoute did not become healthy; continuing — see /tmp/omniroute.log"
-    fi
-  else
-    warn "OmniRoute not at ${OMNIROUTE_BASE_URL} and no bundled gateway — set OMNIROUTE_BASE_URL to an external gateway"
-  fi
+  warn "OmniRoute is NOT reachable at ${OMNIROUTE_BASE_URL}"
+  warn "  start it on the host:  make gateway-up        (profile-gated `omniroute` service)"
+  warn "  or accept that this container cannot reach a gateway — it will not start a second one"
 fi
 
 # If factory binary exists and a SPEC was requested, run manufacture once on boot.

@@ -27,6 +27,7 @@ the next section — that is not a preference, it is the one path that cannot wo
 | Edge | NPM proxy host #198 → `http://192.168.1.10:20129`, TLS enforced, websockets on |
 | Proxy | `olympus-gateway-sso` (`quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine`), host networking, listens `0.0.0.0:20129` |
 | Upstream | `http://127.0.0.1:20128` (the gateway's loopback binding) |
+| LAN path | `/v1/*` and `/healthz` pass through; everything else — dashboard included — requires Authentik |
 | Authentik application | `OmniRoute Gateway` (slug `omniroute`, provider pk 30) |
 | Client id | `omniroute` |
 | Issuer | `https://auth.cerulean.innotel.us/application/o/omniroute/` |
@@ -134,6 +135,39 @@ It is idempotent and it is deliberately unwilling:
 running the proxy. Pointing the edge at the gateway (20128) instead would bypass
 the proxy and restore the unauthenticated dashboard.
 
+## Using the gateway from another machine on the LAN
+
+The gateway itself listens on `127.0.0.1:20128` and stays that way: it is the
+process that holds every provider credential, and widening its binding puts the
+dashboard on the network. The **proxy** is the LAN door — `0.0.0.0:20129` — and it
+sorts callers by what they are:
+
+| Path | Who gets in | Why |
+| --- | --- | --- |
+| `/v1/*` | anyone with a valid `Authorization: Bearer $OMNIROUTE_API_KEY` | inference is already key-authenticated. An interactive OIDC login in front of it would not add a check, it would break every client: Codex and the CLIs send a key, not a session cookie |
+| `/healthz` | anyone | liveness, 200 with no body and no secrets |
+| everything else, including `/dashboard` and `/api/providers` | an Authentik session in `cerulean-platform` | this is the surface that reads and writes provider credentials |
+
+`--skip-auth-route` is what draws that line. `/api/auth/login` is deliberately
+**not** on it: that is the dashboard's own password login, and exempting it would
+hand anyone holding that password a dashboard session that never touched
+Authentik — the group check would become decoration. Signing in is SSO first,
+then the dashboard password.
+
+So "reachable on the LAN" and "the dashboard is not exposed" are both true, and
+neither is achieved by changing the gateway's binding:
+
+```bash
+# from any machine on the LAN, inference with the key from .env
+curl -H "Authorization: Bearer $OMNIROUTE_API_KEY" http://192.168.1.10:20129/v1/models
+
+# or by the published name (DNS + TLS via Cerulean)
+OMNIROUTE_BASE_URL=https://gateway.olympus.innotel.us/v1
+```
+
+A client on another machine points `OMNIROUTE_BASE_URL` at either of those and
+uses the same key; nothing else about its setup changes.
+
 ## What was verified, and what was not
 
 Verified against the live deployment:
@@ -147,7 +181,11 @@ Verified against the live deployment:
 | Authentik accepts the client | `/authorize` answers `302` to the login flow — not `invalid_client` / unregistered `redirect_uri` |
 | `make gateway-sso-check` | ok — live on `127.0.0.1:20129`, `/` redirects to Authentik as client `omniroute` |
 | Proxy on the LAN | `/ping` → `200` from `192.168.1.10:20129` as well as loopback |
+| LAN inference | `http://192.168.1.10:20129/v1/models` → `200` with the API key, `401` without it |
+| LAN inference by name | `https://gateway.olympus.innotel.us/v1/models` → `200` with the key, `401` without |
+| LAN dashboard | `/dashboard`, `/login`, `/api/providers`, `/` all → `302` to Authentik from `192.168.1.10:20129` |
 | Gateway stays private | `http://192.168.1.10:20128/healthz` → no connection |
+| One OmniRoute only | one container, one listener on `20128`; the `olympus` container no longer publishes that port and no longer starts a bundled gateway |
 | `make gateway-edge` re-run | reports all three steps already done; writes nothing |
 | Scanner traffic | internet scanners that found the new name (it is minutes old) get the same `302` to Authentik, never the dashboard |
 
