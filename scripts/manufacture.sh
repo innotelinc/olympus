@@ -4,14 +4,32 @@
 #        SPEC=build-requests/foo.md ./scripts/manufacture.sh
 # If no spec given, picks the most recent build-requests/*.md (lexicographically last mtime).
 # Output is always ./builds (per .archon/config.yaml factory_settings.output_dir). Ignored by .gitignore.
+#
+# WHAT CHANGED AND WHY. This used to invoke
+# `factory.py run archon-greenfield`, and that command cannot succeed: the factory
+# only accepts workflows discovered inside its SHA-pinned Archon source, and it
+# refuses every action when that source is dirty. `archon-greenfield` was never part
+# of the pinned pack — upstream included — so the name had no implementation to point
+# at, in either `make app` or CI. The app builder is therefore a workflow in THIS
+# checkout (.archon/workflows/app/greenfield/), run through the Archon CLI directly:
+# the factory keeps owning issue → PR, and this owns spec → app.
+#
+# Env: ARCHON_BIN      the archon CLI to use (else core-modules/archon/bin/archon, else PATH)
+#      ARCHON_RUN_ARGS extra args for `archon workflow run` (e.g. --detach)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SPEC="${1:-${SPEC:-}}"
+WORKFLOW="archon-greenfield"
+
+say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m==>\033[0m %s\n' "$*" >&2; exit 1; }
 
 if [ -z "$SPEC" ]; then
   # Most recently modified md in build-requests/ excluding README.md
   SPEC="$(ls -t "$ROOT_DIR"/build-requests/*.md 2>/dev/null | grep -v README | head -n 1 || true)"
+  SPEC="${SPEC#"$ROOT_DIR"/}"
 fi
 
 if [ -z "$SPEC" ] || [ ! -f "$SPEC" ]; then
@@ -20,50 +38,56 @@ if [ -z "$SPEC" ] || [ ! -f "$SPEC" ]; then
   exit 2
 fi
 
-echo "==> manufacture: spec: $SPEC"
+say "manufacture: spec: $SPEC"
 
-# Ensure local gateway is up if possible (non-fatal if not)
-if [ -d "$ROOT_DIR/core-modules/omniroute" ] && ! curl -fsS -m 2 http://localhost:20128/healthz >/dev/null 2>&1; then
-  if [ -f "$ROOT_DIR/scripts/omniroute-vault.sh" ]; then
-    echo "==> OmniRoute not at http://localhost:20128 — attempting local gateway (non-blocking)" >&2
-    # Don't block; the factory will complain verbosely if unreachable.
+# --- the workflow --------------------------------------------------------------
+# One workflow, one name, and the checkout is the only place it can live.
+[ -f "$ROOT_DIR/.archon/workflows/app/greenfield/${WORKFLOW}.yaml" ] \
+  || die "manufacture: .archon/workflows/app/greenfield/${WORKFLOW}.yaml is missing from this checkout"
+
+# --- the CLI -------------------------------------------------------------------
+# Try the candidates in order and keep the first that actually answers, because a
+# path can exist without being usable (an unbuilt checkout, a partial clone) and
+# "the binary is present" is not the same claim as "the binary runs".
+candidates=()
+[ -n "${ARCHON_BIN:-}" ] && candidates+=("$ARCHON_BIN")
+candidates+=("$ROOT_DIR/core-modules/archon/bin/archon")
+command -v archon >/dev/null 2>&1 && candidates+=("$(command -v archon)")
+
+ARCHON=""
+for candidate in "${candidates[@]}"; do
+  if [ -x "$candidate" ] && "$candidate" --version >/dev/null 2>&1; then
+    ARCHON="$candidate"
+    break
   fi
+done
+
+if [ -z "$ARCHON" ]; then
+  warn "manufacture: no working archon CLI found. Tried: ${candidates[*]:-none}"
+  die "Run ./setup.sh (or ./scripts/bootstrap.sh) to install it — see docs/stack.md"
 fi
+say "manufacture: archon: $ARCHON"
 
-# Prefer the CI's argv contract if factory binary exists; otherwise fail clearly.
-FACTORY_BIN="$ROOT_DIR/core-modules/ai-software-factory/bin/factory.py"
-if [ -f "$FACTORY_BIN" ]; then
-  # The factory refuses to run until its Archon integration is pinned. Pin it
-  # from the factory's own manifest (scripts/factory-pin.sh) rather than letting
-  # the run fail with "Integration pin required". That script refuses on a dirty
-  # tree, because init installs managed files over this checkout — including
-  # factory/doctor.py, which the compose healthcheck depends on.
-  if [ -x "$ROOT_DIR/scripts/factory-pin.sh" ]; then
-    "$ROOT_DIR/scripts/factory-pin.sh" || {
-      echo "manufacture: could not pin the factory's Archon integration — see above" >&2
-      exit 1
-    }
+# --- the gateway ----------------------------------------------------------------
+# Checked BEFORE the run, not during it: a build that dies 20 minutes in because the
+# model gateway was never up has burned the run to learn something a two-second probe
+# knows up front.
+if [ -n "${OMNIROUTE_BASE_URL:-}" ]; then
+  health="${OMNIROUTE_BASE_URL%/v1}/healthz"
+  if ! curl -fsS -m 5 "$health" >/dev/null 2>&1; then
+    warn "manufacture: gateway is not answering at $health"
+    die "Start it (docker compose up -d omniroute, or ./setup.sh) — the build step needs it"
   fi
-  python3 "$FACTORY_BIN" run archon-greenfield \
-    --input spec="$SPEC" \
-    --output="$ROOT_DIR/builds" \
-    --detach --json
+  say "manufacture: gateway: $health"
 else
-  echo "manufacture: $FACTORY_BIN not found — run ./setup.sh first (clones ai-software-factory)" >&2
-  # Local shim: still stage the spec into builds/ so the operator sees progress outside CI
-  mkdir -p "$ROOT_DIR/builds"
-  base="$(basename "$SPEC" .md)"
-  dest="$ROOT_DIR/builds/$base"
-  mkdir -p "$dest"
-  cp "$SPEC" "$dest/SPEC.md"
-  cat > "$dest/README.md" <<EOF
-# $base (manufactured stub)
-
-Spec: \`$SPEC\` — full greenfield run requires \`core-modules/ai-software-factory/bin/factory.py\`.
-
-Run \`./setup.sh\` to fetch the factory, then \`./scripts/manufacture.sh $SPEC\` again.
-EOF
-  echo "manufacture: stub written to $dest (run ./setup.sh to enable full factory)" >&2
-  ls -la "$dest" >&2
-  exit 0
+  warn "manufacture: OMNIROUTE_BASE_URL is unset — the agent will use its own default gateway"
 fi
+
+# --- run ------------------------------------------------------------------------
+# Foreground by default, so `make app` returns having actually built the app. Pass
+# ARCHON_RUN_ARGS=--detach for a long build you would rather poll.
+# shellcheck disable=SC2086
+"$ARCHON" workflow run "$WORKFLOW" --no-worktree \
+  --input spec="$SPEC" ${ARCHON_RUN_ARGS:-}
+
+say "manufacture: done — output under $(sed -n 's/^  output_dir: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$ROOT_DIR/.archon/config.yaml" | head -1 || echo ./builds)"

@@ -79,14 +79,13 @@ jobs:
         run: |
           echo "$TELEGRAM_BOT_TOKEN" | ./setup.sh
 
-      # Without this the factory aborts with "Integration pin required", which is
-      # what every previous run did. The revision is read from the factory's own
-      # manifest by the script, so there is no second copy to drift.
-      - name: 📌 Pin the Archon Integration
+      # The coding agent itself. setup.sh provisions the core modules, the archon CLI
+      # and the gateway, but not the agent — and the build step has nothing to run
+      # without it. ("./scripts/bootstrap.sh" installs it too; this is the one piece
+      # app manufacturing needs from it.)
+      - name: 🤖 Install the Coding Agent (Codex)
         if: steps.spec.outputs.found == 'true'
-        run: |
-          set -euo pipefail
-          ./scripts/factory-pin.sh
+        run: npm install -g @openai/codex
 
       - name: 🌐 Initialize Background Cloud Gateway (OmniRoute)
         if: steps.spec.outputs.found == 'true'
@@ -95,17 +94,31 @@ jobs:
           npm run start &
           sleep 5
 
-      - name: 🚀 Manufacture Standalone App from Specification
+      # NO FACTORY PIN STEP. App manufacturing does not go through the factory's
+      # pinned SDLC source, and cannot: `factory.py run` only accepts workflows it
+      # discovers inside that source, and refuses every command when the source is
+      # dirty — so an app builder has no home there. It lives in this checkout
+      # (.archon/workflows/app/greenfield/) and runs through the archon CLI. Dropping
+      # the pin also drops the `factory init` it performed, which overwrote
+      # factory/doctor.py — the file the olympus container's healthcheck runs.
+      #
+      # `scripts/manufacture.sh` is the SAME command `make app` runs, so the two
+      # cannot drift into different behaviours.
+      - name: 🚀 Manufacture App from Specification
         if: steps.spec.outputs.found == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SPECS: ${{ steps.spec.outputs.specs }}
+          OMNIROUTE_BASE_URL: http://127.0.0.1:20128/v1
+          OMNIROUTE_MODEL: auto/coding
+          # Concrete model for the build node's retry. See .env.example: the gateway
+          # pins native Codex turns to a combo member that the free tier cannot
+          # authenticate, so the primary model alone cannot complete a build everywhere.
+          OMNIROUTE_MODEL_FALLBACK: oc/big-pickle
+          OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
         run: |
           set -euo pipefail
           for spec in $SPECS; do
             echo "Manufacturing from $spec"
-            python3 core-modules/ai-software-factory/bin/factory.py run archon-greenfield \
-              --input spec="$spec" \
-              --output="./builds" \
-              --detach --json
+            ./scripts/manufacture.sh "$spec"
           done

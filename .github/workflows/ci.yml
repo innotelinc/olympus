@@ -55,6 +55,20 @@ jobs:
           python3 -c "compile(open('/tmp/studio-token-snippet.py').read(), 'snippet', 'exec')"
           python3 -m compileall -q factory harness 2>/dev/null || echo "nothing to compile — ok"
 
+      - name: App-builder workflow checks
+        run: |
+          set -euo pipefail
+          # The greenfield app builder runs these as `archon workflow run` script nodes.
+          # A syntax error here is only discovered by a model run that costs minutes, so
+          # it is worth catching at compile time instead.
+          WF=.archon/workflows/app/greenfield
+          [ -f "$WF/archon-greenfield.yaml" ] || { echo "::error::missing $WF/archon-greenfield.yaml"; exit 1; }
+          python3 -m compileall -q "$WF/scripts"
+          # Every script the YAML references must exist, or the node fails at run time.
+          for s in load-spec build-app verify-app record; do
+            [ -f "$WF/scripts/$s.py" ] || { echo "::error::missing script node $s ($WF/scripts/$s.py)"; exit 1; }
+          done
+
   secrets:
     name: Credential scan
     runs-on: ubuntu-latest
