@@ -999,6 +999,104 @@ pre.code-body {
   text-align: center;
 }
 
+/* ---- what to build (app vs website) ------------------------------------ */
+
+.kind-picker {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  align-self: flex-start;
+}
+
+.kind-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius) - 3px);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.kind-option em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+.kind-option:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.kind-option.current {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.kind-option.current em {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.kind-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.kind-hint {
+  margin-top: -4px;
+  max-width: 62ch;
+}
+
+/* A website's preview slot. Not an error state — the site is fine, it simply has
+   no browser-runnable form until it has been built — so it is a panel rather than
+   an alert, and it says which control produces the thing that does render. */
+.site-note {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 52ch;
+  margin: auto;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  text-align: left;
+}
+
+.site-note strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.site-note span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.site-note em {
+  color: var(--text);
+  font-style: normal;
+}
+
+.site-note code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+}
+
 /* ---- responsive -------------------------------------------------------- */
 
 @media (max-width: 1000px) {

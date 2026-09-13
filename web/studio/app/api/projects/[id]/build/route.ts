@@ -65,6 +65,7 @@ export async function GET(request: Request, context: Context): Promise<Response>
       build: latestBuildStatus(slug),
       history: listBuildHistory(slug),
       runner: readRunnerState(),
+      kind: project.kind,
       next: `make app SPEC=build-requests/${slug}.md`,
     },
     { headers: NO_STORE },
@@ -85,19 +86,24 @@ export async function POST(request: Request, context: Context): Promise<Response
 
   // `{ "replace": true }` is the operator agreeing to overwrite an existing spec
   // and/or an existing `builds/<slug>`. Without it, either existing artifact is a
-  // conflict rather than something quietly destroyed.
+  // conflict rather than something quietly destroyed. `{ "publish": true }` is
+  // the separate decision to stage the built site for the host to serve, and it
+  // only means anything for a website.
   let replace = false;
+  let publish = false;
   try {
     const payload = (await request.json()) as unknown;
     if (typeof payload === "object" && payload !== null) {
-      replace = (payload as Record<string, unknown>).replace === true;
+      const body = payload as Record<string, unknown>;
+      replace = body.replace === true;
+      publish = body.publish === true;
     }
   } catch {
     /* no body */
   }
 
   try {
-    const queued = queueBuild(project, { replace });
+    const queued = queueBuild(project, { replace, publish });
     return Response.json(
       {
         job: queued.job,
@@ -106,7 +112,12 @@ export async function POST(request: Request, context: Context): Promise<Response
         replaced: queued.replaced,
         runner: queued.runner,
         build: readBuildStatus(queued.job),
-        next: `make app SPEC=${queued.spec}`,
+        // What the runner will actually do, said out loud — a website build ends
+        // with a packaging step an app's never has.
+        next:
+          queued.kind === "website"
+            ? `make app SPEC=${queued.spec} && python3 scripts/package-website.py ${queued.slug}${queued.publish ? " --publish" : ""}`
+            : `make app SPEC=${queued.spec}`,
       },
       { status: 202, headers: NO_STORE },
     );

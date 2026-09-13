@@ -113,8 +113,15 @@ services:
       # (scripts/build-runner.py, olympus-build-runner.service) picks it up where
       # the toolchain actually is. The runner re-validates every field.
       STUDIO_BUILD_QUEUE_DIR: ${STUDIO_BUILD_QUEUE_DIR:-/app/build-queue}
+      # Where packaged website builds land (`builds/<slug>/site.zip`, written by
+      # scripts/package-website.py). Read-only and optional: with it mounted, the
+      # download button serves the exact archive the publish step staged; without
+      # it, Studio falls back to zipping the saved source itself.
+      STUDIO_BUILDS_DIR: ${STUDIO_BUILDS_DIR:-/app/builds}
     volumes:
       - studio-data:/app/data
+      # The packaged builds, read-only. Only the archive route reads this.
+      - ./builds:/app/builds:ro
       # The factory handoff. "Export to factory" writes a spec into this
       # directory, which is the repo's build-requests/ — the same place
       # `make app SPEC=…` reads and the CI builder watches on push. Studio runs
@@ -145,6 +152,43 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # Static sites — what Studio's "Build & publish" serves (opt-in, profile `sites`).
+  #
+  # `scripts/package-website.py --publish` stages a built site under
+  # `OLYMPUS_SITES_ROOT` (default /var/lib/olympus/sites); this serves that tree so
+  # the staged copy is reachable without anyone installing a web server by hand.
+  #
+  # Host networking for the same reason the SSO proxy uses it: the NPM edge lives
+  # on another host (192.168.1.71) and has to reach back to a LAN address, and
+  # `network_mode: host` is what makes that address exist. It binds ONE port —
+  # ${SITE_PORT:-20130} — on every interface, so a site staged here is readable by
+  # anything that can route to this host. That is the intent: a published site is
+  # meant to be public. Nothing else about this container is exposed; it has no
+  # shell access to the repo and the sites tree is mounted read-only.
+  #
+  # This is a plain static file server with no auth. Sites published here are open
+  # to the LAN on purpose, and the name they answer on is what makes them public.
+  # If a site needs to be private, do not publish it — Studio's zip download is the
+  # delivery path for that.
+  sites:
+    image: nginx:1.27-alpine
+    container_name: olympus-sites
+    profiles: ["sites"]
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # One substitution only — see the header of the template. Without the filter,
+      # envsubst would blank nginx's own `$uri` in try_files.
+      SITE_PORT: ${SITE_PORT:-20130}
+      NGINX_ENVSUBST_FILTER: SITE_PORT
+    volumes:
+      - ${OLYMPUS_SITES_ROOT:-/var/lib/olympus/sites}:/srv/sites:ro
+      # Named `default.conf.template` on purpose: the image's entrypoint renders
+      # templates to /etc/nginx/conf.d/<same name>, so this replaces the stock
+      # default.conf instead of sitting beside it. Laid down under any other name
+      # nginx would keep serving :80 as well.
+      - ./deploy/nginx-sites.conf.template:/etc/nginx/templates/default.conf.template:ro
 
   # OmniRoute — the model gateway, brought inside the stack (opt-in).
   #

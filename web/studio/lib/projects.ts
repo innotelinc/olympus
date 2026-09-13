@@ -37,9 +37,33 @@ export type StoredFile = {
   contents: string;
 };
 
+/**
+ * What is being built. Two kinds, because they are two different products with
+ * two different delivery paths — not one product with an option.
+ *
+ * `app` is the original Studio contract: self-contained HTML/CSS/JS that runs the
+ * moment it renders, inlined into a sandboxed iframe with no network and no build
+ * step. It is finished when it is generated.
+ *
+ * `website` is a Vite + React + TypeScript project. It cannot run from source —
+ * JSX needs a build — so it is finished when it has been *packaged* (`dist/`) on
+ * the runner, and its delivery is a zip or a published site rather than a saved
+ * library entry. Keeping the kind on the project is what lets every later step
+ * (which prompt, what the preview shows, what the publisher copies, what
+ * "export to factory" writes) decide correctly without re-detecting it.
+ */
+export type ProjectKind = "app" | "website";
+
+export const PROJECT_KINDS: readonly ProjectKind[] = ["app", "website"];
+
+export function parseKind(value: unknown): ProjectKind {
+  return value === "website" ? "website" : "app";
+}
+
 export type Project = {
   id: string;
   title: string;
+  kind: ProjectKind;
   /** The instruction that produced (or last revised) this app. */
   prompt: string;
   files: StoredFile[];
@@ -50,6 +74,7 @@ export type Project = {
 export type ProjectSummary = {
   id: string;
   title: string;
+  kind: ProjectKind;
   updatedAt: string;
   fileCount: number;
 };
@@ -222,6 +247,10 @@ function parseProject(value: unknown): Project | null {
   return {
     id: record.id.trim(),
     title: parseTitle(record.title) || "Untitled app",
+    // Absent on every project stored before the split, which is precisely why it
+    // defaults rather than being required: an old record must keep working, and
+    // "app" is what it was.
+    kind: parseKind(record.kind),
     prompt: typeof record.prompt === "string" ? record.prompt : "",
     files,
     createdAt: typeof record.createdAt === "string" ? record.createdAt : updatedAt,
@@ -269,6 +298,7 @@ export function listProjects(namespace: string): ProjectSummary[] {
     summaries.push({
       id: project.id,
       title: project.title,
+      kind: project.kind,
       updatedAt: project.updatedAt,
       fileCount: project.files.length,
     });
@@ -321,6 +351,10 @@ export function saveProject(namespace: string, input: Record<string, unknown>): 
   const project: Project = {
     id: existing?.id ?? newProjectId(),
     title: parseTitle(input.title) || existing?.title || "Untitled app",
+    // A revision keeps the kind it was created with unless told otherwise: the
+    // files on screen were written against that contract, and silently switching
+    // it would leave a project whose body contradicts its label.
+    kind: input.kind === undefined ? (existing?.kind ?? "app") : parseKind(input.kind),
     prompt: prompt || existing?.prompt || "",
     files,
     createdAt: existing?.createdAt ?? timestamp,

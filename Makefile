@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-check
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -206,6 +206,62 @@ gateway-sso-check: ## Confirm the proxy redirects to Authentik instead of servin
 		echo "sso: FAILED — redirect names a different client than GATEWAY_OIDC_CLIENT_ID" >&2; exit 1; \
 	fi; \
 	echo "sso: ok — / redirects to $$base/application/o/authorize/ as client '$$client'"
+
+# ---- Published websites (Studio "Build & publish") ----------------------------
+# A Studio *app* is finished when it is generated; a Studio *website* is finished
+# when it has been built. These targets are that second step, in the order it has
+# to happen: package (source → dist) then publish (staged tree → a name).
+#
+# The pieces are separate on purpose. Packaging is deterministic and testable and
+# works with no configuration at all; publishing needs Cerulean and the edge, and
+# failing there must not throw away a good build.
+
+sites-up: ## Start the static site server for staged sites (compose profile `sites`)
+	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi
+	docker compose --profile sites up -d sites
+
+sites-down: ## Stop the static site server (staged sites are left on disk)
+	docker compose --profile sites rm -sf sites
+
+site-package: ## Build a Studio website into a servable dist/ and stage it (SLUG=<slug>)
+	@if [ -z "$(SLUG)" ]; then echo "usage: make site-package SLUG=<slug>" >&2; exit 2; fi
+	python3 scripts/package-website.py $(SLUG) --publish
+
+# Package, then put the result on a name. The forward address defaults to the same
+# LAN address the gateway's edge uses, and the port defaults to SITE_PORT — one
+# variable, read by both this target and the nginx template, so the edge and the
+# server cannot disagree about where a site answers.
+#
+# HOST is optional: with SITE_HOST_SUFFIX set, the name defaults to <slug>.<suffix>.
+site-publish: ## Stage a website and publish its public name (SLUG=<slug>, HOST=<name>)
+	@if [ -z "$(SLUG)" ]; then echo "usage: make site-publish SLUG=<slug> [HOST=<name>]" >&2; exit 2; fi; \
+	read_env() { sed -n "s/^$$1=//p" .env 2>/dev/null | tail -1 | tr -d "'\" "; }; \
+	host="$(HOST)"; \
+	suffix="$$(read_env SITE_HOST_SUFFIX)"; \
+	if [ -z "$$host" ]; then \
+		if [ -z "$$suffix" ]; then echo "set HOST=<name> or SITE_HOST_SUFFIX in .env" >&2; exit 2; fi; \
+		host="$(SLUG).$$suffix"; \
+	fi; \
+	forward="$$(read_env SITE_EDGE_FORWARD_HOST)"; \
+	if [ -z "$$forward" ]; then echo "SITE_EDGE_FORWARD_HOST is empty — set this host's LAN address, or the edge would publish a name that answers nothing" >&2; exit 2; fi; \
+	port="$$(read_env SITE_PORT)"; port="$${port:-20130}"; \
+	echo "packaging $(SLUG)"; \
+	python3 scripts/package-website.py "$(SLUG)" --publish || exit $$?; \
+	echo "publishing $$host → $$forward:$$port"; \
+	python3 scripts/cerulean-edge.py --fqdn "$$host" --forward-host "$$forward" --forward-port "$$port" $(ARGS)
+
+# The assertion that publishing actually published: the name is served by the
+# edge, from this host's staged tree, and the entry point is the built site
+# rather than the edge's error page. A name that 502s or 404s passes "the record
+# exists" and fails this, which is the difference worth checking.
+site-check: ## Confirm a published site answers with its own index.html (HOST=<name>)
+	@if [ -z "$(HOST)" ]; then echo "usage: make site-check HOST=<name>" >&2; exit 2; fi; \
+	code=$$(curl -s -o /tmp/site-check.html -w '%{http_code}' -m 15 "https://$(HOST)/" || true); \
+	if [ "$$code" != "200" ]; then echo "site: FAILED — HTTP $$code from https://$(HOST)/" >&2; exit 1; fi; \
+	if ! grep -qi '<div id="root"\|<script\|<html' /tmp/site-check.html; then \
+		echo "site: FAILED — https://$(HOST)/ answered 200 but not with a page" >&2; exit 1; \
+	fi; \
+	echo "site: ok — https://$(HOST)/ serves a built page"
 
 docker-shell: ## Shell into the running Olympus container
 	docker compose exec olympus bash
