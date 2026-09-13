@@ -132,11 +132,27 @@ class TestEnvAllowList(unittest.TestCase):
         # The workflow's script nodes declare `runtime: uv`; systemd's default
         # PATH does not include it, and the failure reads as a workflow bug.
         env = runner.allowed_env({}, {"PATH": "/usr/bin"})
-        self.assertIn("/root/.local/bin", env["PATH"].split(":"))
+        self.assertIn("/usr/local/bin", env["PATH"].split(":"))
+
+    def test_extra_path_is_configurable(self) -> None:
+        # The runner is no longer root, so a per-user install like
+        # /root/.local/bin is unreadable to the account that runs builds. The
+        # installer points this at wherever it published uv instead.
+        previous = os.environ.get("BUILD_EXTRA_PATH")
+        os.environ["BUILD_EXTRA_PATH"] = "/opt/uv/bin:/usr/local/bin"
+        try:
+            env = runner.allowed_env({}, {"PATH": "/usr/bin"})
+        finally:
+            if previous is None:
+                os.environ.pop("BUILD_EXTRA_PATH", None)
+            else:
+                os.environ["BUILD_EXTRA_PATH"] = previous
+        self.assertIn("/opt/uv/bin", env["PATH"].split(":"))
+        self.assertNotIn("/root/.local/bin", env["PATH"].split(":"))
 
     def test_path_is_not_duplicated(self) -> None:
-        env = runner.allowed_env({}, {"PATH": "/root/.local/bin:/usr/bin"})
-        self.assertEqual(env["PATH"].count("/root/.local/bin"), 1)
+        env = runner.allowed_env({}, {"PATH": "/usr/local/bin:/usr/bin"})
+        self.assertEqual(env["PATH"].count("/usr/local/bin"), 1)
 
 
 class TestResolveSpec(RepoFixture):
@@ -431,6 +447,48 @@ class TestProcess(RepoFixture):
         self.assertIsNotNone(status["started_at"])
         self.assertIsNotNone(status["finished_at"])
         self.assertIn("manufacture: done", status["log_tail"])
+
+    def test_a_cancelled_build_is_recorded_as_cancelled(self) -> None:
+        # The marker is dropped by the build itself, which is exactly how a click
+        # in Studio arrives: a file in the shared directory, seen by the next poll.
+        marker = self.queue / f"0123456789abcdef{runner.CANCEL_SUFFIX}"
+        self.fake_manufacture(
+            "set -euo pipefail\n"
+            f"touch {marker}\n"
+            "mkdir -p builds/todo\n"
+            "sleep 120\n"
+        )
+
+        began = time.monotonic()
+        self.enqueue()
+        elapsed = time.monotonic() - began
+        status = self.status()
+
+        self.assertEqual(status["state"], "cancelled")
+        # It stopped the tree instead of waiting out the sleep — a cancel that
+        # only kills the shell leaves the agent running.
+        self.assertLess(elapsed, 30, "the cancel waited for the build to finish")
+        # Nothing half-built is left to block the next attempt.
+        self.assertFalse((self.repo / "builds" / "todo").exists())
+        # The marker is consumed, so it cannot cancel a later job.
+        self.assertFalse(marker.exists())
+
+    def test_a_stale_cancel_marker_does_not_cancel_the_next_build(self) -> None:
+        # A marker for a job id the runner is only now claiming is not a request
+        # to stop this run; clearing it at claim time is what makes that true.
+        marker = self.queue / f"0123456789abcdef{runner.CANCEL_SUFFIX}"
+        marker.write_text("{}", encoding="utf-8")
+        self.fake_manufacture(
+            "set -euo pipefail\n"
+            "mkdir -p builds/todo\n"
+            'printf %s \'{"artifact":{"dir":"builds/todo","files":1,"bytes":1,"entry":"index.html"}}\' '
+            "> builds/todo/MANIFEST.json\n"
+        )
+
+        self.enqueue()
+
+        self.assertEqual(self.status()["state"], "succeeded")
+        self.assertFalse(marker.exists())
 
     def test_a_failing_build_is_recorded_as_failed(self) -> None:
         self.fake_manufacture('echo "boom" >&2\nexit 3\n')
