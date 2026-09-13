@@ -20,7 +20,7 @@ Olympus is a deterministic issue → PR factory for the repo it lives in: Archon
 
 | Area | Change |
 | --- | --- |
-| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files → live preview, Authentik OIDC sign-in, sandboxed output, saved apps scoped to the signed-in identity, and an **Export to factory** path that writes a `build-requests/` spec from a saved build (`make app SPEC=…`, or commit it and let CI manufacture). Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
+| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files → live preview, Authentik OIDC sign-in, sandboxed output, saved apps scoped to the signed-in identity, a **Build it** button that runs `make app` for real on the host runner and reports its progress, and an **Export to factory** path that writes a `build-requests/` spec from a saved build (`make app SPEC=…`, or commit it and let CI manufacture). Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
 | **SecretOps** | Infisical is **replaced by Cerulean Vault** (KV v2). The `infisical://` reference convention becomes `vault://`, and the bootstrap helper is now `scripts/omniroute-vault.sh` (was `scripts/omniroute-infisical.sh`). |
 | **Compose** | `compose.vault.yml` runs Vault locally; `compose.host-gateway.yml` is a host-network override for when the gateway is published on loopback only. |
 | **Factory** | `factory/doctor.py` and `factory/trigger.py` are published and report the factory's **real** state (no simulated poll loop); CI pins the Archon integration and only manufactures a real new spec. |
@@ -85,6 +85,16 @@ make studio-install                # install web/studio dependencies (npm ci)
 make studio-dev                    # dev server → http://localhost:3001
 make studio-test                   # vitest: parser, gateway route, OIDC flow, saved apps
 make studio-export-dir             # let Studio write build-requests/ specs (uid 1001)
+make studio-build-queue-dir        # let Studio queue builds (uid 1001)
+
+# "Build it": Studio's build runs on the host, not in its own container.
+# Studio's image is a traced Next.js bundle — no Archon CLI, no Codex CLI, no
+# checkout — so it queues a request and this service, which runs where the
+# toolchain is, executes the same command `make app` does and records the result.
+sudo make build-runner-install     # systemd service (idempotent; --uninstall to remove)
+make build-runner-check            # what the runner will use: gateway, model, tools
+make build-runner-list             # the queue, and where each build got to
+make test-runner                   # the runner's unit tests
 
 # or inside the stack
 docker compose up -d studio

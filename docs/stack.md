@@ -46,6 +46,7 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 | Telegram interface | Hermes 3 via OpenRouter Free through OmniRoute | Interactive bot that parses intent into Archon DAG runs |
 | Coding brain | Codex (`auto/coding`) via OmniRoute Responses API (`wire_api = "responses"`) | Repository code modifications dispatched by the factory consumer + harness E2E (`omniroute launch-codex -p auto-coding`) |
 | `web/studio/` | Next.js (App Router) + Authentik OIDC | Browser vibe-coding surface — prompt in, runnable app out, gateway key held server-side; saved apps are scoped per identity (OIDC subject) on the stack's own volume |
+| Build runner (`scripts/build-runner.py`) | Python + systemd (`olympus-build-runner.service`) | Executes `make app` for builds Studio queues. Studio's image carries no toolchain, so the queue file is the whole interface — and the runner treats it as untrusted input |
 
 > **Known gateway behaviour — a combo turn pins.** `auto/coding` is a *combo*, and the
 > gateway pins a native Codex turn to whichever member served the first turn
