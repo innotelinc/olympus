@@ -26,6 +26,7 @@ import {
   verifyIdToken,
 } from "@/lib/auth";
 import { startMockOidc, type MockOidc } from "./helpers/mock-oidc";
+import { withPlan } from "./helpers/plan";
 
 // Neutralize the repo-.env loader: `delete process.env[key]` is not isolation,
 // because loadRepoEnv() reads the key straight back off disk. Without this the
@@ -534,7 +535,7 @@ describe("route protection", () => {
       new Request("http://studio.test/api/generate", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: "a counter" }),
+        body: withPlan({ prompt: "a counter" }),
       }),
     );
     expect(blocked.status).toBe(401);
@@ -543,7 +544,7 @@ describe("route protection", () => {
       new Request("http://studio.test/api/generate", {
         method: "POST",
         headers: { "content-type": "application/json", cookie: `${SESSION_COOKIE}=${sessionCookie}` },
-        body: JSON.stringify({ prompt: "a counter" }),
+        body: withPlan({ prompt: "a counter" }),
       }),
     );
     expect(allowed.status).toBe(200);
@@ -649,7 +650,7 @@ describe("group policy", () => {
       new Request("http://studio.test/api/generate", {
         method: "POST",
         headers: { "content-type": "application/json", cookie: `${SESSION_COOKIE}=${sessionCookie}` },
-        body: JSON.stringify({ prompt: "a counter" }),
+        body: withPlan({ prompt: "a counter" }),
       }),
     );
     expect(revoked.status).toBe(403);
@@ -664,7 +665,7 @@ describe("group policy", () => {
       new Request("http://studio.test/api/generate", {
         method: "POST",
         headers: { "content-type": "application/json", cookie: `${SESSION_COOKIE}=${sessionCookie}` },
-        body: JSON.stringify({ prompt: "a counter" }),
+        body: withPlan({ prompt: "a counter" }),
       }),
     );
     expect(restored.status).toBe(200);

@@ -1,16 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  APP_SYSTEM_PROMPT,
   GatewayError,
-  WEBSITE_SYSTEM_PROMPT,
-  buildMessages,
   chatCompletionsUrl,
   chooseModel,
   completeChat,
   findModel,
   isPlaceholderSecret,
   listModels,
-  missingEntryPoint,
   parseModels,
   readConfig,
   resetModelCache,
@@ -97,138 +93,6 @@ describe("chatCompletionsUrl", () => {
         model: "auto/coding",
       }),
     ).toBe("http://omniroute:20128/v1/chat/completions");
-  });
-});
-
-describe("buildMessages", () => {
-  it("puts the system contract first and the instruction last", () => {
-    const messages = buildMessages("a counter", [], "app");
-    expect(messages).toHaveLength(2);
-    expect(messages[0].role).toBe("system");
-    expect(messages.at(-1)).toEqual({ role: "user", content: "a counter" });
-  });
-
-  it("includes prior files so an iteration has context", () => {
-    const messages = buildMessages(
-      "add a weekly total",
-      [
-        { path: "src/App.tsx", contents: "export default () => null;" },
-        { path: "server/schema.sql", contents: "CREATE TABLE IF NOT EXISTS entries (id INTEGER);" },
-      ],
-      "app",
-    );
-    expect(messages).toHaveLength(3);
-    const context = messages[1].content;
-    expect(context).toContain('<file path="src/App.tsx">');
-    expect(context).toContain('<file path="server/schema.sql">');
-    expect(messages.at(-1)?.content).toBe("add a weekly total");
-  });
-
-  // An iteration is an addition, and the wording is what stops the model treating
-  // it as a licence to write a fresh app — which is how a data model and ten turns
-  // of features get thrown away by a request to change a colour.
-  it("frames an iteration as adding on, not as starting over", () => {
-    const messages = buildMessages(
-      "darker header",
-      [{ path: "src/App.tsx", contents: "x" }],
-      "app",
-    );
-    expect(messages[1].content).toContain("Develop it further");
-    expect(messages[1].content).toContain("keep every table, column and feature");
-  });
-
-  // The whole point of threading `kind` this far: the system message is the only
-  // thing that tells the model which of two incompatible products it is making,
-  // and a caller that sent the wrong one would produce a page that looks like a
-  // plugin failure rather than a wrong argument.
-  it("sends the website contract for a website, not the app one", () => {
-    const website = buildMessages("a landing page", [], "website");
-    expect(website[0].content).toBe(WEBSITE_SYSTEM_PROMPT);
-    expect(website[0].content).toContain("src/App.tsx");
-    expect(website[0].content).not.toContain("Always include index.html");
-  });
-
-  it("calls a website's prior files a site, not an app", () => {
-    const messages = buildMessages(
-      "darker",
-      [{ path: "src/App.tsx", contents: "export default () => null;" }],
-      "website",
-    );
-    expect(messages[1].content).toContain("Current version of the site:");
-  });
-
-  it("keeps the full-stack contract for an app", () => {
-    const messages = buildMessages("a tracker", [], "app");
-    expect(messages[0].content).toBe(APP_SYSTEM_PROMPT);
-    expect(messages[0].content).toContain("FULL-STACK APPLICATION");
-    expect(messages[0].content).toContain("server/schema.sql");
-    // The generated server, and the API it derives from the schema, are the part
-    // the model must not invent — the prompt has to say what they already do.
-    expect(messages[0].content).toContain("GET /api/<table>");
-    expect(APP_SYSTEM_PROMPT).not.toContain("Always include index.html");
-  });
-});
-
-describe("missingEntryPoint", () => {
-  it("needs both the interface and the data model for an app", () => {
-    const client = { path: "src/App.tsx", contents: "x" };
-    const schema = { path: "server/schema.sql", contents: "CREATE TABLE IF NOT EXISTS a (id INTEGER);" };
-
-    expect(missingEntryPoint([client, schema], "app")).toBeNull();
-    // An app with no schema is an app with no API at all: the generated server
-    // derives every endpoint from the tables, so there is nothing to serve.
-    expect(missingEntryPoint([client], "app")).toBe("server/schema.sql");
-    expect(missingEntryPoint([schema], "app")).toBe("src/App.tsx");
-    // What the old one-page app emitted is not an app under this contract.
-    expect(missingEntryPoint([{ path: "index.html", contents: "" }], "app")).toBe("src/App.tsx");
-  });
-
-  it("needs src/App.tsx for a website, and does not accept index.html for it", () => {
-    expect(missingEntryPoint([{ path: "src/App.tsx", contents: "" }], "website")).toBeNull();
-    // A website that emitted an index.html instead is a website that will fail to
-    // package, so this has to be reported rather than accepted.
-    expect(missingEntryPoint([{ path: "index.html", contents: "" }], "website")).toBe(
-      "src/App.tsx",
-    );
-  });
-});
-
-describe("WEBSITE_SYSTEM_PROMPT", () => {
-  it("pins the contract the packaging step relies on", () => {
-    expect(WEBSITE_SYSTEM_PROMPT).toContain('<file path="src/App.tsx">');
-    expect(WEBSITE_SYSTEM_PROMPT).toContain("NO DEPENDENCIES");
-    // The scaffold owns these; a model that emits them changes nothing but its own
-    // output length, and the prompt has to say so or it will try.
-    for (const owned of ["package.json", "vite.config.ts", "tsconfig.json", "src/main.tsx"]) {
-      expect(WEBSITE_SYSTEM_PROMPT).toContain(owned);
-    }
-  });
-});
-
-describe("APP_SYSTEM_PROMPT", () => {
-  it("pins the output contract the parser depends on", () => {
-    expect(APP_SYSTEM_PROMPT).toContain('<file path="src/App.tsx">');
-    expect(APP_SYSTEM_PROMPT).toContain("server/schema.sql");
-  });
-
-  it("names the files the packager owns, so the model does not write them", () => {
-    for (const owned of ["package.json", "vite.config.ts", "tsconfig.json", "src/main.tsx", "server/main.ts", "Dockerfile"]) {
-      expect(APP_SYSTEM_PROMPT).toContain(owned);
-    }
-    expect(APP_SYSTEM_PROMPT).toContain("Do not emit");
-  });
-
-  it("describes the API exactly as the generated server implements it", () => {
-    // These two are the contract between the prompt and scripts/package-app.py.
-    // A drift here is a client that calls an endpoint that does not exist.
-    expect(APP_SYSTEM_PROMPT).toContain("POST /api/<table>");
-    expect(APP_SYSTEM_PROMPT).toContain("PATCH /api/<table>/<id>");
-    expect(APP_SYSTEM_PROMPT).toContain("DELETE /api/<table>/<id>");
-    expect(APP_SYSTEM_PROMPT).toContain("{ \"data\"");
-  });
-
-  it("forbids dependencies, because there is no package to add one to", () => {
-    expect(APP_SYSTEM_PROMPT).toContain("NO DEPENDENCIES");
   });
 });
 

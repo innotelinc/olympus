@@ -14,6 +14,7 @@ import {
   resetRateLimits,
   writeRateLimitOverride,
 } from "@/lib/ratelimit";
+import { withPlan } from "./helpers/plan";
 
 // The routes call loadRepoEnv(), which reads the repo-root .env; `delete
 // process.env[k]` is not isolation because the loader puts it back from disk.
@@ -268,7 +269,7 @@ describe("the override governs /api/generate", () => {
       new Request("http://studio.test/api/generate", {
         method: "POST",
         headers: { "content-type": "application/json", ...headers },
-        body: JSON.stringify({ prompt: "a counter" }),
+        body: withPlan({ prompt: "a counter" }),
       }),
     );
   }

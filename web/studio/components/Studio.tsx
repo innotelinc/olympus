@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { BuildLog, BuildStatus, RunnerState } from "@/lib/build-queue";
-import { currentFileFrom, parseFiles, type GeneratedFile } from "@/lib/files";
+import { currentFileFrom, mergeFiles, parseFiles, type GeneratedFile } from "@/lib/files";
+import { missingPlannedFiles, type BuildPlan } from "@/lib/plan";
 import type { ProjectKind } from "@/lib/projects";
 import CodeView from "./CodeView";
 
@@ -33,11 +34,28 @@ const EXAMPLES = [
  * alone, and picking wrong costs a whole generation.
  */
 const KIND_HELP: Record<ProjectKind, string> = {
-  app: "A full-stack application: React client, its own API and a SQLite database, run as its own container. It saves what people enter. Package it, run it, publish it on a name.",
-  website: "A React + TypeScript site (Vite) with no server and no data — a brochure, a landing page, a portfolio. It is packaged into dist/ and served as static files.",
+  app: "An application runs on a server and keeps state: what someone enters today is there tomorrow, from another device. It gets its own container and its own name.",
+  website: "A website is static content served over HTTP — pages, styling, images. There is nowhere for an entry to be written down, so a form on one is decoration.",
+};
+
+/**
+ * How each kind is described in the picker.
+ *
+ * These used to name a stack ("React + Vite"), which stopped being true the moment
+ * the stack became something the planner proposes from the request. What is left is
+ * the difference that matters before a word has been typed: does it keep state.
+ */
+const KIND_LABEL: Record<ProjectKind, string> = {
+  app: "server + data",
+  website: "static site",
 };
 
 const STORAGE_KEY = "studio.token";
+// `localStorage`, unlike the token: which model builds your apps is a preference
+// that should outlive a tab, and it is not a secret.
+const MODEL_KEY = "studio.model";
+/** How many matches the model dropdown renders at once. Search still sees them all. */
+const MODEL_MENU_LIMIT = 400;
 
 type SavedApp = {
   id: string;
@@ -142,6 +160,32 @@ function describeRateLimit(state: RateLimitView): string {
 }
 
 /**
+ * One model the gateway has linked in, as `/api/models` reports it.
+ *
+ * Studio does not know any model names of its own. Provider keys live in
+ * OmniRoute, so the list is whatever is linked in *now* — which is why this is
+ * fetched rather than shipped, and why the picker is not a constant.
+ */
+type ModelOption = {
+  id: string;
+  provider: string;
+  combo: boolean;
+  contextLength: number | null;
+  capabilities: Record<string, boolean>;
+};
+
+/** `auto/coding · combo · 1M` — enough to choose between two names that differ by a word. */
+function describeModel(model: ModelOption): string {
+  const context =
+    model.contextLength === null
+      ? ""
+      : model.contextLength >= 1_000_000
+        ? ` · ${Math.round(model.contextLength / 1_000_000)}M ctx`
+        : ` · ${Math.round(model.contextLength / 1_000)}k ctx`;
+  return `${model.id} · ${model.provider}${context}`;
+}
+
+/**
  * Where a build is, derived from what the stream has actually produced rather
  * than from a timer: nothing is invented, so the steps are all real.
  */
@@ -186,6 +230,26 @@ export default function Studio({
   const [turns, setTurns] = useState(0);
   const [token, setToken] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  // Which linked model builds this. Empty means "whatever the gateway is
+  // configured with", which is a real choice and not an absence — it is the
+  // deployment default, and it tracks the day the default changes.
+  const [model, setModel] = useState("");
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [modelFilter, setModelFilter] = useState("");
+  const [modelBusy, setModelBusy] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [modelDefault, setModelDefault] = useState("");
+
+  // The plan step: what the model proposes before anything is written, held here
+  // until the person building it says go.
+  const [plan, setPlan] = useState<BuildPlan | null>(null);
+  const [planPrompt, setPlanPrompt] = useState("");
+  const [planModel, setPlanModel] = useState("");
+  const [planBusy, setPlanBusy] = useState(false);
+  const [planError, setPlanError] = useState<string | null>(null);
+  // Non-fatal: the plan said it would write a file and the turn did not. Worth
+  // saying, not worth discarding a whole generation over.
+  const [planWarning, setPlanWarning] = useState<string | null>(null);
 
   // Live progress, driven by the stream itself: which file is open, how much
   // of it has arrived, when the build started, and when data last moved.
@@ -233,6 +297,7 @@ export default function Studio({
   const [logBusy, setLogBusy] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
+  const planAbortRef = useRef<AbortController | null>(null);
 
   // Mirrors of state the streaming core reads, so a queued instruction can
   // start with the files the previous turn actually produced (state updates
@@ -249,6 +314,17 @@ export default function Studio({
   // a queued turn starts with what the previous one used rather than what the
   // render closure captured.
   const kindRef = useRef<ProjectKind>("app");
+  // Mirror of the model choice for the streaming core, for the same reason as
+  // kindRef: a queued turn must build with what the user picked, not with what the
+  // render closure happened to capture when the queue was filled.
+  const modelRef = useRef("");
+  // The confirmed plan, and the instruction it was written for. The pair matters:
+  // a plan answers one instruction, so if the prompt has been edited since it was
+  // drafted the plan no longer describes what is about to be built and is not
+  // confirmed — it is re-planned.
+  const planRef = useRef<BuildPlan | null>(null);
+  const planPromptRef = useRef("");
+  const planBusyRef = useRef(false);
 
   useEffect(() => {
     try {
@@ -282,6 +358,21 @@ export default function Studio({
   useEffect(() => {
     kindRef.current = kind;
   }, [kind]);
+  useEffect(() => {
+    modelRef.current = model;
+  }, [model]);
+
+  // Remembered across sessions on purpose: which model builds your apps is a
+  // preference, not a per-tab secret, and re-picking it every visit would be the
+  // tax on having a choice at all.
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(MODEL_KEY);
+      if (stored) setModel(stored);
+    } catch {
+      /* storage unavailable — the choice stays in memory */
+    }
+  }, []);
 
   // Re-render once a second while streaming so the elapsed counter and the
   // waiting indicator move without waiting for stream data.
@@ -414,6 +505,66 @@ export default function Studio({
     }
     void fetchBuildLog(activeAppId, build.job);
   }, [activeAppId, build?.job, fetchBuildLog]);
+
+  // ---- which model builds this ------------------------------------------
+
+  const loadModels = useCallback(
+    async (fresh = false) => {
+      setModelBusy(true);
+      try {
+        const payload = (await (
+          await request(`/api/models${fresh ? "?fresh=1" : ""}`)
+        ).json()) as { models?: ModelOption[]; default?: string; note?: string | null };
+        if (!Array.isArray(payload.models) || payload.models.length === 0) {
+          throw new Error("The gateway has no models linked in.");
+        }
+        setModels(payload.models);
+        setModelDefault(payload.default ?? "");
+        setModelError(payload.note ?? null);
+      } catch (thrown) {
+        // Not fatal: generation still works on the configured default, so this is
+        // reported where the picker is rather than as a banner over the build.
+        setModels([]);
+        setModelError(thrown instanceof Error ? thrown.message : "Could not read the model list.");
+      } finally {
+        setModelBusy(false);
+      }
+    },
+    [request],
+  );
+
+  // Fetched when the panel first opens rather than on mount: it is a few hundred
+  // kilobytes of provider catalog that most visits never look at.
+  useEffect(() => {
+    if (showSettings && models.length === 0 && !modelBusy) void loadModels();
+  }, [showSettings, models.length, modelBusy, loadModels]);
+
+  const saveModel = useCallback((value: string) => {
+    setModel(value);
+    try {
+      if (value) window.localStorage.setItem(MODEL_KEY, value);
+      else window.localStorage.removeItem(MODEL_KEY);
+    } catch {
+      /* storage unavailable — the choice stays in memory for this session */
+    }
+  }, []);
+
+  // Every linked model is searchable, but not all of them are rendered: 2,064
+  // `<option>` elements make the control slow to open, while the filter narrows to
+  // what is actually being looked for. The cap is what keeps both true.
+  const filteredModels = useMemo(() => {
+    const needle = modelFilter.trim().toLowerCase();
+    if (!needle) return models;
+    return models.filter(
+      (option) =>
+        option.id.toLowerCase().includes(needle) || option.provider.toLowerCase().includes(needle),
+    );
+  }, [models, modelFilter]);
+
+  const visibleModels = useMemo(
+    () => filteredModels.slice(0, MODEL_MENU_LIMIT),
+    [filteredModels],
+  );
 
   // ---- rate limit (operator setting) ------------------------------------
 
@@ -931,15 +1082,86 @@ export default function Studio({
     setQueued(false);
     abortRef.current?.abort();
     abortRef.current = null;
+    // A planning request in flight is cancelled too: Stop means stop.
+    planAbortRef.current?.abort();
+    planAbortRef.current = null;
     setStreamOpened(false);
     setByteCount(0);
     setStatus("idle");
   }, []);
 
+  /**
+   * Ask what this instruction would be built from, and show the answer.
+   *
+   * This is the step that replaced a hardcoded stack. Nothing is generated until
+   * the plan it produces has been confirmed, so the stack, the run commands and
+   * the port are all things the person saw before a single file was written.
+   */
+  const draftPlan = useCallback(
+    async (instruction?: string) => {
+      const text = (instruction ?? promptRef.current).trim();
+      if (!text || planBusyRef.current) return;
+
+      planBusyRef.current = true;
+      planAbortRef.current?.abort();
+      const controller = new AbortController();
+      planAbortRef.current = controller;
+
+      setPlanBusy(true);
+      setPlanError(null);
+      setPlanWarning(null);
+
+      try {
+        const response = await request("/api/plan", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            prompt: text,
+            kind: kindRef.current,
+            files: filesRef.current,
+            ...(modelRef.current ? { model: modelRef.current } : {}),
+          }),
+          signal: controller.signal,
+        });
+
+        const payload = (await response.json()) as { plan?: BuildPlan; model?: string };
+        if (!payload.plan) throw new Error("The planner returned nothing usable.");
+
+        planRef.current = payload.plan;
+        planPromptRef.current = text;
+        setPlan(payload.plan);
+        setPlanPrompt(text);
+        setPlanModel(typeof payload.model === "string" ? payload.model : "");
+      } catch (thrown) {
+        if (controller.signal.aborted) return;
+        if (thrown instanceof Error && /sign in/i.test(thrown.message)) setShowSettings(true);
+        setPlanError(thrown instanceof Error ? thrown.message : "Planning failed.");
+      } finally {
+        planBusyRef.current = false;
+        setPlanBusy(false);
+      }
+    },
+    [request],
+  );
+
+  /** Set the plan aside. The instruction stays in the prompt, ready to re-plan. */
+  const discardPlan = useCallback(() => {
+    planRef.current = null;
+    planPromptRef.current = "";
+    setPlan(null);
+    setPlanPrompt("");
+    setPlanModel("");
+    setPlanError(null);
+    setPlanWarning(null);
+  }, []);
+
   const generate = useCallback(async () => {
     if (busyRef.current) return;
-    const firstInstruction = promptRef.current.trim();
-    if (!firstInstruction) return;
+    // The instruction the plan was written for, not whatever is in the box now. A
+    // plan cannot be confirmed against text it did not answer.
+    const turnPrompt = planPromptRef.current.trim();
+    const plan = planRef.current;
+    if (!turnPrompt || !plan) return;
 
     busyRef.current = true;
     const controller = new AbortController();
@@ -956,20 +1178,25 @@ export default function Studio({
     setLastChunkAt(Date.now());
 
     try {
-      // This turn's inputs. A turn queued while another was streaming takes
-      // over here — the loop is what makes continuous prompting seamless: the
-      // next instruction starts the moment the current stream closes.
-      let turnPrompt = firstInstruction;
-      let priorFiles = filesRef.current;
-
-      for (;;) {
+      {
+        const priorFiles = filesRef.current;
         const headers: Record<string, string> = { "content-type": "application/json" };
         if (tokenRef.current) headers["x-studio-token"] = tokenRef.current;
 
         const response = await fetch("/api/generate", {
           method: "POST",
           headers,
-          body: JSON.stringify({ prompt: turnPrompt, kind: kindRef.current, files: priorFiles }),
+          body: JSON.stringify({
+            prompt: turnPrompt,
+            kind: kindRef.current,
+            files: priorFiles,
+            // The confirmed plan travels with the build. The route re-reads every
+            // field of it, so a plan cannot be weakened by the trip through the page.
+            plan,
+            // Omitted when the user left it on the default, so the gateway decides
+            // — which is what keeps a redeployment from pinning a stale model.
+            ...(modelRef.current ? { model: modelRef.current } : {}),
+          }),
           signal: controller.signal,
         });
 
@@ -1008,10 +1235,25 @@ export default function Studio({
         }
 
         setFiles(produced);
-        filesRef.current = produced;
+        // Fold this turn into the project rather than replacing it. A development
+        // turn returns the files it changed, so the ones it did not mention are
+        // kept — which is what makes "add on" additive instead of a rewrite.
+        const merged = mergeFiles(filesRef.current, produced);
+        filesRef.current = merged;
+        setFiles(merged);
         setRaw("");
         setCurrentFile(null);
         setTurns((count) => count + 1);
+
+        // The plan promised a file list. A file it named and the turn did not write
+        // is worth saying out loud — the build that follows will fail on it, and the
+        // message there would be about a missing module.
+        const missing = missingPlannedFiles(produced, plan);
+        setPlanWarning(
+          missing
+            ? `The plan listed ${missing} and this turn did not write it, so the build will probably fail there. Ask for it again, naming that file.`
+            : null,
+        );
 
         // Editing a saved app keeps its saved copy current, so reopening it
         // never silently reverts the last revision. Best-effort: the build
@@ -1025,7 +1267,7 @@ export default function Studio({
               id: activeAppRef.current,
               title: appTitleRef.current,
               prompt: turnPrompt,
-              files: produced,
+              files: merged,
             });
             appTitleRef.current = app.title;
             setAppTitle(app.title);
@@ -1034,25 +1276,24 @@ export default function Studio({
             setLibraryError("The build succeeded, but saving it failed. Use Save to retry.");
           }
         }
+      }
 
-        const nextInstruction = pendingRef.current;
-        if (!nextInstruction?.trim()) break;
+      // The plan has been built. Clearing it is what makes the next instruction go
+      // through a fresh plan instead of silently reusing this one's stack.
+      planRef.current = null;
+      planPromptRef.current = "";
+      setPlan(null);
+      setPlanPrompt("");
+      setPlanModel("");
+      if (promptRef.current === turnPrompt) setPrompt("");
 
+      // An instruction queued while this turn streamed is picked up here — planned,
+      // not run blind, because an addition is still a decision about a stack.
+      const nextInstruction = pendingRef.current;
+      if (nextInstruction?.trim()) {
         pendingRef.current = null;
         setQueued(false);
-        turnPrompt = nextInstruction.trim();
-        priorFiles = produced;
-
-        // Clear the composer only when it still holds the queued text; if the
-        // operator started typing something new mid-stream, that draft stays.
-        if (promptRef.current === nextInstruction) setPrompt("");
-
-        setError(null);
-        setRaw("");
-        setStreamOpened(false);
-        setByteCount(0);
-        setStartedAt(Date.now());
-        setLastChunkAt(Date.now());
+        void draftPlan(nextInstruction.trim());
       }
 
       setStatus("idle");
@@ -1065,9 +1306,16 @@ export default function Studio({
       if (abortRef.current === controller) abortRef.current = null;
       busyRef.current = false;
     }
-  }, [listSavedApps, persistApp]);
+  }, [draftPlan, listSavedApps, persistApp]);
 
-  /** Submit: start a build, or queue the instruction while one is running. */
+  /**
+   * Submit: plan, confirm, or queue.
+   *
+   * One button, three meanings, and which one it has is decided by what is
+   * already on screen: a plan that answers the text in the box is confirmed, a
+   * prompt with no plan gets one, and anything typed while a build streams is
+   * queued to be planned the moment it finishes.
+   */
   const submit = useCallback(() => {
     const text = prompt.trim();
     if (!text) return;
@@ -1077,8 +1325,17 @@ export default function Studio({
       setQueued(true);
       return;
     }
-    void generate();
-  }, [generate, prompt]);
+
+    // A plan is only confirmed when it answers the instruction that is in the box
+    // now. Editing the prompt reopens the question rather than building the plan
+    // for the text that was there before.
+    if (planRef.current && planPromptRef.current === text) {
+      void generate();
+      return;
+    }
+
+    void draftPlan(text);
+  }, [draftPlan, generate, prompt]);
 
   const unqueue = useCallback(() => {
     pendingRef.current = null;
@@ -1095,9 +1352,19 @@ export default function Studio({
     [submit],
   );
 
-  const statusLabel = status === "streaming" ? "Building" : status === "error" ? "Failed" : "Ready";
-  const statusDot = status === "streaming" ? "live" : status === "error" ? "bad" : "ok";
+  const statusLabel = planBusy
+    ? "Planning"
+    : status === "streaming"
+      ? "Building"
+      : status === "error"
+        ? "Failed"
+        : "Ready";
+  const statusDot = planBusy || status === "streaming" ? "live" : status === "error" ? "bad" : "ok";
   const busy = status === "streaming";
+  // A plan describes one instruction. Change the instruction and the plan no longer
+  // answers it, so it is shown as out of date rather than silently confirmed.
+  const planStale = plan !== null && prompt.trim() !== planPrompt;
+  const planReady = plan !== null && !planStale && !busy;
   const hasFiles = activeFiles.length > 0;
   // Recomputed each render; the 1-second interval (and every chunk) re-renders
   // while streaming, so all of these move live.
@@ -1165,10 +1432,10 @@ export default function Studio({
       <div className="workspace">
         <section className="composer">
           {/* Choosing the kind is choosing the product, not a setting: it changes
-              the system prompt, what the preview can show, and what delivery
-              means. Locked while a build is running and while a saved app is
-              open — switching either mid-flight would leave a project whose
-              contents contradict its own kind. */}
+              what gets planned, what can be previewed, and what delivery means.
+              Locked while a build is running and while a saved app is open —
+              switching either mid-flight would leave a project whose contents
+              contradict its own kind. */}
           <div className="kind-picker" role="radiogroup" aria-label="What to build">
             {(["app", "website"] as const).map((option) => (
               <button
@@ -1185,7 +1452,7 @@ export default function Studio({
                 }}
               >
                 {option === "website" ? "Website" : "App"}
-                <em>{option === "website" ? "React + Vite" : "single page"}</em>
+                <em>{KIND_LABEL[option]}</em>
               </button>
             ))}
           </div>
@@ -1204,6 +1471,21 @@ export default function Studio({
             />
           </div>
 
+          {/*
+            * THE ONE BUTTON, AND WHAT IT MEANS RIGHT NOW.
+            *
+            * There used to be a Build button that generated code and a separate
+            * row that also said Build, and neither said which stack it would use.
+            * Now:
+            *
+            *   no plan        Plan & Build / Develop It   ask what it would be built from
+            *   plan ready     Confirm & build              write it, against the plan on screen
+            *   streaming      Queue next                   plan the instruction when this finishes
+            *
+            * Building a new project and adding to an existing one are the same
+            * gesture with different words, because they are the same operation:
+            * plan an addition, confirm, write it.
+            */}
           <div className="actions">
             {busy ? (
               <>
@@ -1223,14 +1505,129 @@ export default function Studio({
                 </button>
               </>
             ) : (
-              <button type="button" className="primary" onClick={submit} disabled={!prompt.trim()}>
-                {turns > 0 ? "Add on" : "Build It"}
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={submit}
+                  disabled={!prompt.trim() || planBusy}
+                >
+                  {planReady
+                    ? turns > 0
+                      ? "Confirm & develop"
+                      : "Confirm & build"
+                    : planBusy
+                      ? "Planning…"
+                      : turns > 0
+                        ? "Develop It"
+                        : "Plan & Build"}
+                </button>
+                {plan ? (
+                  <button type="button" className="ghost" onClick={discardPlan} disabled={planBusy}>
+                    Discard plan
+                  </button>
+                ) : null}
+              </>
             )}
             <span className="hint">
               <kbd>Ctrl</kbd> + <kbd>Enter</kbd>
             </span>
           </div>
+
+          {planBusy ? (
+            <div className="alert note" role="status">
+              <span>
+                Asking what this would be built from — the stack, the commands that run it, and the
+                files it needs. Nothing is written until you confirm.
+              </span>
+            </div>
+          ) : null}
+
+          {planError ? (
+            <div className="alert error" role="alert">
+              <span>{planError}</span>
+            </div>
+          ) : null}
+
+          {plan ? (
+            <div className={`plan${planStale ? " stale" : ""}`} aria-label="Build plan">
+              <div className="plan-head">
+                <span className="produced-head">The plan</span>
+                <span className="topbar-spacer" />
+                <span className="hint">
+                  {planStale ? "the prompt changed — plan it again" : planModel ? `planned by ${planModel}` : ""}
+                </span>
+              </div>
+
+              <h3 className="plan-name">
+                {plan.name}
+                <span className="plan-slug">
+                  {plan.slug}.{siteSuffix}
+                </span>
+              </h3>
+              <p className="plan-summary">{plan.summary}</p>
+
+              <ul className="plan-stack">
+                <li>{plan.runtime.language}</li>
+                {plan.runtime.frameworks.map((framework) => (
+                  <li key={framework}>{framework}</li>
+                ))}
+                <li>{plan.runtime.database ? plan.runtime.database : "no database"}</li>
+                <li>{plan.kind === "website" ? "static" : "persistent"}</li>
+              </ul>
+
+              <dl className="plan-run">
+                {plan.run.install ? (
+                  <>
+                    <dt>install</dt>
+                    <dd>
+                      <code>{plan.run.install}</code>
+                    </dd>
+                  </>
+                ) : null}
+                {plan.run.build ? (
+                  <>
+                    <dt>build</dt>
+                    <dd>
+                      <code>{plan.run.build}</code>
+                    </dd>
+                  </>
+                ) : null}
+                <dt>start</dt>
+                <dd>
+                  <code>{plan.run.start}</code> · port {plan.run.port}
+                </dd>
+              </dl>
+
+              {plan.files.length > 0 ? (
+                <details className="plan-files">
+                  <summary>
+                    {plan.files.length} {plan.files.length === 1 ? "file" : "files"}
+                  </summary>
+                  <ul>
+                    {plan.files.map((file) => (
+                      <li key={file.path}>
+                        <code>{file.path}</code>
+                        {file.purpose ? <em>{file.purpose}</em> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
+
+              {plan.notes ? <p className="plan-notes">{plan.notes}</p> : null}
+            </div>
+          ) : null}
+
+          {planWarning ? (
+            <div className="alert note" role="status">
+              <span>{planWarning}</span>
+              <span className="topbar-spacer" />
+              <button type="button" className="ghost" onClick={() => setPlanWarning(null)}>
+                Dismiss
+              </button>
+            </div>
+          ) : null}
 
           {error ? (
             <div className="alert error" role="alert">
@@ -1338,6 +1735,83 @@ export default function Studio({
                     <span>{rateLimitError}</span>
                   </div>
                 ) : null}
+              </div>
+
+              <div className="settings-block">
+                <div className="settings-head">
+                  <span className="produced-head">Model</span>
+                  <span className="topbar-spacer" />
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={modelBusy}
+                    onClick={() => void loadModels(true)}
+                  >
+                    {modelBusy ? "Reading…" : "Refresh"}
+                  </button>
+                </div>
+
+                <span className="hint">
+                  {model
+                    ? `Building with ${model}. Every model the gateway has linked in is listed — the provider keys live in OmniRoute, not here.`
+                    : `Building with the gateway's default${
+                        modelDefault ? ` (${modelDefault})` : ""
+                      }. Pick a model to build with that instead.`}
+                </span>
+
+                <div className="settings-inline">
+                  <input
+                    type="search"
+                    value={modelFilter}
+                    spellCheck={false}
+                    placeholder="filter by model or provider"
+                    aria-label="Filter models"
+                    onChange={(event) => setModelFilter(event.target.value)}
+                  />
+                  <span className="topbar-spacer" />
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={!model}
+                    onClick={() => saveModel("")}
+                  >
+                    Use default
+                  </button>
+                </div>
+
+                {models.length > 0 ? (
+                  <select
+                    className="model-select"
+                    value={model}
+                    aria-label="Model"
+                    onChange={(event) => saveModel(event.target.value)}
+                  >
+                    <option value="">
+                      Gateway default{modelDefault ? ` — ${modelDefault}` : ""}
+                    </option>
+                    {visibleModels.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {describeModel(option)}
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
+
+                {models.length > 0 && visibleModels.length < filteredModels.length ? (
+                  <span className="hint">
+                    Showing {visibleModels.length} of {filteredModels.length} matches — keep typing to
+                    narrow it down.
+                  </span>
+                ) : null}
+
+                {models.length > 0 ? (
+                  <span className="hint">
+                    {filteredModels.length} of {models.length} linked models
+                    {modelFilter ? ` matching “${modelFilter.trim()}”` : ""}.
+                  </span>
+                ) : null}
+
+                {modelError ? <span className="hint">{modelError}</span> : null}
               </div>
             </div>
           ) : null}
@@ -1513,18 +1987,19 @@ export default function Studio({
             {/*
               * FOUR DELIVERIES, EACH WITH ONE JOB.
               *
-              * These used to overlap — one button both rebuilt and published —
-              * and the words gave no clue which did what. Now each names exactly
-              * one destination:
+              * These used to overlap — one button both rebuilt and published — and
+              * the words gave no clue which did what. Now each names exactly one
+              * destination, and the run commands come from the project's own plan
+              * rather than from a kind:
               *
-              *   Factory Build  run `make app` (Archon + the model) from a spec
-              *   Publish It     take the files on screen and put them on a name
+              *   Build It       install, build and start the project to see it run
+              *   Publish It     put the built project on its own name
               *   Export It      write a build-requests spec for CI or a hand-off
-              *   Download It    a zip of the source, and of dist/ once built
+              *   Download It    a zip of the source, and of the build output once built
               *
               * Publish It deliberately does NOT run the factory. Publishing what a
               * rebuild would produce, rather than what the operator is looking at,
-              * is a different app with the same name.
+              * is a different project with the same name.
               */}
             <div className="deliveries">
               <button
@@ -1532,24 +2007,16 @@ export default function Studio({
                 className="ghost"
                 onClick={() => void runBuild(true)}
                 disabled={!hasFiles || busy || libraryBusy || buildBusy || build?.state === "running"}
-                title={
-                  kind === "website"
-                    ? "Run make app from a spec, then package the result into dist/"
-                    : "Run make app from a spec, then package the client and the server around it"
-                }
+                title="Install, build and start this project on the build host, using the commands in its plan"
               >
-                {buildBusy ? "Building…" : "Factory Build"}
+                {buildBusy ? "Building…" : "Build It"}
               </button>
               <button
                 type="button"
                 className="ghost"
                 onClick={() => void publishApp()}
                 disabled={!hasFiles || busy || libraryBusy || publishBusy || build?.state === "running"}
-                title={
-                  kind === "website"
-                    ? `Package these files and serve them at <name>.${siteSuffix}`
-                    : `Package these files, build the image, run the container and serve it at <name>.${siteSuffix}`
-                }
+                title={`Build this project as it stands and serve it at <name>.${siteSuffix}`}
               >
                 {publishBusy ? "Publishing…" : "Publish It"}
               </button>
@@ -1567,11 +2034,7 @@ export default function Studio({
                 className="ghost"
                 onClick={() => void downloadZip()}
                 disabled={!hasFiles || busy || libraryBusy}
-                title={
-                  kind === "website"
-                    ? "Download a zip of the source (and of dist/, once it has been packaged)"
-                    : "Download a zip of the client, the server and the Dockerfile"
-                }
+                title="Download a zip of the source, and of the build output once it has been built"
               >
                 Download It
               </button>
