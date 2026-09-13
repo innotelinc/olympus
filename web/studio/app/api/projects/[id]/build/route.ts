@@ -3,6 +3,7 @@ import {
   BuildQueueError,
   FactorySpecError,
   latestBuildStatus,
+  listBuildHistory,
   queueBuild,
   readBuildStatus,
   readRunnerState,
@@ -19,7 +20,11 @@ export const dynamic = "force-dynamic";
  * `POST` regenerates the spec and queues a real `make app` for the host-side
  * runner (`scripts/build-runner.py`). `GET` reports where that build got to —
  * by job id while one is running, or the app's most recent build otherwise, so a
- * reload does not lose the thread.
+ * reload does not lose the thread — and lists this app's recent builds, which is
+ * what makes a second attempt comparable to the first.
+ *
+ * Cancelling lives at `.../build/cancel`: stopping a build changes it, and a GET
+ * should never do that.
  *
  * Studio never runs the build itself: this container has no toolchain by design.
  * The queue file is the entire interface, and the runner re-validates everything
@@ -42,20 +47,25 @@ export async function GET(request: Request, context: Context): Promise<Response>
   const project = readProject(namespaceFor(gate.session?.sub), id);
   if (!project) return fail("No such saved app.", 404);
 
+  const slug = specSlug(project.title);
   const job = new URL(request.url).searchParams.get("job");
   if (job !== null) {
     // A malformed id is a 400 rather than a 404: it is a caller bug, not a
     // missing build, and readBuildStatus refuses to use it as a path.
     const status = readBuildStatus(job);
     if (!status) return fail("No such build job.", 404);
-    return Response.json({ build: status, runner: readRunnerState() }, { headers: NO_STORE });
+    return Response.json(
+      { build: status, history: listBuildHistory(slug), runner: readRunnerState() },
+      { headers: NO_STORE },
+    );
   }
 
   return Response.json(
     {
-      build: latestBuildStatus(specSlug(project.title)),
+      build: latestBuildStatus(slug),
+      history: listBuildHistory(slug),
       runner: readRunnerState(),
-      next: `make app SPEC=build-requests/${specSlug(project.title)}.md`,
+      next: `make app SPEC=build-requests/${slug}.md`,
     },
     { headers: NO_STORE },
   );

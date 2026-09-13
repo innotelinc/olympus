@@ -2,13 +2,16 @@ import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GET, POST } from "@/app/api/projects/[id]/build/route";
+import { POST as CANCEL } from "@/app/api/projects/[id]/build/cancel/route";
 import {
   RUNNER_STALE_SECONDS,
   type BuildStatus,
   buildQueueDir,
   latestBuildStatus,
+  listBuildHistory,
   readBuildStatus,
   readRunnerState,
+  requestCancel,
 } from "@/lib/build-queue";
 import { specSlug } from "@/lib/factory-spec";
 import { ANONYMOUS_NAMESPACE, type Project, saveProject } from "@/lib/projects";
@@ -450,5 +453,183 @@ describe("readBuildStatus", () => {
     process.env.STUDIO_BUILD_QUEUE_DIR = join(ROOT, "absent");
     expect(latestBuildStatus("markdown-notes")).toBeNull();
     expect(buildQueueDir()).toBe(join(ROOT, "absent"));
+  });
+
+  it("reads a cancelled build as cancelled, not as a failure", () => {
+    statusFile("0123456789abcdef", { state: "cancelled", slug: "markdown-notes" });
+    expect(readBuildStatus("0123456789abcdef")?.state).toBe("cancelled");
+  });
+});
+
+/* ---- history ------------------------------------------------------------ */
+
+describe("listBuildHistory", () => {
+  it("lists only this app's builds, newest first", () => {
+    statusFile("aaaaaaaaaaaaaaaa", {
+      state: "failed",
+      slug: "markdown-notes",
+      updated_at: "2026-01-01T00:00:00Z",
+    });
+    statusFile("bbbbbbbbbbbbbbbb", {
+      state: "succeeded",
+      slug: "markdown-notes",
+      updated_at: "2026-02-01T00:00:00Z",
+    });
+    statusFile("cccccccccccccccc", { state: "succeeded", slug: "something-else" });
+
+    const history = listBuildHistory("markdown-notes");
+    expect(history.map((entry) => entry.job)).toEqual(["bbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaa"]);
+  });
+
+  it("pins a running build to the top even if its timestamp is older", () => {
+    // Queueing and starting can leave a running job's updated_at behind a build
+    // that finished a second later; the running one is what is being watched.
+    statusFile("aaaaaaaaaaaaaaaa", {
+      state: "succeeded",
+      slug: "markdown-notes",
+      updated_at: "2026-02-01T00:00:00Z",
+    });
+    statusFile("bbbbbbbbbbbbbbbb", {
+      state: "running",
+      slug: "markdown-notes",
+      updated_at: "2026-01-01T00:00:00Z",
+    });
+
+    expect(listBuildHistory("markdown-notes")[0].job).toBe("bbbbbbbbbbbbbbbb");
+  });
+
+  it("honours the limit", () => {
+    for (const [index, job] of ["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"].entries()) {
+      statusFile(job, {
+        state: "succeeded",
+        slug: "markdown-notes",
+        updated_at: `2026-0${index + 1}-01T00:00:00Z`,
+      });
+    }
+
+    expect(listBuildHistory("markdown-notes", 2)).toHaveLength(2);
+  });
+
+  it("skips junk and unreadable files instead of failing the list", () => {
+    statusFile("aaaaaaaaaaaaaaaa", { state: "succeeded", slug: "markdown-notes" });
+    writeFileSync(join(QUEUE, "bbbbbbbbbbbbbbbb.status.json"), "not json");
+    statusFile("cccccccccccccccc", { state: "exploded", slug: "markdown-notes" });
+    writeFileSync(join(QUEUE, "dddddddddddddddd.log"), "a log is not a status");
+
+    expect(listBuildHistory("markdown-notes").map((entry) => entry.job)).toEqual([
+      "aaaaaaaaaaaaaaaa",
+    ]);
+  });
+
+  it("is empty when the queue does not exist", () => {
+    process.env.STUDIO_BUILD_QUEUE_DIR = join(ROOT, "absent");
+    expect(listBuildHistory("markdown-notes")).toEqual([]);
+  });
+});
+
+/* ---- cancelling --------------------------------------------------------- */
+
+describe("requestCancel", () => {
+  it("writes a marker the runner polls for", () => {
+    statusFile("0123456789abcdef", { state: "running", slug: "markdown-notes" });
+
+    const status = requestCancel("0123456789abcdef");
+    expect(status.slug).toBe("markdown-notes");
+
+    const marker = JSON.parse(
+      readFileSync(join(QUEUE, "0123456789abcdef.cancel.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(marker.v).toBe(1);
+    expect(marker.job).toBe("0123456789abcdef");
+    expect(marker.requested_by).toBe("studio");
+  });
+
+  it("refuses a job id that is not one", () => {
+    for (const job of ["", "../../etc/passwd", "ABCDEF0123456789", "nope"]) {
+      expect(() => requestCancel(job)).toThrowError(/No such build job/);
+    }
+    expect(readdirSync(QUEUE).filter((name) => name.endsWith(".cancel.json"))).toEqual([]);
+  });
+
+  it("refuses a build that is not running", () => {
+    statusFile("aaaaaaaaaaaaaaaa", { state: "succeeded", slug: "markdown-notes" });
+    statusFile("bbbbbbbbbbbbbbbb", { state: "cancelled", slug: "markdown-notes" });
+
+    // Recording a stop for a finished build would rewrite history.
+    expect(() => requestCancel("aaaaaaaaaaaaaaaa")).toThrowError(/already succeeded/);
+    expect(() => requestCancel("bbbbbbbbbbbbbbbb")).toThrowError(/already was cancelled/);
+    expect(readdirSync(QUEUE).filter((name) => name.endsWith(".cancel.json"))).toEqual([]);
+  });
+
+  it("does not overwrite an unrelated file", () => {
+    statusFile("0123456789abcdef", { state: "running", slug: "markdown-notes" });
+    requestCancel("0123456789abcdef");
+
+    // The marker is its own file: the status/log of the job it is stopping stay
+    // readable while the runner acts on it.
+    expect(readdirSync(QUEUE).sort()).toEqual([
+      "0123456789abcdef.cancel.json",
+      "0123456789abcdef.status.json",
+    ]);
+  });
+});
+
+/* ---- POST — cancel a build --------------------------------------------- */
+
+describe("POST /api/projects/[id]/build/cancel", () => {
+  function cancel(id: string, body?: unknown, headers: Record<string, string> = TOKEN) {
+    return CANCEL(
+      new Request(`http://studio.test/api/projects/${id}/build/cancel`, {
+        method: "POST",
+        headers: {
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+          ...headers,
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+      context(id),
+    );
+  }
+
+  it("is gated like every other route", async () => {
+    const project = seed();
+    statusFile("0123456789abcdef", { state: "running", slug: "markdown-notes" });
+
+    expect((await cancel(project.id, { job: "0123456789abcdef" }, {})).status).toBe(401);
+    expect(readdirSync(QUEUE).filter((name) => name.endsWith(".cancel.json"))).toEqual([]);
+  });
+
+  it("404s an app that is not in this library", async () => {
+    expect((await cancel("nosuchapp1234", { job: "0123456789abcdef" })).status).toBe(404);
+  });
+
+  it("400s when no job is named", async () => {
+    const project = seed();
+    expect((await cancel(project.id, {})).status).toBe(400);
+    expect((await cancel(project.id)).status).toBe(400);
+  });
+
+  it("404s an unknown job and 409s one that already finished", async () => {
+    const project = seed();
+    expect((await cancel(project.id, { job: "0123456789abcdef" })).status).toBe(404);
+
+    statusFile("0123456789abcdef", { state: "succeeded", slug: "markdown-notes" });
+    expect((await cancel(project.id, { job: "0123456789abcdef" })).status).toBe(409);
+  });
+
+  it("accepts a running build and says what happens next", async () => {
+    const project = seed();
+    statusFile("0123456789abcdef", { state: "running", slug: "markdown-notes" });
+
+    const response = await cancel(project.id, { job: "0123456789abcdef" });
+    expect(response.status).toBe(202);
+
+    const payload = (await response.json()) as { requested: boolean; job: string; message: string };
+    expect(payload.requested).toBe(true);
+    expect(payload.job).toBe("0123456789abcdef");
+    // 202 is "the request is on disk", so the message has to point at the status
+    // file the panel is already following rather than claim it is stopped.
+    expect(payload.message).toContain("reports it on its next poll");
+    expect(readdirSync(QUEUE)).toContain("0123456789abcdef.cancel.json");
   });
 });
