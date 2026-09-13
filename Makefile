@@ -186,6 +186,14 @@ gateway-sso-up: ## Put the gateway dashboard behind Cerulean Authentik (oauth2-p
 gateway-sso-down: ## Stop the dashboard SSO proxy and its session store (the gateway keeps running)
 	docker compose -f docker-compose.yml -f compose.gateway-sso.yml rm -sf gateway-sso gateway-sso-sessions
 
+# Makes Authentik the only gate at the gateway: `requireLogin=false`, so there is
+# one login instead of two and the one that could not authenticate anyone (the
+# gateway's own) is gone. Idempotent, and it refuses if the gateway is reachable
+# beyond this host — because reachability is the whole control once its own login
+# is off. See scripts/gateway-auth-mode.py.
+gateway-auth-mode: ## Make Cerulean Authentik the only gate at the gateway (ARGS="--dry-run"|"--verify")
+	python3 scripts/gateway-auth-mode.py $(ARGS)
+
 # Publishes GATEWAY_PUBLIC_HOST at the edge. The SSO proxy makes the dashboard
 # safe to reach; this is what makes it REACHABLE — the CNAME, a certificate, and
 # the NPM proxy host that forwards to the proxy rather than to the gateway.
