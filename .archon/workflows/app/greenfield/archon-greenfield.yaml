@@ -1,0 +1,142 @@
+name: archon-greenfield
+description: |
+  Turn a build-request spec into a working application under the output directory
+  (`./builds` per .archon/config.yaml), then assert the artifact and record it.
+
+  Use when: a spec lands in build-requests/ — Studio's "Export to factory", or
+  `make new-request`. By hand:
+
+    archon workflow run archon-greenfield --no-worktree \
+      --input spec=build-requests/my-app.md
+
+  NOT for: the issue → PR factory workflows (factory-triage, factory-implement),
+  which change THIS repository.
+
+  WHY THIS IS NOT IN THE PINNED PACK, and cannot be. `factory run <name>` only
+  accepts workflows it discovers inside the SHA-pinned Archon source, and
+  `consumer.verify_source()` refuses to run at all when that source is dirty
+  (`git status --porcelain --untracked-files=all`). A workflow added there dirties
+  the pin and disables every factory command — including the ones that work. So an
+  app builder has no home in the pack, and this one lives in the checkout instead,
+  beside web/studio and factory/APP_SPEC_TEMPLATE.md, and runs through the Archon
+  CLI directly.
+
+  THE MODEL WRITES THE FILES; SCRIPTS OWN EVERYTHING ELSE. The model call is the one
+  step no script can verify, so it is boxed on both sides: the spec is resolved and
+  bounded before it runs, and the artifact is asserted after it. A model that exits
+  0 having written nothing is a FAILURE here — observed, not hypothetical: the
+  gateway can answer 503 on a request that arrives *after* the files are written, so
+  a node that trusted the exit code would report success on an empty directory.
+
+mutates_checkout: false
+
+inputs:
+  spec:
+    default: ""
+    description: >-
+      The build-request spec to manufacture, as a path relative to the repository
+      root — usually build-requests/<name>.md. Empty is a refusal, not a default:
+      manufacturing the wrong spec costs a model run and writes an app nobody asked
+      for.
+
+returns: record
+
+nodes:
+  # Deterministic intake. Resolves the spec, refuses anything outside the checkout,
+  # derives the app's directory from the spec's own name, and refuses to overwrite a
+  # previous manufacture — a rebuild that silently replaces an app is how you lose
+  # the one you were comparing against.
+  - id: load
+    script: load-spec
+    runtime: uv
+    with:
+      declared: "$INPUTS.spec"
+    output_format:
+      type: object
+      properties:
+        slug: { type: string }
+        title: { type: string }
+        spec_path: { type: string }
+        spec_sha: { type: string }
+        output_dir: { type: string }
+        app_dir: { type: string }
+      required: [slug, title, spec_path, spec_sha, output_dir, app_dir]
+
+  # The model call, and the only step that can be neither predicted nor verified by
+  # code. Its exit code is RECORDED rather than trusted: decide()s happen in verify.
+  #
+  # It retries, bounded, while the app directory is still empty — the gateway here runs
+  # on rate-limited free providers, so a refused request can end a turn before a single
+  # file is written. Once anything exists the retry stops, because the next thing that
+  # should see a partial app is verify, not another agent.
+  - id: build
+    script: build-app
+    runtime: uv
+    depends_on: [load]
+    timeout: 3600000
+    with:
+      spec_path: "$load.output.spec_path"
+      app_dir: "$load.output.app_dir"
+      title: "$load.output.title"
+    output_format:
+      type: object
+      properties:
+        exit_code: { type: integer }
+        model: { type: string }
+        attempts: { type: integer }
+        log: { type: string }
+      required: [exit_code, model, attempts, log]
+
+  # ASSERTS ON THE ARTIFACT, NOT THE EXIT CODE. An agent that was denied a tool, ran
+  # out of context, or was cut off by the gateway exits without necessarily failing,
+  # and "the run succeeded" is then true and useless. An app directory with nothing
+  # in it fails here, by name, with the log attached.
+  - id: verify
+    script: verify-app
+    runtime: uv
+    depends_on: [build]
+    with:
+      app_dir: "$load.output.app_dir"
+      spec_path: "$load.output.spec_path"
+      title: "$load.output.title"
+    output_format:
+      type: object
+      properties:
+        files: { type: integer }
+        bytes: { type: integer }
+        entry: { type: string }
+        verification: { type: string }
+        command: { type: string }
+        detail: { type: string }
+      required: [files, bytes, entry, verification, command, detail]
+
+  # Provenance, last and only on success. An app with no record of which spec and
+  # which model produced it cannot be audited later, and "which spec is this build
+  # from" is the first question anyone asks of a directory of generated apps.
+  - id: record
+    script: record
+    runtime: uv
+    depends_on: [verify]
+    with:
+      app_dir: "$load.output.app_dir"
+      slug: "$load.output.slug"
+      title: "$load.output.title"
+      spec_path: "$load.output.spec_path"
+      spec_sha: "$load.output.spec_sha"
+      model: "$build.output.model"
+      exit_code: "$build.output.exit_code"
+      files: "$verify.output.files"
+      bytes: "$verify.output.bytes"
+      entry: "$verify.output.entry"
+      verification: "$verify.output.verification"
+      command: "$verify.output.command"
+      detail: "$verify.output.detail"
+    output_format:
+      type: object
+      properties:
+        app_dir: { type: string }
+        manifest: { type: string }
+        files: { type: integer }
+        bytes: { type: integer }
+        verification: { type: string }
+      required: [app_dir, manifest, files, bytes, verification]
