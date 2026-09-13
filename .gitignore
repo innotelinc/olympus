@@ -5,6 +5,12 @@
 .archon/cache/
 *.log
 
+# Editor swap/backup files. A .env swap file is credential material outside the
+# ignore rule above — `...env.swp` never matches `.env` — so match the pattern.
+.*.swp
+*.swp
+*~
+
 # Vendored upstreams — cloned by setup.sh at runtime, never committed
 core-modules/*
 !core-modules/README.md

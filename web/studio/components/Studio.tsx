@@ -251,6 +251,9 @@ export default function Studio({
   // saying, not worth discarding a whole generation over.
   const [planWarning, setPlanWarning] = useState<string | null>(null);
   const [projectPlan, setProjectPlan] = useState<BuildPlan | null>(null);
+  // Bumped to force the preview frame to reload; a frame's `src` is not re-fetched by
+  // re-rendering, and after a republish the old document is what is on screen.
+  const [previewNonce, setPreviewNonce] = useState(0);
 
   // Live progress, driven by the stream itself: which file is open, how much
   // of it has arrived, when the build started, and when data last moved.
@@ -1367,6 +1370,52 @@ export default function Studio({
   }, [draftPlan, listSavedApps, persistApp]);
 
   /**
+   * Take a failed build back to the model, with what the build actually said.
+   *
+   * This is the half of the loop that was missing: a build fails, the reason goes
+   * into the log, and the person who asked for the project has to read a compiler
+   * error and re-describe it. So the error goes back in as the instruction, with
+   * the project's own plan attached, and the model is asked to fix the cause.
+   *
+   * It deliberately does NOT re-plan. A plan is a decision about a stack and that
+   * decision did not change; asking the person to confirm a new stack every time a
+   * dependency version is wrong would make the confirm step noise.
+   *
+   * The log tail is capped well under the route's prompt limit, and the newest lines
+   * are the ones kept: a build log is mostly progress, and the error is at the end.
+   */
+  const fixBuild = useCallback(() => {
+    const plan = projectPlanRef.current;
+    if (!plan || busyRef.current) return;
+
+    const reported = build?.message?.trim() || buildError?.trim() || "The build failed.";
+    const tail = (build?.logTail ?? "").trim();
+    const budget = tail.length > 5_000 ? tail.slice(-5_000) : tail;
+
+    const instruction = [
+      "The last build of this project failed. Fix it, keeping the confirmed plan and every feature that already works.",
+      "",
+      `What the build reported: ${reported}`,
+      budget ? `\nThe end of the build output:\n\n${budget}` : "",
+      "",
+      "Return only the files that need to change, in full. Fix the cause of the failure, not the symptom — and do not remove a feature to make an error go away.",
+    ]
+      .filter(Boolean)
+      .join("\n")
+      .slice(0, 7_000);
+
+    // The same shape a confirmed plan produces, so generation needs no special case:
+    // a plan, the instruction it answers, and the project it belongs to.
+    planRef.current = plan;
+    planPromptRef.current = instruction;
+    setPlan(plan);
+    setPlanPrompt(instruction);
+    setProjectPlan(plan);
+    setBuildError(null);
+    void generate();
+  }, [build, buildError, generate]);
+
+  /**
    * Submit: plan, confirm, or queue.
    *
    * One button, three meanings, and which one it has is decided by what is
@@ -1423,6 +1472,12 @@ export default function Studio({
   // answers it, so it is shown as out of date rather than silently confirmed.
   const planStale = plan !== null && prompt.trim() !== planPrompt;
   const planReady = plan !== null && !planStale && !busy;
+  // Where the project is actually running, as the runner reported it — never a URL
+  // this component composes, so what is framed is what was published.
+  const previewUrl =
+    build?.publishedUrl ??
+    buildHistory.find((past) => past.publishedUrl)?.publishedUrl ??
+    null;
   const hasFiles = activeFiles.length > 0;
   // Recomputed each render; the 1-second interval (and every chunk) re-renders
   // while streaming, so all of these move live.
@@ -1875,10 +1930,12 @@ export default function Studio({
           ) : null}
 
           {build || buildError ? (
-            <section className={`build-panel ${build?.state ?? "failed"}`} aria-label="Factory build">
+            <section className={`build-panel ${build?.state ?? "failed"}`} aria-label="Build">
               <div className="build-panel-head">
                 <span className={`dot ${build?.state === "running" ? "live" : "idle"}`} />
-                <span className="produced-head">Factory build</span>
+                <span className="produced-head">
+                  Build{build?.language ? ` · ${build.language}` : ""}
+                </span>
                 <span className="topbar-spacer" />
                 {build?.state === "running" ? (
                   <button
@@ -1896,6 +1953,39 @@ export default function Studio({
               <span className="build-state">{build ? buildStateLabel(build) : "not started"}</span>
 
               <p className="build-message">{buildError ?? build?.message}</p>
+
+              {/*
+                * THE ERROR, AND WHAT TO DO WITH IT.
+                *
+                * A failed build used to end at "see the build log", which leaves the
+                * person reading a compiler's output and re-describing it in their own
+                * words. The failure goes back to the model instead, with the project's
+                * own plan, and it fixes it against the code it wrote.
+                */}
+              {(build?.state === "failed" || Boolean(buildError)) && projectPlan ? (
+                <div className="build-fix">
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={fixBuild}
+                    disabled={busy || libraryBusy}
+                    title="Send the build's own error back to the model, with this project's plan"
+                  >
+                    {busy ? "Fixing…" : "Fix it"}
+                  </button>
+                  <span className="hint">
+                    Sends what the build said, and the plan it failed on, back to the model.
+                    The stack does not change — only the code does.
+                  </span>
+                </div>
+              ) : null}
+
+              {(build?.state === "failed" || Boolean(buildError)) && !projectPlan ? (
+                <span className="hint">
+                  This project has no plan to rebuild from — it was saved before projects had them.
+                  Plan a change from the prompt to give it one.
+                </span>
+              ) : null}
 
               {build?.state === "running" ? (
                 <div className="build-bar" aria-hidden="true">
@@ -2265,7 +2355,7 @@ export default function Studio({
               aria-selected={tab === "preview"}
               onClick={() => setTab("preview")}
             >
-              Preview (after build)
+              Preview
             </button>
             <button
               type="button"
@@ -2280,34 +2370,69 @@ export default function Studio({
 
           <div className="stage-body">
             {tab === "preview" ? (
-              /* Neither kind can preview here, and pretending otherwise is the
-                 worst option: the sandboxed iframe runs no JSX and no bundler, so
-                 it would sit blank and read as a failure. What each one needs
-                 before it can be seen is different, and saying which is the
-                 difference between a dead pane and a next step. */
-              <div className="site-note">
-                <strong>
-                  {kind === "app"
-                    ? "An application has no preview until it is running"
-                    : "A React site has no preview until it is built"}
-                </strong>
-                <span>
-                  {kind === "app" ? (
-                    <>
-                      The client is React, so it renders only after packaging — and the API it
-                      reads from does not exist until the app is running. Read it under{" "}
-                      <em>Code</em>, then use <em>Publish It</em>: that builds the client, starts
-                      the container and puts the name in front of it.
-                    </>
-                  ) : (
-                    <>
-                      JSX needs a compiler, so these components render only after packaging.
-                      Read them under <em>Code</em>, then use <em>Publish It</em> — that runs the
-                      Vite build on the host and produces a servable <code>dist/</code>.
-                    </>
-                  )}
-                </span>
-              </div>
+              /*
+               * THE PREVIEW IS THE RUNNING PROJECT, NOT A RE-RENDER OF IT.
+               *
+               * The frame used to hold a sandboxed document with no network and no
+               * bundler, which could only ever show a self-contained HTML page — and
+               * neither kind is one: a project's source needs its own toolchain, and an
+               * app needs its API running before any client can render. So the preview
+               * points at the project itself, on the name it was published under and
+               * which the runner reported. What that costs is stated rather than
+               * hidden: publishing is what makes a project reachable, so there is
+               * nothing to frame until it has been published once.
+               */
+              previewUrl ? (
+                <div className="preview">
+                  <div className="preview-bar">
+                    <span className="preview-url" title={previewUrl}>
+                      {previewUrl.replace(/^https?:\/\//, "")}
+                    </span>
+                    <span className="topbar-spacer" />
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => setPreviewNonce((nonce) => nonce + 1)}
+                    >
+                      Reload
+                    </button>
+                    <a className="link-button" href={previewUrl} target="_blank" rel="noreferrer">
+                      Open in a new tab
+                    </a>
+                  </div>
+                  <iframe
+                    key={previewNonce}
+                    className="preview-frame"
+                    src={previewUrl}
+                    title={`${projectPlan?.name ?? activeFiles[0]?.path ?? "project"} preview`}
+                    sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
+                  />
+                </div>
+              ) : (
+                <div className="site-note">
+                  <strong>
+                    {build?.state === "running"
+                      ? "Building — the preview appears when it is running"
+                      : "Nothing is running yet"}
+                  </strong>
+                  <span>
+                    The preview is the project itself, served from its own container, so it shows
+                    up once the project has been published. Read the source under <em>Code</em>,
+                    then use <em>Publish It</em> — that builds it, starts it and puts the name in
+                    front of it.
+                    {projectPlan ? (
+                      <>
+                        {" "}
+                        This one is {projectPlan.runtime.language}
+                        {projectPlan.runtime.frameworks.length > 0
+                          ? ` (${projectPlan.runtime.frameworks.join(", ")})`
+                          : ""}
+                        , listening on port {projectPlan.run.port}.
+                      </>
+                    ) : null}
+                  </span>
+                </div>
+              )
             ) : (
               <CodeView files={activeFiles} />
             )}
