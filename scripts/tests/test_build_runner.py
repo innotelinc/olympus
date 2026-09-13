@@ -857,6 +857,14 @@ class TestProcess(RepoFixture):
         self.assertEqual(self.status()["state"], "succeeded")
 
     def test_the_build_does_not_see_repo_secrets(self) -> None:
+        # A value exported in this process legitimately outranks the file (see
+        # `allowed_env`), so clear it for this test: it is about which keys cross from
+        # the checkout and which must not, and it should not read differently on a
+        # machine where someone has exported the model.
+        exported = os.environ.pop("OMNIROUTE_MODEL", None)
+        if exported is not None:
+            self.addCleanup(os.environ.__setitem__, "OMNIROUTE_MODEL", exported)
+
         (self.repo / ".env").write_text(
             "OMNIROUTE_MODEL=auto/coding\n"
             "AUTHENTIK_TOKEN=leak-me\n"
