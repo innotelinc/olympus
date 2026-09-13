@@ -64,14 +64,26 @@ class EnvFixture(unittest.TestCase):
         self.module.__file__ = str(self.script)
         self.addCleanup(self._restore)
 
+        # The environment is a shared, mutable input to the thing under test: the node's
+        # layering reads it, and several tests here set a variable on purpose. The whole
+        # environment is snapshotted and handed back rather than only the keys named in
+        # WATCHED — a test that exported a value used to leave it set for every file that
+        # ran afterwards, and what that produced was a failure somewhere else that read as
+        # the runner ignoring a checkout's `.env` when it was obeying an override nobody
+        # had exported.
+        self._saved_environ = dict(os.environ)
+        self.addCleanup(self._restore_environ)
+
         for key in WATCHED:
-            saved = os.environ.pop(key, None)
-            if saved is not None:
-                self.addCleanup(os.environ.__setitem__, key, saved)
+            os.environ.pop(key, None)
 
     def _restore(self) -> None:
         self.module.__file__ = self._saved_file
         self.module.repo_omniroute.cache_clear()
+
+    def _restore_environ(self) -> None:
+        os.environ.clear()
+        os.environ.update(self._saved_environ)
 
     def write_env(self, body: str) -> None:
         (self.checkout / ".env").write_text(body, encoding="utf-8")
