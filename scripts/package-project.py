@@ -541,8 +541,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Package a planned project into a runnable image.")
     parser.add_argument("slug", help="the build to package (builds/<slug>)")
     parser.add_argument("--image", help="override the image tag")
-    parser.add_argument("--no-build", action="store_true", help="write the files, do not build the image")
-    parser.add_argument("--dry-run", action="store_true", help="say what would happen")
+    parser.add_argument("--no-build", action="store_true", help="write the files and the manifest, do not build the image")
+    # Not the same as --no-build, and the difference is worth naming because it is
+    # what makes the Dockerfile reviewable before a build: this writes the
+    # Dockerfile from the plan and stops, so `--dry-run` then reading the file is
+    # how the plan is inspected without spending a build on it.
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="write the Dockerfile from the plan, then stop before the image and the manifest",
+    )
     args = parser.parse_args(argv)
 
     if not SLUG_PATTERN.fullmatch(args.slug):

@@ -48,6 +48,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# The plan contract, from the script beside this one. `sys.path` is set here rather
+# than relying on how the process was started, because the tests load this file by
+# path and the unit runs it from the checkout.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import project_plan  # noqa: E402 - the path insert above is what makes this importable
+
 PROTOCOL_VERSION = 1
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -354,54 +361,36 @@ def parse_plan(value: object) -> dict | None:
     """
     if value is None:
         return None
-    if not isinstance(value, dict):
-        raise RequestError("plan is not an object")
+    try:
+        # The rules themselves live in `project_plan`, because three readers need
+        # them: this boundary, the packager and runtime that read the plan off disk,
+        # and the greenfield workflow that plans a spec before building it. Two
+        # copies of "what is a valid plan" drift where drift is most expensive — a
+        # plan one side accepts and the other refuses.
+        #
+        # `coerce` is off: this plan has been to the browser and back, where the
+        # parser already typed every field, so a quoted port here means the contract
+        # was broken rather than that a model was being loose.
+        return project_plan.normalize_plan(value)
+    except project_plan.PlanError as error:
+        raise RequestError(f"plan: {error}") from error
 
-    run = value.get("run")
-    if not isinstance(run, dict):
-        raise RequestError("plan has no `run` section")
 
-    def command(key: str) -> str:
-        raw = run.get(key)
-        if raw in (None, ""):
-            return ""
-        if not isinstance(raw, str):
-            raise RequestError(f"plan run.{key} is not a string")
-        # One line, because a newline in a Dockerfile RUN is a line continuation and
-        # would silently join the next instruction onto this command.
-        text = " ".join(raw.split())
-        if len(text) > 500:
-            raise RequestError(f"plan run.{key} is longer than 500 characters")
-        return text
+def read_plan(build_dir: Path) -> dict | None:
+    """The plan already in a build directory, validated, or None when there is none.
 
-    start = command("start")
-    if not start:
-        raise RequestError("plan has no start command")
-
-    runtime = value.get("runtime") if isinstance(value.get("runtime"), dict) else {}
-
-    return {
-        "v": 1,
-        "name": str(value.get("name") or "")[:120],
-        "kind": "website" if value.get("kind") == "website" else "app",
-        "summary": str(value.get("summary") or "")[:400],
-        "runtime": {
-            "language": str(runtime.get("language") or "")[:40],
-            "database": (str(runtime.get("database"))[:40] if runtime.get("database") else None),
-        },
-        "run": {
-            "install": command("install"),
-            "build": command("build"),
-            "start": start,
-            "port": run.get("port") if isinstance(run.get("port"), int) else None,
-            "healthcheck": (
-                str(run.get("healthcheck"))[:200]
-                if isinstance(run.get("healthcheck"), str) and run.get("healthcheck").startswith("/")
-                else "/"
-            ),
-        },
-        "notes": (str(value.get("notes"))[:1200] if value.get("notes") else None),
-    }
+    A build does not have to have been given a plan to have one: `make app` and the
+    app-builder CI job run the greenfield workflow, whose first node plans the spec
+    and writes `plan.json` into the directory it is about to build. The plan is the
+    same contract either way, so what the build is packaged with is decided by what
+    is on disk rather than by which path started it.
+    """
+    plan = project_plan.read_plan_file(build_dir)
+    if plan is None and (build_dir / project_plan.PLAN_NAME).is_file():
+        # Present but unreadable: said out loud, because the alternative is a report
+        # that reads like a project nobody planned.
+        log(f"{build_dir}/{project_plan.PLAN_NAME} is not a usable plan — packaging it the old way")
+    return plan
 
 
 def write_plan(build_dir: Path, plan: dict | None) -> None:
@@ -414,7 +403,7 @@ def write_plan(build_dir: Path, plan: dict | None) -> None:
     if not plan:
         return
     build_dir.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(build_dir / "plan.json", plan)
+    write_json_atomic(build_dir / project_plan.PLAN_NAME, plan)
 
 
 def read_json(path: Path) -> object | None:
@@ -1242,6 +1231,13 @@ class Runner:
         kind = spec.get("kind") if spec.get("kind") in self.PACKAGERS else "app"
         plan = spec.get("plan") if isinstance(spec.get("plan"), dict) else None
         build_dir = resolve_build_dir(self.repo, slug)
+
+        # A spec-driven build — `make app`, the app-builder CI job — carries no plan
+        # in its request and has one on disk, written by the workflow's planning node
+        # before the agent ran. Reading it here is what makes the two paths package
+        # the same way instead of the CLI path falling back to the fixed scaffold.
+        if plan is None:
+            plan = read_plan(build_dir)
 
         if plan:
             # A planned project: the generic packager, and no `--publish` flag,
