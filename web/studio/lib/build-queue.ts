@@ -52,6 +52,15 @@ export const RUNNER_STALE_SECONDS = 60;
  */
 export type BuildState = "running" | "succeeded" | "failed" | "cancelled";
 
+/**
+ * Which job the queue is carrying.
+ *
+ * `build` runs the factory on a spec (`make app`). `publish` takes the files
+ * Studio has on screen, packages them and puts them on a name — it manufactures
+ * nothing and writes no spec, which is why "publish" is not a flag on "build".
+ */
+export type BuildAction = "build" | "publish";
+
 export type BuildArtifact = {
   dir: string;
   files: number | null;
@@ -92,6 +101,8 @@ export type BuildStatus = {
   artifact: BuildArtifact | null;
   /** Present only for a packaged website build. */
   site: BuildSite | null;
+  /** Present only for a publish job that put the site on a name. */
+  publishedUrl: string | null;
   logTail: string;
 };
 
@@ -108,6 +119,7 @@ export type RunnerState = {
 export type QueuedBuild = {
   job: string;
   slug: string;
+  /** Empty for a publish, which writes no spec. */
   filename: string;
   spec: string;
   path: string;
@@ -208,23 +220,16 @@ function newJobId(): string {
 }
 
 /**
- * Write the spec and queue a build for it.
+ * Make sure the queue can be written and a runner will read it, then write one
+ * request atomically.
  *
- * `replace` is one decision that covers both overwrites: an existing spec in
- * `build-requests/` and an existing app in `builds/`. Both are refused without
- * it, because both destroy something the operator may have been comparing
- * against. The UI asks first, exactly as the export flow does.
+ * Both jobs need this and both would otherwise get it subtly different: the
+ * writability check first (a queue that cannot be written is a deployment fault,
+ * and reporting "no runner" for it sends the operator to fix the wrong thing),
+ * then the runner heartbeat, then write-beside-and-rename — the runner scans the
+ * directory continuously, so a half-written request must never be claimable.
  */
-export function queueBuild(
-  project: Project,
-  options: { replace?: boolean; publish?: boolean } = {},
-): QueuedBuild {
-  const replace = options.replace === true;
-  const publish = options.publish === true;
-  const dir = buildQueueDir();
-
-  // Writability first. A queue that cannot be written is a deployment fault, and
-  // reporting "no runner" for it would send the operator to fix the wrong thing.
+function submitRequest(dir: string, job: string, request: Record<string, unknown>): { runner: RunnerState; target: string } {
   try {
     mkdirSync(dir, { recursive: true });
   } catch {
@@ -241,30 +246,6 @@ export function queueBuild(
     );
   }
 
-  // The spec is regenerated unconditionally: the build must describe what is on
-  // screen, not whatever was exported last time. The conflict is surfaced the
-  // same way the export route surfaces it, so the UI has one flow to handle.
-  const written = writeFactorySpec(project, { overwrite: replace });
-
-  const slug = specSlug(project.title);
-  const job = newJobId();
-  const request = {
-    v: 1,
-    job,
-    spec: `build-requests/${written.filename}`,
-    slug,
-    title: project.title.slice(0, 120),
-    requested_by: "studio",
-    requested_at: new Date().toISOString(),
-    replace,
-    // The runner has to know which contract to hold the build to: for a website,
-    // writing files is not the finish line, packaging into `dist/` is.
-    kind: project.kind,
-    publish,
-  };
-
-  // Beside the target, then renamed: the runner scans this directory
-  // continuously, and a half-written request must never be claimable.
   const target = join(dir, `${job}.request.json`);
   const temporary = join(dir, `.${job}.request.json.${process.pid}.tmp`);
 
@@ -276,16 +257,96 @@ export function queueBuild(
     throw new BuildQueueError(notWritable(dir), 503);
   }
 
+  return { runner, target };
+}
+
+/**
+ * Write the spec and queue a build for it.
+ *
+ * `replace` is one decision that covers both overwrites: an existing spec in
+ * `build-requests/` and an existing app in `builds/`. Both are refused without
+ * it, because both destroy something the operator may have been comparing
+ * against. The UI asks first, exactly as the export flow does.
+ */
+export function queueBuild(
+  project: Project,
+  options: { replace?: boolean; publish?: boolean } = {},
+): QueuedBuild {
+  const replace = options.replace === true;
+  const publish = options.publish === true;
+  const dir = buildQueueDir();
+
+  // The spec is regenerated unconditionally: the build must describe what is on
+  // screen, not whatever was exported last time. The conflict is surfaced the
+  // same way the export route surfaces it, so the UI has one flow to handle.
+  const written = writeFactorySpec(project, { overwrite: replace });
+
+  const slug = specSlug(project.title);
+  const job = newJobId();
+  const { runner, target } = submitRequest(dir, job, {
+    v: 1,
+    job,
+    action: "build",
+    spec: `build-requests/${written.filename}`,
+    slug,
+    title: project.title.slice(0, 120),
+    requested_by: "studio",
+    requested_at: new Date().toISOString(),
+    replace,
+    // The runner has to know which contract to hold the build to: for a website,
+    // writing files is not the finish line, packaging into `dist/` is.
+    kind: project.kind,
+    publish,
+  });
+
   return {
     job,
     slug,
     filename: written.filename,
-    spec: request.spec,
+    spec: `build-requests/${written.filename}`,
     path: target,
     replaced: written.replaced,
     runner,
     kind: project.kind,
     publish,
+  };
+}
+
+/**
+ * Publish the files on screen, without running the factory.
+ *
+ * The files travel with the request because the runner cannot read Studio's data
+ * volume — and because the point of this action is to put *these* files on a
+ * name. No spec is written: a spec is factory input, and a publish that left one
+ * behind would be picked up by the next bare `make app`.
+ */
+export function queuePublish(project: Project): QueuedBuild {
+  const dir = buildQueueDir();
+  const slug = specSlug(project.title);
+  const job = newJobId();
+
+  const { runner, target } = submitRequest(dir, job, {
+    v: 1,
+    job,
+    action: "publish",
+    slug,
+    title: project.title.slice(0, 120),
+    requested_by: "studio",
+    requested_at: new Date().toISOString(),
+    kind: project.kind,
+    files: project.files.map((file) => ({ path: file.path, contents: file.contents })),
+  });
+
+  return {
+    job,
+    slug,
+    filename: "",
+    spec: "",
+    path: target,
+    replaced: false,
+    runner,
+    kind: project.kind,
+    publish: true,
   };
 }
 
@@ -353,6 +414,7 @@ function toBuildStatus(raw: unknown): BuildStatus | null {
             builtAt: asString((site as Record<string, unknown>).built_at),
           }
         : null,
+    publishedUrl: asString(record.published_url),
     logTail: asString(record.log_tail) ?? "",
   };
 }

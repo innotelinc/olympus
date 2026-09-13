@@ -41,16 +41,20 @@ export type StoredFile = {
  * What is being built. Two kinds, because they are two different products with
  * two different delivery paths — not one product with an option.
  *
- * `app` is the original Studio contract: self-contained HTML/CSS/JS that runs the
- * moment it renders, inlined into a sandboxed iframe with no network and no build
- * step. It is finished when it is generated.
+ * `app` is a full-stack application: a React client, an HTTP API and a SQLite
+ * database, because a weight-loss tracker or a recipe box has state, and state
+ * needs a server to write it down. The model writes the data model
+ * (`server/schema.sql`) and the interface (`src/App.tsx`); the packager writes the
+ * server and the image around them. It is finished when it has been *packaged* and
+ * is running as its own container, and its delivery is a zip or a published name.
  *
- * `website` is a Vite + React + TypeScript project. It cannot run from source —
- * JSX needs a build — so it is finished when it has been *packaged* (`dist/`) on
- * the runner, and its delivery is a zip or a published site rather than a saved
- * library entry. Keeping the kind on the project is what lets every later step
- * (which prompt, what the preview shows, what the publisher copies, what
- * "export to factory" writes) decide correctly without re-detecting it.
+ * `website` is a Vite + React + TypeScript project with no server and no data: it
+ * is finished when it has been packaged (`dist/`) on the runner, and its delivery
+ * is a zip or a published site served as static files.
+ *
+ * Keeping the kind on the project is what lets every later step (which prompt,
+ * what a build has to produce, what the preview shows, what the publisher runs,
+ * what "export to factory" writes) decide correctly without re-detecting it.
  */
 export type ProjectKind = "app" | "website";
 

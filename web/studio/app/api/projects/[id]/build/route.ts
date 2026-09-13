@@ -5,6 +5,7 @@ import {
   latestBuildStatus,
   listBuildHistory,
   queueBuild,
+  queuePublish,
   readBuildStatus,
   readRunnerState,
 } from "@/lib/build-queue";
@@ -84,40 +85,53 @@ export async function POST(request: Request, context: Context): Promise<Response
     return fail("This app has no files yet — build something in Studio first.", 409);
   }
 
-  // `{ "replace": true }` is the operator agreeing to overwrite an existing spec
-  // and/or an existing `builds/<slug>`. Without it, either existing artifact is a
-  // conflict rather than something quietly destroyed. `{ "publish": true }` is
-  // the separate decision to stage the built site for the host to serve, and it
-  // only means anything for a website.
+  // Two jobs share this route because they share the queue and the panel that
+  // watches it, and they are named explicitly rather than inferred:
+  //
+  //   `action: "build"` (default) — the factory. `{ "replace": true }` is the
+  //   operator agreeing to overwrite an existing spec and/or an existing
+  //   `builds/<slug>`; without it either existing artifact is a conflict rather
+  //   than something quietly destroyed. `{ "publish": true }` additionally stages
+  //   the built site for the host to serve.
+  //
+  //   `action: "publish"` — takes the files on screen and puts them on a name. No
+  //   factory run, no spec. This is what makes "Publish It" publish what the
+  //   operator is looking at rather than whatever a rebuild would produce.
   let replace = false;
   let publish = false;
+  let action = "build";
   try {
     const payload = (await request.json()) as unknown;
     if (typeof payload === "object" && payload !== null) {
       const body = payload as Record<string, unknown>;
       replace = body.replace === true;
       publish = body.publish === true;
+      if (body.action === "publish") action = "publish";
     }
   } catch {
-    /* no body */
+    /* no body — a plain build */
   }
 
   try {
-    const queued = queueBuild(project, { replace, publish });
+    const queued = action === "publish" ? queuePublish(project) : queueBuild(project, { replace, publish });
     return Response.json(
       {
         job: queued.job,
         slug: queued.slug,
         spec: queued.spec,
+        action,
+        kind: queued.kind,
         replaced: queued.replaced,
         runner: queued.runner,
         build: readBuildStatus(queued.job),
         // What the runner will actually do, said out loud — a website build ends
         // with a packaging step an app's never has.
         next:
-          queued.kind === "website"
-            ? `make app SPEC=${queued.spec} && python3 scripts/package-website.py ${queued.slug}${queued.publish ? " --publish" : ""}`
-            : `make app SPEC=${queued.spec}`,
+          action === "publish"
+            ? `python3 scripts/package-website.py ${queued.slug} --publish && python3 scripts/studio-sites.py --publish ${queued.slug}`
+            : queued.kind === "website"
+              ? `make app SPEC=${queued.spec} && python3 scripts/package-website.py ${queued.slug}${queued.publish ? " --publish" : ""}`
+              : `make app SPEC=${queued.spec}`,
       },
       { status: 202, headers: NO_STORE },
     );

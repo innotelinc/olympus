@@ -20,7 +20,7 @@ Olympus is a deterministic issue → PR factory for the repo it lives in: Archon
 
 | Area | Change |
 | --- | --- |
-| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files → live preview, Authentik OIDC sign-in, sandboxed output, saved apps scoped to the signed-in identity, a **Build it** button that runs `make app` for real on the host runner and reports its progress — with the app's earlier builds listed beside it and a **Cancel** that stops the run — and an **Export to factory** path that writes a `build-requests/` spec from a saved build (`make app SPEC=…`, or commit it and let CI manufacture). Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
+| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files, Authentik OIDC sign-in, sandboxed output, saved builds scoped to the signed-in identity, and five deliveries with one job each: **Build It** (write or add on), **Factory Build** (`make app` for real on the host runner, with its progress and a **Cancel**), **Publish It** (put *what is on screen* on a name), **Export It** (a `build-requests/` spec for CI or a hand-off), **Download It** (a zip). Two kinds: an **app** is full-stack — React client, its own API and a SQLite database, run as one container per app — and a **website** is static React. Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
 | **SecretOps** | Infisical is **replaced by Cerulean Vault** (KV v2). The `infisical://` reference convention becomes `vault://`, and the bootstrap helper is now `scripts/omniroute-vault.sh` (was `scripts/omniroute-infisical.sh`). |
 | **Compose** | `compose.vault.yml` runs Vault locally; `compose.host-gateway.yml` is a host-network override for when the gateway is published on loopback only. |
 | **Factory** | `factory/doctor.py` and `factory/trigger.py` are published and report the factory's **real** state (no simulated poll loop); CI pins the Archon integration and only manufactures a real new spec. |
@@ -125,6 +125,32 @@ docker compose up -d studio
 # nothing in the UI saying so. This target cannot get that wrong:
 make docker-studio-up
 ```
+
+### 4. Delivering a build: a name, a container, or a zip
+
+Studio's two kinds leave by different doors, and the difference is whether the
+thing has state.
+
+```bash
+# A WEBSITE is static files: staged here, served by olympus-sites, named at the edge.
+make sites-up                                  # the server both kinds are fronted by
+make sites-wildcard                            # once: *.studio.olympus.innotel.us + one certificate
+make site-publish SLUG=todo-list               # package, stage, and put it on a name
+make site-check HOST=todo-list.studio.olympus.innotel.us
+
+# An APP is a running service: React client + its own API + SQLite.
+make app-package SLUG=weight-tracker           # build the client, write the archive
+make app-up SLUG=weight-tracker                # image, container, loopback port, nginx vhost
+make app-publish SLUG=weight-tracker           # the three above, then the name
+make apps-list
+make app-down SLUG=weight-tracker              # stop it, keep the database
+```
+
+Both are published through Cerulean + NPM under the same wildcard, and
+`studio-sites.py` does not know which is which — the app's generated vhost does the
+routing, so the edge never learns a per-app port. Each app's data lives on the host
+at `$OLYMPUS_APPS_ROOT/data/<slug>/`, so a rebuild keeps it. See
+[docs/site-publishing.md](docs/site-publishing.md).
 
 Studio needs a gateway and (optionally) OIDC. `make setup` scaffolds `.env`; the keys that matter are `OMNIROUTE_BASE_URL` + `OMNIROUTE_API_KEY` for generation, and `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URI` / `STUDIO_SESSION_SECRET` for sign-in. **Auth stays off until it is configured** — run `make studio-oidc` (or `python3 scripts/authentik-studio-app.py`) to create or repair the Cerulean Authentik application and provider for it. See [web/studio/README.md](web/studio/README.md) for the full contract.
 
@@ -257,7 +283,7 @@ source checkout of the factory — not in this distribution repo.
 | [web/studio/README.md](web/studio/README.md) | Studio — the vibe-coding web UI: how to run it, configuration, output contract, security posture |
 | [docs/stack.md](docs/stack.md) | This platform's role in the [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) (FactoryOps), including SecretOps via Cerulean Vault (KV v2) and the `vault://` reference convention |
 | [docs/gateway-sso.md](docs/gateway-sso.md) | Putting the OmniRoute dashboard behind Cerulean Authentik — why the gateway cannot do it natively, and the proxy that does |
-| [docs/site-publishing.md](docs/site-publishing.md) | Studio's two kinds of build — an **app** (finished when generated) and a **website** (Vite + React, finished when packaged) — the `make site-package` → `sites-up` → `site-publish` pipeline, and the ONYX (storage/NAS/app-hosting) integration points |
+| [docs/site-publishing.md](docs/site-publishing.md) | Studio's two kinds of build — an **app** (React + API + SQLite, one container per app) and a **website** (Vite + React, static) — the `app-package`/`app-up`/`app-publish` and `site-package`/`sites-up`/`site-publish` pipelines, how a name reaches a container, and the ONYX (storage/NAS/app-hosting) integration points |
 | [UPSTREAMS.md](UPSTREAMS.md) | Vendored upstream mirrors (Archon, AI Software Factory, skills, OmniRoute, archon-cli) — provenance, pinned SHAs, licenses, recovery and re-sync |
 | [factory/APP_SPEC_TEMPLATE.md](factory/APP_SPEC_TEMPLATE.md) | The spec format `make new-request` scaffolds and the manufacture step reads |
 | `.env.example` | Every knob the stack reads, grouped and commented (gateway, Studio, OIDC, Vault, Cerulean, NPM, Magnate) |

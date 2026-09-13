@@ -1,77 +1,202 @@
-# Publishing a Studio website
+# Publishing a Studio build
 
-Studio builds two kinds of thing, and only one of them is finished when it is
-generated.
+Studio builds two kinds of thing, they are different products, and neither is
+finished when it is generated.
 
 | | **App** | **Website** |
 |---|---|---|
-| What it is | One self-contained page — HTML, CSS, JS | A Vite + React 19 + TypeScript project |
-| Preview | Runs live in the sandboxed iframe as it streams | None until it is built; JSX needs a compiler |
-| Finished when | It has been generated | `dist/` exists |
-| Delivered as | A saved library entry, a zip, a factory spec | `dist/` on a name, or a zip of source + `dist/` |
+| What it is | A full-stack application: React client + Node HTTP API + SQLite | A Vite + React 19 + TypeScript project |
+| Has state | Yes — a database, so what someone enters today is there tomorrow | No — static files, with nowhere to write |
+| The model writes | `src/App.tsx`, `server/schema.sql` | `src/App.tsx` (+ components, styles) |
+| Preview | None until it is running; JSX needs a build and the API needs a server | None until it is built; JSX needs a compiler |
+| Finished when | `dist/client` exists **and** the container answers `/api/health` | `dist/` exists |
+| Delivered as | A container behind `<slug>.<suffix>`, or a zip of client + server + Dockerfile | `dist/` on a name, or a zip of source + `dist/` |
 
-Nothing about this is a preference. A React site is a build artifact, and the only
-honest place to say so is here.
+Nothing about this is a preference. A React site is a build artifact, and an
+application is a process with a database. The only honest place to say so is here.
 
-## The pipeline
+## The four deliveries
+
+Studio offers four things you can do with a build, and each has exactly one job.
+They used to overlap — one button rebuilt *and* published — which made the words
+useless for deciding which to press.
+
+| | What it does | What it does not do |
+|---|---|---|
+| **Build It** | The model writes, or adds on to, the app in Studio | It does not touch the factory |
+| **Factory Build** | Runs `make app` (Archon + the model) from a spec, then packages whatever came out | It does not publish a name |
+| **Publish It** | Packages **the files on screen**, runs an app, and puts the name in front of it | It does not rebuild. Publishing what a rebuild would produce, rather than what you are looking at, is a different build with the same name |
+| **Export It** | Writes a `build-requests/` spec for CI or a hand-off, with that kind's next steps | It does not build |
+| **Download It** | A zip of the source — and of the built output once packaged | It does not publish |
+
+## The pipeline: a website
 
 ```
-model writes src/App.tsx
+model writes src/App.tsx  ("Build It", repeatedly — this is not one-shot)
    │
-   ├─ scripts/package-website.py <slug>          scaffold + npm ci + vite build
-   │      → builds/<slug>/dist/                  what you serve
-   │      → builds/<slug>/site.zip               source + dist, for handing over
-   │      → builds/<slug>/site.manifest.json     what was built, and when
+   ├─ Publish It → runner materialises the files into builds/<slug>/
+   │      │
+   │      ├─ scripts/package-website.py <slug> --publish
+   │      │      → builds/<slug>/dist/            what you serve
+   │      │      → builds/<slug>/site.zip         source + dist + the Vite project
+   │      │      → builds/<slug>/site.manifest.json
+   │      │      → $OLYMPUS_SITES_ROOT/<slug>/    staged for the server
+   │      │
+   │      └─ scripts/studio-sites.py --publish <slug>
+   │             → one NPM proxy host: <slug>.<suffix> → this host:SITE_PORT
    │
-   ├─ scripts/package-website.py <slug> --publish
-   │      → $OLYMPUS_SITES_ROOT/<slug>/          a copy of dist/, staged to serve
-   │
-   ├─ make sites-up                              nginx serves the staged tree
-   │      → http://<this host>:$SITE_PORT/<slug>/
-   │
-   └─ make site-publish SLUG=<slug> HOST=<name>  Cerulean DNS + cert + NPM host
-          → https://<name>/                       the published site
+   └─ https://<slug>.<SITE_HOST_SUFFIX>/          live, wildcard TLS
 ```
 
-Four steps, and each one is useful on its own. That is deliberate: packaging needs
-no configuration and is testable offline, while publishing needs Cerulean and the
-edge, and a failure there must not discard a good build.
+`make sites-up` runs the server that serves both kinds. It selects a static site by
+**hostname** — the leftmost label of `<slug>.<suffix>` is the directory — and falls
+back to the path form `/<slug>/` for anything arriving by address rather than by
+name. That is why the edge needs only a plain forward and no path rewriting.
 
-### From Studio
+## The pipeline: an application
 
-**Build & publish** on a website does the first two steps through the host-side
-build runner (`make app`, then packaging). **Download .zip** saves the archive —
-the packaged one when there is one, the source otherwise. Export to factory writes
-a spec whose *Next steps* section names the packaging command, because a spec that
-stopped at `make app` would hand the factory source that nothing can open.
+An app is the same shape with two more steps, and the reason is that generating it
+is not enough to have it: there is a client to build, a server to run and a
+database to keep.
 
-### From a shell
+```
+model writes src/App.tsx + server/schema.sql   ("Build It", repeatedly)
+   │
+   ├─ Publish It → runner materialises the files into builds/<slug>/
+   │      │
+   │      ├─ scripts/package-app.py <slug>
+   │      │      → builds/<slug>/dist/client/          the built client
+   │      │      → builds/<slug>/server/main.ts        the generated API
+   │      │      → builds/<slug>/app.zip               client + server + Dockerfile
+   │      │      → builds/<slug>/app.manifest.json
+   │      │
+   │      ├─ scripts/app-runtime.py --up <slug> --build
+   │      │      → image olympus-app-<slug>:latest
+   │      │      → container olympus-app-<slug>, 127.0.0.1:<port> → 3000
+   │      │      → /var/lib/olympus/apps/data/<slug>/   the SQLite file
+   │      │      → /var/lib/olympus/apps/nginx/<slug>.conf
+   │      │      → nginx -s reload on olympus-sites
+   │      │
+   │      └─ scripts/studio-sites.py --publish <slug>
+   │             → one NPM proxy host, exactly as a website gets
+   │
+   └─ https://<slug>.<SITE_HOST_SUFFIX>/ → olympus-sites → 127.0.0.1:<port>
+```
+
+### What the model writes, and what it cannot
+
+The packager owns `package.json`, `vite.config.ts`, `tsconfig.json`, `index.html`,
+`src/main.tsx`, `server/main.ts` and the `Dockerfile` — byte-for-byte from
+constants, for the same reason the website scaffold is generated: a model-chosen
+dependency range turns "it builds" into a coin flip.
+
+`server/main.ts` is generated because it is the **request path**, and that is the
+one place in a generated application where a mistake is not cosmetic. The model
+writes the data model instead — `server/schema.sql` — and the server derives a JSON
+REST API from the tables in it:
+
+```
+GET    /api/health
+GET    /api/<table>?limit=&offset=&order=&<column>=...
+POST   /api/<table>
+GET    /api/<table>/<id>
+PATCH  /api/<table>/<id>
+DELETE /api/<table>/<id>
+```
+
+Table and column names are matched against the live schema before they are quoted
+into SQL, so a request cannot name something that is not there — a 404 for an
+unknown table, a 400 for an unknown field rather than a silently dropped one.
+
+### One container per app, one port nobody sees
+
+Each app gets its own image, container, port and SQLite file, so two apps cannot
+collide over a table name or a connection. The port is published to **loopback
+only**:
+
+```
+127.0.0.1:21400  →  olympus-app-weight-tracker:3000
+```
+
+`olympus-sites` runs with `network_mode: host`, so it — and therefore the edge —
+reaches `127.0.0.1:<port>`. Nothing on the LAN does. The only way in is by name
+through the edge, which is where the TLS and the identities live.
+
+The name is routed by a **generated nginx vhost**, not by a port at the edge:
+`app-runtime.py` writes `<slug>.conf` with an exact `server_name`, and an exact name
+beats the static template's regex — so an app's name reaches its container while
+every other name still falls through to the static tree. This is what keeps
+`studio-sites.py --publish <slug>` identical for both kinds: the edge hears one port
+for everything, forever.
 
 ```bash
-make site-package SLUG=todo-list          # build + stage (needs the build to exist)
-make sites-up                             # start the static server
-make site-publish SLUG=todo-list HOST=notes.sites.innotel.us
-make site-check HOST=notes.sites.innotel.us
+make app-package SLUG=weight-tracker      # client build + archive
+make app-up      SLUG=weight-tracker      # image, container, vhost
+make app-publish SLUG=weight-tracker      # both, then the name
+make apps-list
+make app-down    SLUG=weight-tracker      # stop it, keep the database
+make app-remove  SLUG=weight-tracker      # stop it, delete the database and image
 ```
+
+Data lives in `/var/lib/olympus/apps/data/<slug>/app.sqlite` on the host, not in the
+container, so a rebuild keeps it. `make app-down` keeps it too — only `app-remove`
+deletes it, and that is the one command here that cannot be undone.
+
+### One wildcard, then instant
+
+Publishing a name used to mean a DNS record and its own Let's Encrypt order: a
+minute or more per site, which is not a button you can put in a UI. `make
+sites-wildcard` runs that slow half **once** — `*.studio.olympus.innotel.us` plus a
+single certificate covering every name under it. After that a publish is one NPM
+host, and it completes in seconds.
+
+```bash
+make sites-wildcard        # once per deployment
+make sites-up              # the static server
+make site-publish SLUG=todo-list
+make sites-list
+make site-check HOST=todo-list.studio.olympus.innotel.us
+make site-unpublish SLUG=todo-list
+```
+
+The name is **derived, never typed**: it is always `<slug>.<SITE_HOST_SUFFIX>`, the
+same slug the build directory uses. A free-form name would be a second namespace to
+keep in sync with the first, and the requests that go wrong would go wrong
+silently — pointing at another site's host.
+
+`cerulean_api.select_certificate` prefers a **dedicated** certificate over a
+wildcard when a name has one, so a site that later needs its own certificate can
+have one without this path fighting it. A wildcard covers exactly one label:
+`*.studio.olympus.innotel.us` covers `todo.studio.olympus.innotel.us` and neither
+`studio.olympus.innotel.us` nor `a.b.studio.olympus.innotel.us`.
 
 ## Configuration
 
 | Variable | Default | What it does |
 |---|---|---|
 | `OLYMPUS_SITES_ROOT` | `/var/lib/olympus/sites` | Staged sites on the host; mounted into `olympus-sites` |
-| `SITE_PORT` | `20130` | The static server's port — **also** the port `make site-publish` registers at the edge |
-| `SITE_EDGE_FORWARD_HOST` | *(empty)* | This host's LAN address. Empty makes `site-publish` refuse, rather than publish a name that answers nothing |
-| `SITE_HOST_SUFFIX` | `sites.innotel.us` | Default domain for `HOST` |
+| `OLYMPUS_APPS_ROOT` | `/var/lib/olympus/apps` | App runtime state: `runtime/`, `nginx/`, `data/`. The `nginx/` half is mounted into `olympus-sites` at `/etc/nginx/app-conf.d`, so it has to exist before `make sites-up` |
+| `APP_PORT_BASE` | `21400` | The first loopback port an app may be given |
+| `APP_PORT_RANGE` | `200` | How many to try before refusing. An app keeps the port it was first given, and the number is only reused once its record is gone |
+| `SITE_PORT` | `20130` | The static server's port — **also** the port a published site forwards to |
+| `SITE_HOST_SUFFIX` | `studio.olympus.innotel.us` | The domain names are built from: `<slug>.<suffix>` |
+| `SITE_EDGE_FORWARD_HOST` | *(empty)* | This host's LAN address. Empty makes publishing refuse, rather than put a name on the edge that answers nothing |
+| `SITE_CERT_RENEW_DAYS` | `30` | A certificate is reused only if it lasts this long |
 | `STUDIO_BUILDS_DIR` | `/app/builds` | Read-only mount Studio serves `site.zip` from |
 
 The staged tree is **outside the checkout** on purpose: served content is runtime
 state, and a served tree inside the repo is one `git add -A` away from being
 committed. The nginx config is a template (`deploy/nginx-sites.conf.template`)
-rendered by the image's own envsubst with `NGINX_ENVSUBST_FILTER=SITE_PORT` — one
-substitution, so nginx's `$uri` in `try_files` survives.
+rendered by the image's own envsubst with
+`NGINX_ENVSUBST_FILTER=SITE_PORT|SITE_HOST_SUFFIX` — those two substitutions and
+no more, so nginx's own `$uri` and `$site` survive. Application vhosts are **not** in
+that template: they are separate files under `/etc/nginx/app-conf.d` (a bind mount
+of `$OLYMPUS_APPS_ROOT/nginx`) pulled in by one `include`, because they change at
+runtime and a rendered template does not.
 
-Because `SITE_PORT` is read by both the server and the publish target, the edge and
-the listener cannot disagree about where a site answers.
+Because `SITE_PORT` and `SITE_HOST_SUFFIX` are read by the server, the publisher and
+the nginx template alike, the edge, the listener and the vhost cannot disagree
+about where a site answers.
 
 ## What is deliberately not automated
 
@@ -81,19 +206,36 @@ is the intent — a published site is meant to be public — and it is why the p
 not the site's only control. If a site has to be private, do not publish it; the
 zip download is the delivery path for that.
 
-**The static server is not in the default compose profile.** `make sites-up` opts
-in. A stack that has never published a site should not be running a web server.
+**The server is not in the default compose profile.** `make sites-up` opts in. A
+stack that has never published a site or an app should not be running a web server.
 
 **No clean-up.** Republishing replaces a slug's directory; nothing removes a site
 you have stopped publishing. The DNS record, the certificate and the NPM host stay
 until they are removed in Cerulean, which is the platform that owns them.
 
-## ONYX (Online Storage System) integration
+**App containers are not garbage-collected either.** `docker run --restart
+unless-stopped` means a published app comes back after a reboot and keeps coming
+back until `make app-down`. Nothing sweeps a container whose app you stopped using,
+because "stopped using" is not a thing the host can tell — the container idles at
+almost no cost.
+
+**An app is not behind Studio's identity.** The name resolves through the same
+trusted wildcard as a website, and the app's own vhost does not add an SSO gate.
+An app that needs a login has to bring its own — that is a real limitation, not a
+missing flag, and it is stated here so it is not discovered by publishing one.
+
+## ONYX (Online Storage System) integration — ON HOLD
+
+> **Status: on hold, not being pursued.** Nothing below is wired up, and nothing
+> in this repo calls ONYX. It is kept because the research is real and the
+> integration points are still the right ones whenever it is picked up — not as a
+> plan in progress. The current publishing path is entirely local: staged files on
+> this host, served by `olympus-sites`, published through Cerulean + NPM.
 
 ONYX is the platform that owns storage on this network — read the design docs at
-<https://innotelinc.github.io/onyx/>. It is relevant here because a published site
-is two things this stack does not own: **files that want to live on the NAS**, and
-**a name that wants to be a first-class ONYX surface** rather than a one-off.
+<https://innotelinc.github.io/onyx/>. It would be relevant here because a published
+site is two things this stack does not own: **files that want to live on the NAS**,
+and **a name that wants to be a first-class ONYX surface** rather than a one-off.
 
 What ONYX gives us, as documented:
 
@@ -127,6 +269,11 @@ turns "a directory on the olympus host" into "storage with snapshots, scrub and 
 restore path", which is the property ONYX exists to provide. It also makes the
 sites readable from any machine on the network over SMB, without a publish step.
 
+The same argument applies with more force to `OLYMPUS_APPS_ROOT/data/`, which holds
+each app's SQLite file. A site can be rebuilt from its spec; a database that someone
+has been entering a weight into every morning cannot. If only one of the two is put
+on the NAS, it should be that one.
+
 **2. Serve from ONYX app hosting instead of this stack's nginx.** ONYX's `v0.4
 "Jade"` milestone is apps — an app store, sandboxing and Docker integration — and
 `app.onyx.innotel.us` is the surface. When it lands, `olympus-sites` becomes
@@ -146,7 +293,7 @@ aws --endpoint-url https://storage.onyx.innotel.us s3 sync \
 This is also the answer to *rollback*: the local staging directory holds one
 version, and object storage holds all of them.
 
-### Why this is notes and not code
+### Why this is parked
 
 Steps 1–3 need one thing this checkout cannot prove it has: ONYX itself answering.
 `/mnt/onyx` exists on the Cerulean host but is empty (`drwxr-xr-x 2 root root 2`),

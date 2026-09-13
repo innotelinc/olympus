@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-check
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -227,34 +227,78 @@ site-package: ## Build a Studio website into a servable dist/ and stage it (SLUG
 	@if [ -z "$(SLUG)" ]; then echo "usage: make site-package SLUG=<slug>" >&2; exit 2; fi
 	python3 scripts/package-website.py $(SLUG) --publish
 
-# Package, then put the result on a name. The forward address defaults to the same
-# LAN address the gateway's edge uses, and the port defaults to SITE_PORT — one
-# variable, read by both this target and the nginx template, so the edge and the
-# server cannot disagree about where a site answers.
+# ONE WILDCARD, THEN INSTANT PUBLISHES.
 #
-# HOST is optional: with SITE_HOST_SUFFIX set, the name defaults to <slug>.<suffix>.
-site-publish: ## Stage a website and publish its public name (SLUG=<slug>, HOST=<name>)
-	@if [ -z "$(SLUG)" ]; then echo "usage: make site-publish SLUG=<slug> [HOST=<name>]" >&2; exit 2; fi; \
-	read_env() { sed -n "s/^$$1=//p" .env 2>/dev/null | tail -1 | tr -d "'\" "; }; \
-	host="$(HOST)"; \
-	suffix="$$(read_env SITE_HOST_SUFFIX)"; \
-	if [ -z "$$host" ]; then \
-		if [ -z "$$suffix" ]; then echo "set HOST=<name> or SITE_HOST_SUFFIX in .env" >&2; exit 2; fi; \
-		host="$(SLUG).$$suffix"; \
-	fi; \
-	forward="$$(read_env SITE_EDGE_FORWARD_HOST)"; \
-	if [ -z "$$forward" ]; then echo "SITE_EDGE_FORWARD_HOST is empty — set this host's LAN address, or the edge would publish a name that answers nothing" >&2; exit 2; fi; \
-	port="$$(read_env SITE_PORT)"; port="$${port:-20130}"; \
-	echo "packaging $(SLUG)"; \
-	python3 scripts/package-website.py "$(SLUG)" --publish || exit $$?; \
-	echo "publishing $$host → $$forward:$$port"; \
-	python3 scripts/cerulean-edge.py --fqdn "$$host" --forward-host "$$forward" --forward-port "$$port" $(ARGS)
+# Before this, every published name cost a DNS record and a certificate — a minute
+# or more of Let's Encrypt issuance per site, which is not a button you can put in
+# a UI. `sites-wildcard` runs the slow half once: `*.studio.olympus.innotel.us`
+# plus one certificate covering it. After that, `site-publish` adds only a proxy
+# host — seconds, no waiting, no per-name certificate.
+#
+# The name is always <slug>.<SITE_HOST_SUFFIX>; it is derived, never typed, so it
+# cannot drift from the build directory the slug already names.
+sites-wildcard: ## Create the wildcard name + certificate under which sites publish (once)
+	python3 scripts/studio-sites.py --wildcard $(ARGS)
+
+sites-list: ## List the sites published under the wildcard suffix
+	python3 scripts/studio-sites.py --list
+
+# The stage step is separate and it is what fills the site's directory; the publish
+# step only points a name at the server. Running both here is the convenience, not
+# the design — a republish of already-staged files is just `site-publish`.
+site-publish: ## Stage a website and put it on <slug>.<SITE_HOST_SUFFIX> (SLUG=<slug>)
+	@if [ -z "$(SLUG)" ]; then echo "usage: make site-publish SLUG=<slug>" >&2; exit 2; fi
+	python3 scripts/package-website.py "$(SLUG)" --publish || exit $$?
+	python3 scripts/studio-sites.py --publish "$(SLUG)" $(ARGS)
+
+site-unpublish: ## Take a published site off the edge (SLUG=<slug>, ARGS="--dry-run")
+	@if [ -z "$(SLUG)" ]; then echo "usage: make site-unpublish SLUG=<slug>" >&2; exit 2; fi
+	python3 scripts/studio-sites.py --remove "$(SLUG)" $(ARGS)
+
+# --- applications (Studio → one container per app) --------------------------
+#
+# An *app* is full-stack, so it has two more steps than a website and they are
+# separate for the same reason packaging and publishing are: the build is
+# deterministic and testable, and running a container is a deployment.
+#
+#   app-package   client build + the source archive (`dist/client`, `app.zip`)
+#   app-up        build the image, run the container, write its nginx vhost
+#   app-publish   app-up, then put <slug>.<SITE_HOST_SUFFIX> in front of it
+#
+# The vhost is what makes the edge generic: `olympus-sites` proxies the name to
+# the app's loopback port, so `site-publish` never learns an app-specific port.
+
+app-package: ## Build a Studio app's client and write its archive (SLUG=<slug>)
+	@if [ -z "$(SLUG)" ]; then echo "usage: make app-package SLUG=<slug>" >&2; exit 2; fi
+	python3 scripts/package-app.py "$(SLUG)" $(ARGS)
+
+app-up: ## Build and run a Studio app as its own container (SLUG=<slug>)
+	@if [ -z "$(SLUG)" ]; then echo "usage: make app-up SLUG=<slug>" >&2; exit 2; fi
+	python3 scripts/app-runtime.py --up "$(SLUG)" --build $(ARGS)
+
+app-down: ## Stop an app's container, keeping its database (SLUG=<slug>)
+	@if [ -z "$(SLUG)" ]; then echo "usage: make app-down SLUG=<slug>" >&2; exit 2; fi
+	python3 scripts/app-runtime.py --down "$(SLUG)" $(ARGS)
+
+app-remove: ## Stop an app and delete its container, database and image (SLUG=<slug>)
+	@if [ -z "$(SLUG)" ]; then echo "usage: make app-remove SLUG=<slug>" >&2; exit 2; fi
+	python3 scripts/app-runtime.py --remove "$(SLUG)" $(ARGS)
+
+apps-list: ## List the applications this host is running
+	python3 scripts/app-runtime.py --list
+
+app-publish: ## Package, run and publish an app on <slug>.<SITE_HOST_SUFFIX> (SLUG=<slug>)
+	@if [ -z "$(SLUG)" ]; then echo "usage: make app-publish SLUG=<slug>" >&2; exit 2; fi
+	python3 scripts/package-app.py "$(SLUG)" || exit $$?
+	python3 scripts/app-runtime.py --up "$(SLUG)" --build || exit $$?
+	python3 scripts/studio-sites.py --publish "$(SLUG)" $(ARGS)
 
 # The assertion that publishing actually published: the name is served by the
 # edge, from this host's staged tree, and the entry point is the built site
 # rather than the edge's error page. A name that 502s or 404s passes "the record
 # exists" and fails this, which is the difference worth checking.
-site-check: ## Confirm a published site answers with its own index.html (HOST=<name>)
+site-check: ## Confirm a published site answers with its own page (HOST=<name>)
+	@if [ -z "$(HOST)" ]; then echo "usage: make site-check HOST=<name>" >&2; exit 2; fi
 	@if [ -z "$(HOST)" ]; then echo "usage: make site-check HOST=<name>" >&2; exit 2; fi; \
 	code=$$(curl -s -o /tmp/site-check.html -w '%{http_code}' -m 15 "https://$(HOST)/" || true); \
 	if [ "$$code" != "200" ]; then echo "site: FAILED — HTTP $$code from https://$(HOST)/" >&2; exit 1; fi; \

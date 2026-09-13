@@ -32,10 +32,16 @@ function project(overrides: Partial<Project> = {}): Project {
     // what "finished" means, and a helper that left it out would hide that.
     kind: "app",
     prompt: "A markdown notes app with a live preview pane.",
+    // A full-stack app: the data model the API is derived from, the interface, and
+    // the styles. The three files the model is allowed to write, and no others.
     files: [
-      { path: "index.html", contents: "<!doctype html>\n<h1>Notes</h1>\n" },
-      { path: "styles.css", contents: "body { margin: 0; }\n" },
-      { path: "app.js", contents: "console.log('notes');\n" },
+      {
+        path: "server/schema.sql",
+        contents:
+          "CREATE TABLE IF NOT EXISTS notes (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  body TEXT NOT NULL\n);\n",
+      },
+      { path: "src/App.tsx", contents: "export default function App() { return null; }\n" },
+      { path: "src/index.css", contents: "body { margin: 0; }\n" },
     ],
     createdAt: "2026-09-12T00:00:00.000Z",
     updatedAt: "2026-09-12T01:00:00.000Z",
@@ -125,9 +131,10 @@ describe("buildFactorySpec", () => {
 
   it("infers the stack from the files it was given", () => {
     const { markdown } = buildFactorySpec(project());
-    expect(markdown).toContain("- HTML");
+    expect(markdown).toContain("- React 19 + TypeScript client, Node HTTP API, SQLite");
     expect(markdown).toContain("- CSS");
     expect(markdown).toContain("- JavaScript / TypeScript");
+    expect(markdown).toContain("- SQL / SQLite");
     expect(markdown).not.toContain("- Python");
   });
 
@@ -140,14 +147,22 @@ describe("buildFactorySpec", () => {
   it("names the entry point and the files' sizes", () => {
     const app = project();
     const { markdown } = buildFactorySpec(app);
-    const css = app.files.find((file) => file.path === "styles.css");
+    const css = app.files.find((file) => file.path === "src/index.css");
 
-    expect(markdown).toContain("The app opens at `index.html`.");
-    expect(markdown).toContain(`**\`styles.css\`** — styles (${css?.contents.length} B)`);
+    expect(markdown).toContain("The client's entry point is `src/App.tsx`.");
+    expect(markdown).toContain(`**\`src/index.css\`** — styles (${css?.contents.length} B)`);
+    // The schema is called out as the data model, because it is the thing that
+    // decides what the API can do — not just another file in the list.
+    expect(markdown).toContain("**`server/schema.sql`** — data model");
   });
 
   it("offers a runnable verification step rather than a slogan", () => {
-    expect(buildFactorySpec(project()).markdown).toContain("Open `index.html`");
+    // An app's bar is that it runs and its API answers. "Someone opened a page"
+    // passes for an app whose first request 400s.
+    const app = buildFactorySpec(project()).markdown;
+    expect(app).toContain("scripts/package-app.py");
+    expect(app).toContain("/api/health");
+    expect(app).toContain("`400`");
 
     const node = buildFactorySpec(
       project({ files: [{ path: "package.json", contents: "{}" }] }),
@@ -164,9 +179,9 @@ describe("buildFactorySpec", () => {
   it("inlines the build as reference, so this continues rather than restarts", () => {
     const { markdown } = buildFactorySpec(project());
     expect(markdown).toContain("## 📎 Reference build (from Studio)");
-    expect(markdown).toContain("### `index.html`");
-    expect(markdown).toContain("<!doctype html>");
-    expect(markdown).toContain("console.log('notes');");
+    expect(markdown).toContain("### `server/schema.sql`");
+    expect(markdown).toContain("CREATE TABLE IF NOT EXISTS notes");
+    expect(markdown).toContain("export default function App");
   });
 
   it("drops to an inventory when the build is too big to inline", () => {
@@ -238,10 +253,15 @@ describe("website specs", () => {
     expect(nextSteps.join(" ")).toContain("scripts/package-website.py product-site");
   });
 
-  it("tells an app it is already the deliverable", () => {
+  it("tells an app it still has to be packaged and run", () => {
+    // The opposite of what a website needs to be told, and the failure is the same
+    // shape: a `dist/` that renders and cannot save anything is not an app.
     const { markdown, nextSteps } = buildFactorySpec(project());
     expect(markdown).not.toContain("## 🌐 Packaging & delivery");
-    expect(nextSteps.join(" ")).toContain("builds/markdown-notes/index.html");
+    expect(markdown).toContain("## 🧱 Packaging & runtime");
+    expect(nextSteps.join(" ")).toContain("scripts/package-app.py markdown-notes");
+    expect(nextSteps.join(" ")).toContain("scripts/app-runtime.py --up markdown-notes");
+    expect(nextSteps.join(" ")).toContain("make site-publish SLUG=markdown-notes");
   });
 
   it("returns the next steps as the same list the spec prints", () => {
@@ -264,6 +284,15 @@ describe("entryPoint", () => {
     expect(entryPoint(files)).toBe("index.html");
     expect(entryPoint([{ path: "about.html", contents: "" }])).toBe("about.html");
     expect(entryPoint([{ path: "app.js", contents: "" }])).toBeNull();
+  });
+
+  it("prefers the client of a full-stack app, then its data model", () => {
+    expect(entryPoint(project().files, "app")).toBe("src/App.tsx");
+    expect(entryPoint([{ path: "server/schema.sql", contents: "" }], "app")).toBe(
+      "server/schema.sql",
+    );
+    // A website has no server, so its schema is not an entry point for it.
+    expect(entryPoint([{ path: "server/schema.sql", contents: "" }], "website")).toBeNull();
   });
 });
 

@@ -244,7 +244,9 @@ def resolve_slug(payload: dict, spec_rel: str) -> str:
     if not SLUG_PATTERN.fullmatch(slug):
         raise RequestError(f"unsafe app slug: {raw!r}")
 
-    if slug != Path(spec_rel).stem:
+    # With no spec there is nothing to cross-check the slug against; the slug is
+    # then simply the name of the app directory.
+    if spec_rel and slug != Path(spec_rel).stem:
         raise RequestError(
             f"slug {slug!r} does not match the spec name {Path(spec_rel).stem!r}"
         )
@@ -271,17 +273,41 @@ def validate_request(repo: Path, payload: object) -> dict:
     if not isinstance(job, str) or not JOB_ID_PATTERN.fullmatch(job):
         raise RequestError(f"malformed job id: {job!r}")
 
-    spec_target, spec_rel = resolve_spec(repo, payload.get("spec"))
-    slug = resolve_slug(payload, spec_rel)
-
-    title = payload.get("title")
-
     # What is being built. An unknown value is an app rather than a refusal: every
     # request written before the split means an app, and a queue that refuses the
     # requests already in it would strand a build the operator asked for.
     kind = payload.get("kind")
     if kind not in (None, "app", "website"):
         raise RequestError(f"unknown kind: {kind!r} (expected 'app' or 'website')")
+
+    action = payload.get("action")
+    if action not in (None, "build", "publish"):
+        raise RequestError(f"unknown action: {action!r} (expected 'build' or 'publish')")
+    action = action or "build"
+
+    # A publish has no spec, and that is not a shorthand: a spec exists to tell the
+    # factory what to manufacture, and a publish manufactures nothing. Writing one
+    # anyway would leave factory input behind that a bare `make app` would later
+    # build — a publish with a build as a side effect.
+    if action == "publish":
+        spec_target: Path | None = None
+        spec_rel = ""
+        slug = resolve_slug(payload, "")
+    else:
+        spec_target, spec_rel = resolve_spec(repo, payload.get("spec"))
+        slug = resolve_slug(payload, spec_rel)
+
+    title = payload.get("title")
+
+    # `publish` is the other action this queue carries, and it is a different job
+    # rather than a flag on the build job: it does not run the factory at all. It
+    # takes the files Studio has on screen, writes them into the app directory and
+    # packages *those* — which is what "Publish It" means. Running a factory build
+    # first would publish whatever Codex produced, which is a different app from
+    # the one the operator is looking at.
+    files = []
+    if action == "publish":
+        files = parse_files(payload.get("files"))
 
     return {
         "v": PROTOCOL_VERSION,
@@ -297,6 +323,8 @@ def validate_request(repo: Path, payload: object) -> dict:
         # the request says so explicitly (the UI asks first).
         "replace": payload.get("replace") is True,
         "kind": kind or "app",
+        "action": action,
+        "files": files,
         # Whether to stage `dist/` for the host to serve once it is built. A
         # website is packaged either way — a site that is not packaged is not a
         # site — but publishing is a separate, visible decision.
@@ -327,6 +355,106 @@ def write_json_atomic(path: Path, payload: dict) -> None:
         pass
 
 
+# A path Studio may hand over for materialisation. Strict for the same reason the
+# stored ones are: this becomes a path under `builds/`, written as the runner's
+# user, from a payload that arrived as a file from a browser-facing service.
+MAX_FILES = 60
+MAX_FILE_CHARS = 400_000
+MAX_PATH_CHARS = 200
+
+
+def safe_file_path(value: object) -> str:
+    """A relative, traversal-free path, or `""` for anything else."""
+    raw = value.strip().replace("\\", "/") if isinstance(value, str) else ""
+    if not raw or len(raw) > MAX_PATH_CHARS:
+        return ""
+    if raw.startswith("/") or re.match(r"^[A-Za-z]:", raw):
+        return ""
+    segments = [segment for segment in raw.split("/") if segment and segment != "."]
+    if not segments or any(segment == ".." for segment in segments):
+        return ""
+    return "/".join(segments)
+
+
+def parse_files(value: object) -> list[dict]:
+    """Validate a `files` payload, or refuse it. Never silently drop entries.
+
+    Dropping a file whose path did not validate would publish a site missing part
+    of itself and report success. A refusal is loud and the operator re-sends.
+    """
+    if not isinstance(value, list) or not value:
+        raise RequestError("a publish request must carry the files to publish")
+    if len(value) > MAX_FILES:
+        raise RequestError(f"too many files to publish: {len(value)} (limit {MAX_FILES})")
+
+    files: list[dict] = []
+    seen: set[str] = set()
+    total = 0
+
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise RequestError("every file must be an object with path and contents")
+        path = safe_file_path(entry.get("path"))
+        if not path:
+            raise RequestError(f"unsafe file path: {entry.get('path')!r}")
+        if path in seen:
+            raise RequestError(f"duplicate file path: {path!r}")
+        contents = entry.get("contents")
+        if not isinstance(contents, str):
+            raise RequestError(f"{path!r} has no contents")
+        if len(contents) > MAX_FILE_CHARS:
+            raise RequestError(f"{path!r} is too large ({len(contents)} chars, limit {MAX_FILE_CHARS})")
+        seen.add(path)
+        total += len(contents)
+        files.append({"path": path, "contents": contents})
+
+    return files
+
+
+# Kept across a materialise because they are caches and to delete them is to make
+# every publish re-download the dependency tree. `package-lock.json` is also what
+# makes a rebuild deterministic, so it is not merely an optimisation.
+KEEP_ON_MATERIALIZE = (
+    "node_modules/",
+    "package-lock.json",
+)
+
+
+def materialize(build_dir: Path, files: list[dict]) -> None:
+    """Make the app directory exactly the files given, plus the install cache.
+
+    The payload is the whole truth, so anything else goes. Deleting only the files
+    being rewritten is not enough and was the first thing this got wrong: a file the
+    operator removed in Studio survived on disk and was published anyway — invisible
+    for `src/`, which Vite bundles from imports, but not for `public/` assets, which
+    are copied wholesale, or for the archive, which would carry dead files.
+
+    The packager's own outputs (`dist/`, the scaffold, `site.zip`) are deleted here
+    and regenerated by the packaging step, so a stale `dist/` can never be served
+    against source that has changed.
+    """
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    for existing in sorted(build_dir.rglob("*"), reverse=True):
+        if not existing.is_file():
+            continue
+        relative = str(existing.relative_to(build_dir)).replace(os.sep, "/")
+        if relative.startswith(KEEP_ON_MATERIALIZE) or relative in KEEP_ON_MATERIALIZE:
+            continue
+        existing.unlink()
+
+    for entry in files:
+        target = build_dir / str(entry["path"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(str(entry["contents"]), encoding="utf-8")
+
+    # Empty directories left behind by the sweep would otherwise accumulate, and a
+    # `src/` with no files in it reads as a broken build rather than a clean one.
+    for existing in sorted(build_dir.rglob("*"), reverse=True):
+        if existing.is_dir() and not any(existing.iterdir()):
+            existing.rmdir()
+
+
 def read_site_manifest(build_dir: Path) -> dict | None:
     """The packaging summary `package-website.py` wrote, for a website build.
 
@@ -349,6 +477,68 @@ def read_site_manifest(build_dir: Path) -> dict | None:
         "zip": manifest.get("zip"),
         "built_at": manifest.get("built_at"),
     }
+
+
+def read_app_manifest(build_dir: Path) -> dict | None:
+    """The packaging summary `package-app.py` wrote, for a full-stack app build.
+
+    Read separately from the website's for the same reason those two are separate
+    from the agent's `MANIFEST.json`: "the model wrote files" and "there is a client
+    bundle and a server to run" are different claims, and only the second one means
+    the app can be started.
+    """
+    manifest = read_json(build_dir / "app.manifest.json")
+    if not isinstance(manifest, dict):
+        return None
+    if manifest.get("kind") != "app":
+        return None
+
+    return {
+        "entry": manifest.get("entry"),
+        "dist_files": manifest.get("dist_files"),
+        "dist_bytes": manifest.get("dist_bytes"),
+        "source_files": manifest.get("source_files"),
+        "image": manifest.get("image"),
+        "zip": manifest.get("zip"),
+        "built_at": manifest.get("built_at"),
+    }
+
+
+def read_packaged(build_dir: Path, kind: str) -> dict | None:
+    """Whatever the packager for this kind left behind, or None."""
+    return read_app_manifest(build_dir) if kind == "app" else read_site_manifest(build_dir)
+
+
+def image_tag_for(slug: str) -> str:
+    """An app's runtime image name. The same derivation `package-app.py` uses, so
+    the status and the container cannot disagree about what was published."""
+    return f"olympus-app-{slug}:latest"
+
+
+def read_app_runtime(slug: str) -> dict | None:
+    """What `app-runtime.py` recorded for an app, for reporting after a failure.
+
+    Read, never written, and read from the same place the runtime writes it, so a
+    publish that fails at the edge can say whether the container is up — which is
+    the difference between "retry the name" and "run the whole thing again".
+    """
+    root = os.environ.get("OLYMPUS_APPS_ROOT", "").strip() or None
+    if root is None:
+        # The runner is not the runtime; ask the same `.env` it asks.
+        for candidate in (Path(__file__).resolve().parent.parent / ".env",):
+            try:
+                root = parse_env_file(candidate.read_text(encoding="utf-8")).get(
+                    "OLYMPUS_APPS_ROOT"
+                )
+            except OSError:
+                root = None
+            if root:
+                break
+    if not root:
+        return None
+
+    record = read_json(Path(root) / "runtime" / f"{slug}.json")
+    return record if isinstance(record, dict) else None
 
 
 def read_manifest(build_dir: Path) -> dict | None:
@@ -515,16 +705,44 @@ class Runner:
             log_tail="",
         )
 
+        # A publish is a different job, not a variation on a build: it takes the
+        # files it was given, packages them and puts them on a name. It never runs
+        # the factory, and it never writes a spec.
+        if spec.get("action") == "publish":
+            pub_code, detail, site, published_url = self.run_publish(job, spec)
+            succeeded = pub_code == 0
+            self.write_status(
+                job,
+                **self.job_fields(spec),
+                state="succeeded" if succeeded else "failed",
+                started_at=started_at,
+                finished_at=now_iso(),
+                exit_code=pub_code,
+                message=detail,
+                artifact=None,
+                site=site,
+                published_url=published_url,
+                log_tail=log_tail(self.log_path(job)),
+            )
+            log(f"{'published' if succeeded else 'publish failed'} {slug}: {detail}")
+            running.unlink(missing_ok=True)
+            return
+
         exit_code, detail, state_override = self.run_build(job, spec, started_at)
 
-        # A website has one more step. It runs only when the agent produced
+        # Both kinds have one more step, and it runs only when the agent produced
         # something — packaging an empty directory would fail with a compiler error
         # about a missing src/App.tsx, which says nothing about the real problem.
         package_code = 0
-        if state_override is None and exit_code == 0 and spec.get("kind") == "website":
-            package_code, package_detail = self.run_package(job, spec)
-            if package_code != 0:
-                detail = package_detail
+        if state_override is None and exit_code == 0 and spec.get("kind") in self.PACKAGERS:
+            # Only when the agent actually produced something. Packaging a directory
+            # the agent never wrote fails on a missing src/App.tsx, and that message
+            # says nothing about the real problem — which is that nothing was
+            # manufactured. `read_manifest` is the agent's own account of its output.
+            if read_manifest(resolve_build_dir(self.repo, slug)) is not None:
+                package_code, package_detail = self.run_package(job, spec)
+                if package_code != 0:
+                    detail = package_detail
 
         # A cancelled build is reported as cancelled, not as a failure with an
         # inscrutable exit code — and a half-written app directory is removed, so
@@ -553,14 +771,15 @@ class Runner:
             return
 
         build_dir = resolve_build_dir(self.repo, slug)
+        kind = spec.get("kind") if spec.get("kind") in self.PACKAGERS else "app"
         artifact = read_manifest(build_dir)
-        site = read_site_manifest(build_dir) if spec.get("kind") == "website" else None
+        site = read_packaged(build_dir, kind) if kind in self.PACKAGERS else None
 
-        # For a website, a manifest is necessary and not sufficient: the files exist
-        # but the site does not run until it packages, and reporting it as built
-        # would hand the operator a directory to deploy that deploys nothing.
+        # For a packaged kind, a manifest is necessary and not sufficient: the files
+        # exist but the thing does not run until it packages, and reporting it as
+        # built would hand the operator a directory to deploy that deploys nothing.
         succeeded = exit_code == 0 and package_code == 0 and artifact is not None
-        if succeeded and spec.get("kind") == "website":
+        if succeeded and kind in self.PACKAGERS:
             succeeded = site is not None
 
         if succeeded:
@@ -568,7 +787,13 @@ class Runner:
                 f"Built builds/{slug} — {artifact.get('files')} file(s), "
                 f"{artifact.get('bytes')} bytes, entry {artifact.get('entry')}."
             )
-            if site:
+            if site and kind == "app":
+                message += (
+                    f" Packaged: {site.get('dist_files')} client file(s), "
+                    f"{site.get('dist_bytes')} bytes — Publish It to run it as "
+                    f"{site.get('image')}."
+                )
+            elif site:
                 message += (
                     f" Packaged: {site.get('dist_files')} dist file(s), "
                     f"{site.get('dist_bytes')} bytes, served at {site.get('entry')}."
@@ -594,6 +819,7 @@ class Runner:
             message=message,
             artifact=artifact,
             site=site,
+            published_url=None,
             log_tail=log_tail(self.log_path(job)),
         )
         running.unlink(missing_ok=True)
@@ -739,26 +965,145 @@ class Runner:
 
         return exit_code, "", None
 
+    def site_suffix(self) -> str:
+        """`SITE_HOST_SUFFIX` from the repo `.env` — the domain a site answers under.
+
+        Read here only to *report* the published URL in the status. The publisher
+        reads it itself, so the two cannot disagree about where the site went; if
+        this is empty the URL is simply omitted rather than invented.
+        """
+        return str(self._load_dotenv().get("SITE_HOST_SUFFIX") or "").strip().strip('"').strip("'")
+
+    def run_publish(self, job: str, spec: dict) -> tuple[int, str, dict | None, str | None]:
+        """Publish what Studio has on screen, without running the factory.
+
+        This is the second job the queue carries and it is deliberately not a flag
+        on the first one. A build runs the model: `make app`, Archon, Codex, then
+        packaging. A publish takes the files the operator is *looking at*, writes
+        them into the app directory and packages those, then puts the result on a
+        name. Running the factory first would publish whatever the model produced
+        instead, which is a different app from the one on screen.
+
+        Returns `(exit_code, detail, site, published_url)`.
+        """
+        slug = str(spec["slug"])
+        kind = spec.get("kind") if spec.get("kind") in self.PACKAGERS else "app"
+        files = spec.get("files") or []
+        build_dir = resolve_build_dir(self.repo, slug)
+
+        steps = self.publish_steps(slug, kind)
+
+        log(f"publishing {slug} from {len(files)} file(s) as a {kind}")
+        with self.log_path(job).open("ab") as sink:
+            sink.write(f"\n=== publishing {slug} ({kind}) ===\n".encode())
+            sink.write(f"materialising {len(files)} file(s) into builds/{slug}\n".encode())
+            sink.flush()
+
+            try:
+                materialize(build_dir, files)
+            except OSError as error:
+                return 1, f"Could not write the files into builds/{slug}: {error}", None, None
+
+            for command in steps:
+                sink.write(f"\n$ {' '.join(command)}\n".encode())
+                sink.flush()
+                code = subprocess.call(  # noqa: S603 - fixed argv, no shell
+                    command,
+                    cwd=str(self.repo),
+                    env=self.build_env(),
+                    stdin=subprocess.DEVNULL,
+                    stdout=sink,
+                    stderr=subprocess.STDOUT,
+                )
+                if code != 0:
+                    detail = (
+                        f"Publishing stopped at `{Path(command[1]).name}` (exit {code}). "
+                        "The files are in builds/" + slug + " — see the log for what it said."
+                    )
+                    # An app that reached its runtime step is *running* even when the
+                    # last step failed, and the last step is the name. Saying only
+                    # "failed" would read as "nothing happened", and the retry is a
+                    # different command from the one that produced the container.
+                    if kind == "app" and Path(command[1]).name == "studio-sites.py":
+                        record = read_app_runtime(slug)
+                        if record:
+                            detail += (
+                                f" The application itself is running on 127.0.0.1:{record.get('port')}; "
+                                f"only the edge is missing. Retry with "
+                                f"`make site-publish SLUG={slug}` — no rebuild needed."
+                            )
+                    return code, detail, None, None
+
+        site = read_packaged(build_dir, kind)
+        suffix = self.site_suffix()
+        url = f"https://{slug}.{suffix}" if suffix else None
+        detail = f"Published {slug}"
+        if site:
+            noun = "client file(s)" if kind == "app" else "dist file(s)"
+            detail += f" — {site.get('dist_files')} {noun}, {site.get('dist_bytes')} bytes"
+        if kind == "app":
+            detail += f". Running as {image_tag_for(slug)}."
+        detail += f" Live at {url}." if url else "."
+        return 0, detail, site, url
+
+    def publish_steps(self, slug: str, kind: str) -> list[list[str]]:
+        """The commands a publish runs, in order, for each kind.
+
+        A website is staged and the edge points at the static server. An app has two
+        more things to do, and both are the difference between "packaged" and
+        "running": the runtime image is built and its container started on a loopback
+        port (`app-runtime.py`), and *then* the name is pointed at the sites port —
+        which proxies to that app because `app-runtime.py` wrote it a vhost. The edge
+        never learns a per-app port; that is what keeps the wildcard sufficient.
+        """
+        scripts = self.repo / "scripts"
+        if kind == "app":
+            return [
+                ["python3", str(scripts / "package-app.py"), slug],
+                ["python3", str(scripts / "app-runtime.py"), "--up", slug, "--build"],
+                ["python3", str(scripts / "studio-sites.py"), "--publish", slug],
+            ]
+
+        return [
+            ["python3", str(scripts / "package-website.py"), slug, "--publish"],
+            ["python3", str(scripts / "studio-sites.py"), "--publish", slug],
+        ]
+
+    # Which script turns a generated build into something real, per kind. A website
+    # is static files; an app is a client build and a runtime image.
+    PACKAGERS = {
+        "website": "package-website.py",
+        "app": "package-app.py",
+    }
+
     def run_package(self, job: str, spec: dict) -> tuple[int, str]:
-        """Package a website build into `dist/` — the step between generated and real.
+        """Package a generated build — the step between generated and real.
 
         Runs only after the agent has written the source. The model's output is the
-        input here, not the thing being verified: `package-website.py` owns the Vite
+        input here, not the thing being verified: the packager owns the Vite
         project, installs the pinned dependencies and builds, and a TypeScript error
         in the model's component fails *this* step with the compiler's own message
         rather than being found much later by whoever opened the site.
+
+        Both kinds need it, for the same reason and with the same shape: the model
+        writes the part that needs judgement and this writes the project around it.
+        A website ends as `dist/`; an app ends as `dist/client` plus the generated
+        server that serves it.
 
         Appended to the same job log, so the Studio panel shows one continuous
         build rather than two that have to be stitched together.
         """
         slug = str(spec["slug"])
-        command = ["python3", str(self.repo / "scripts" / "package-website.py"), slug]
-        if spec.get("publish"):
+        kind = spec.get("kind") if spec.get("kind") in self.PACKAGERS else "app"
+        command = ["python3", str(self.repo / "scripts" / self.PACKAGERS[kind]), slug]
+        # Only a website stages `dist/` for the host; an app is served by its own
+        # container, which `run_publish` starts.
+        if spec.get("publish") and kind == "website":
             command.append("--publish")
 
-        log(f"packaging {slug} as a website")
+        log(f"packaging {slug} ({kind} build)")
         with self.log_path(job).open("ab") as sink:
-            sink.write(f"\n=== packaging {slug} (website) ===\n".encode())
+            sink.write(f"\n=== packaging {slug} ({kind}) ===\n".encode())
             sink.flush()
             exit_code = subprocess.call(  # noqa: S603 - fixed argv, no shell
                 command,
@@ -770,8 +1115,9 @@ class Runner:
             )
 
         if exit_code != 0:
+            what = "site" if kind == "website" else "app"
             return exit_code, (
-                f"The site was generated but did not package (exit {exit_code}). "
+                f"The {what} was generated but did not package (exit {exit_code}). "
                 "The files are in builds/" + slug + " — see the packaging output in the log."
             )
 

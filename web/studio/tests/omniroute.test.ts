@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  SYSTEM_PROMPT,
+  APP_SYSTEM_PROMPT,
   WEBSITE_SYSTEM_PROMPT,
   buildMessages,
   chatCompletionsUrl,
@@ -94,20 +94,33 @@ describe("buildMessages", () => {
     expect(messages.at(-1)).toEqual({ role: "user", content: "a counter" });
   });
 
-  it("includes prior files so revisions have context", () => {
+  it("includes prior files so an iteration has context", () => {
     const messages = buildMessages(
-      "make it blue",
+      "add a weekly total",
       [
-        { path: "index.html", contents: "<html></html>" },
-        { path: "styles.css", contents: "body{}" },
+        { path: "src/App.tsx", contents: "export default () => null;" },
+        { path: "server/schema.sql", contents: "CREATE TABLE IF NOT EXISTS entries (id INTEGER);" },
       ],
       "app",
     );
     expect(messages).toHaveLength(3);
     const context = messages[1].content;
-    expect(context).toContain('<file path="index.html">');
-    expect(context).toContain('<file path="styles.css">');
-    expect(messages.at(-1)?.content).toBe("make it blue");
+    expect(context).toContain('<file path="src/App.tsx">');
+    expect(context).toContain('<file path="server/schema.sql">');
+    expect(messages.at(-1)?.content).toBe("add a weekly total");
+  });
+
+  // An iteration is an addition, and the wording is what stops the model treating
+  // it as a licence to write a fresh app — which is how a data model and ten turns
+  // of features get thrown away by a request to change a colour.
+  it("frames an iteration as adding on, not as starting over", () => {
+    const messages = buildMessages(
+      "darker header",
+      [{ path: "src/App.tsx", contents: "x" }],
+      "app",
+    );
+    expect(messages[1].content).toContain("Develop it further");
+    expect(messages[1].content).toContain("keep every table, column and feature");
   });
 
   // The whole point of threading `kind` this far: the system message is the only
@@ -130,17 +143,30 @@ describe("buildMessages", () => {
     expect(messages[1].content).toContain("Current version of the site:");
   });
 
-  it("keeps the app contract for an app", () => {
-    const messages = buildMessages("a timer", [], "app");
-    expect(messages[0].content).toBe(SYSTEM_PROMPT);
-    expect(messages[0].content).toContain("Always include index.html");
+  it("keeps the full-stack contract for an app", () => {
+    const messages = buildMessages("a tracker", [], "app");
+    expect(messages[0].content).toBe(APP_SYSTEM_PROMPT);
+    expect(messages[0].content).toContain("FULL-STACK APPLICATION");
+    expect(messages[0].content).toContain("server/schema.sql");
+    // The generated server, and the API it derives from the schema, are the part
+    // the model must not invent — the prompt has to say what they already do.
+    expect(messages[0].content).toContain("GET /api/<table>");
+    expect(APP_SYSTEM_PROMPT).not.toContain("Always include index.html");
   });
 });
 
 describe("missingEntryPoint", () => {
-  it("passes an app only with index.html", () => {
-    expect(missingEntryPoint([{ path: "index.html", contents: "" }], "app")).toBeNull();
-    expect(missingEntryPoint([{ path: "app.js", contents: "" }], "app")).toBe("index.html");
+  it("needs both the interface and the data model for an app", () => {
+    const client = { path: "src/App.tsx", contents: "x" };
+    const schema = { path: "server/schema.sql", contents: "CREATE TABLE IF NOT EXISTS a (id INTEGER);" };
+
+    expect(missingEntryPoint([client, schema], "app")).toBeNull();
+    // An app with no schema is an app with no API at all: the generated server
+    // derives every endpoint from the tables, so there is nothing to serve.
+    expect(missingEntryPoint([client], "app")).toBe("server/schema.sql");
+    expect(missingEntryPoint([schema], "app")).toBe("src/App.tsx");
+    // What the old one-page app emitted is not an app under this contract.
+    expect(missingEntryPoint([{ path: "index.html", contents: "" }], "app")).toBe("src/App.tsx");
   });
 
   it("needs src/App.tsx for a website, and does not accept index.html for it", () => {
@@ -165,11 +191,30 @@ describe("WEBSITE_SYSTEM_PROMPT", () => {
   });
 });
 
-describe("SYSTEM_PROMPT", () => {
+describe("APP_SYSTEM_PROMPT", () => {
   it("pins the output contract the parser depends on", () => {
-    expect(SYSTEM_PROMPT).toContain('<file path="index.html">');
-    expect(SYSTEM_PROMPT).toContain("Always include index.html");
-    expect(SYSTEM_PROMPT).toContain("no network access");
+    expect(APP_SYSTEM_PROMPT).toContain('<file path="src/App.tsx">');
+    expect(APP_SYSTEM_PROMPT).toContain("server/schema.sql");
+  });
+
+  it("names the files the packager owns, so the model does not write them", () => {
+    for (const owned of ["package.json", "vite.config.ts", "tsconfig.json", "src/main.tsx", "server/main.ts", "Dockerfile"]) {
+      expect(APP_SYSTEM_PROMPT).toContain(owned);
+    }
+    expect(APP_SYSTEM_PROMPT).toContain("Do not emit");
+  });
+
+  it("describes the API exactly as the generated server implements it", () => {
+    // These two are the contract between the prompt and scripts/package-app.py.
+    // A drift here is a client that calls an endpoint that does not exist.
+    expect(APP_SYSTEM_PROMPT).toContain("POST /api/<table>");
+    expect(APP_SYSTEM_PROMPT).toContain("PATCH /api/<table>/<id>");
+    expect(APP_SYSTEM_PROMPT).toContain("DELETE /api/<table>/<id>");
+    expect(APP_SYSTEM_PROMPT).toContain("{ \"data\"");
+  });
+
+  it("forbids dependencies, because there is no package to add one to", () => {
+    expect(APP_SYSTEM_PROMPT).toContain("NO DEPENDENCIES");
   });
 });
 
