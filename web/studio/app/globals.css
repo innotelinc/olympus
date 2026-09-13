@@ -999,6 +999,22 @@ pre.code-body {
   text-align: center;
 }
 
+/* ---- the four deliveries ----------------------------------------------- */
+
+/* One row, because they are alternatives rather than a sequence: an operator
+   reaching for one should see the others and be able to tell them apart. Wraps
+   rather than scrolls, since a horizontal scrollbar is how a delivery path
+   becomes invisible on a narrow window. */
+.deliveries {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
 /* ---- what to build (app vs website) ------------------------------------ */
 
 .kind-picker {

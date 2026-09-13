@@ -60,5 +60,14 @@ export default async function Page() {
     );
   }
 
-  return <Studio user={session?.name ?? session?.email ?? null} />;
+  // The suffix a published site answers under. Read server-side and passed down
+  // so the UI can show the real URL a publish produced rather than describing
+  // one; empty when the deployment has not configured publishing, and the UI
+  // simply omits it instead of inventing a name.
+  return (
+    <Studio
+      user={session?.name ?? session?.email ?? null}
+      siteSuffix={(process.env.SITE_HOST_SUFFIX ?? "").trim()}
+    />
+  );
 }

@@ -96,11 +96,27 @@ function matches(files: StoredFile[], pattern: RegExp): boolean {
   return files.some((file) => pattern.test(file.path.toLowerCase()));
 }
 
-/** The file a browser would open first, if the build produced one. */
-export function entryPoint(files: StoredFile[]): string | null {
-  const html = files.filter((file) => /\.html?$/i.test(file.path));
-  if (html.length === 0) return null;
-  return (html.find((file) => /(^|\/)index\.html?$/i.test(file.path)) ?? html[0]).path;
+/**
+ * The file to open first, which depends on what the build is.
+ *
+ * A full-stack app has no page to open — its client is JSX that nothing runs until
+ * it is built, so the file that matters is the interface the operator wrote and,
+ * second, the data model the whole API is derived from. A website's is its
+ * component. `index.html` is still checked last for both: it is what a build made
+ * before either contract existed looks like, and an exported spec should say what
+ * it is rather than claim the build is empty.
+ */
+export function entryPoint(files: StoredFile[], kind: ProjectKind = "app"): string | null {
+  const first = (pattern: RegExp) => files.find((file) => pattern.test(file.path))?.path ?? null;
+
+  const client = first(/(^|\/)src\/App\.(tsx|jsx)$/i);
+  if (client) return client;
+  if (kind === "app") {
+    const schema = first(/(^|\/)server\/schema\.sql$/i);
+    if (schema) return schema;
+  }
+
+  return first(/(^|\/)index\.html?$/i) ?? first(/\.html?$/i);
 }
 
 /* ---- inference ---------------------------------------------------------- */
@@ -114,7 +130,10 @@ function detectStack(files: StoredFile[], kind: ProjectKind): string[] {
   if (kind === "website") {
     stack.push("Vite + React 19 + TypeScript (packaged to static `dist/`)");
   } else {
-    stack.push("Self-contained HTML / CSS / JavaScript (no build step)");
+    stack.push(
+      "React 19 + TypeScript client, Node HTTP API, SQLite (packaged into one " +
+        "container per app — see `scripts/package-app.py`)",
+    );
   }
 
   if (matches(files, /(^|\/)package\.json$/)) stack.push("Node.js (`package.json` present)");
@@ -146,12 +165,26 @@ function verificationCriteria(files: StoredFile[], kind: ProjectKind): string[] 
     ];
   }
 
+  // An app's bar is that it runs and that its API answers — the client building is
+  // necessary and nowhere near sufficient, because the failure this catches is a
+  // screen that renders and then errors on its first request.
+  if (matches(files, /(^|\/)server\/schema\.sql$/)) {
+    return [
+      "`python3 scripts/package-app.py <slug>` completes and writes `dist/client/index.html`",
+      "the image builds and `make app-up SLUG=<slug>` answers `GET /api/health`",
+      "every table in `server/schema.sql` is reachable at `/api/<table>` and every column the client sends exists on it (a mismatch is a `400`, not a silent drop)",
+      "the client renders with rows, with no rows, and while the request is in flight",
+    ];
+  }
+
   if (matches(files, /(^|\/)package\.json$/)) return ["`npm ci`", "`npm test`"];
   if (matches(files, /(^|\/)(test_.*|.*_test)\.py$/)) return ["`python3 -m unittest`"];
 
-  const entry = entryPoint(files);
+  const entry = entryPoint(files, kind);
   if (entry) {
-    return [`Open \`${entry}\` — Studio's sandboxed preview rendered it with no console errors.`];
+    return [
+      `Open \`${entry}\` — Studio rendered it and reported no console errors before saving.`,
+    ];
   }
 
   return ["State the command that proves this app works before manufacturing it."];
@@ -159,6 +192,9 @@ function verificationCriteria(files: StoredFile[], kind: ProjectKind): string[] 
 
 function fileRole(file: StoredFile): string {
   const name = file.path.toLowerCase();
+  if (/(^|\/)schema\.sql$/.test(name)) return "data model — every table here becomes an `/api/<table>` endpoint";
+  if (/\.sql$/.test(name)) return "SQL";
+  if (/(^|\/)src\/app\.(tsx|jsx)$/.test(name)) return "the interface";
   if (/\.html?$/.test(name)) return "entry point";
   if (/\.css$/.test(name)) return "styles";
   if (/\.(js|mjs|cjs|jsx|ts|tsx)$/.test(name)) return "behaviour";
@@ -229,13 +265,48 @@ export function buildFactorySpec(project: Project): FactorySpec {
     }
     lines.push("");
 
-    const entry = entryPoint(files);
-    if (entry) lines.push(`The app opens at \`${entry}\`.`, "");
+    const entry = entryPoint(files, kind);
+    if (entry) {
+      lines.push(
+        kind === "app"
+          ? `The client's entry point is \`${entry}\`.`
+          : `The site opens at \`${entry}\`.`,
+        "",
+      );
+    }
   }
 
   lines.push("## 🚦 Verification Criteria", "");
   for (const item of verificationCriteria(files, kind)) lines.push(`- ${item}`);
   lines.push("");
+
+  // An app is not finished by generating it either, and what it needs is different
+  // in kind: a client build is not an app, it is half of one. The other half is the
+  // server that owns the database, and saying so here is what stops whoever picks
+  // this up from shipping a `dist/` that cannot save anything.
+  if (kind === "app") {
+    lines.push("## 🧱 Packaging & runtime", "");
+    lines.push(
+      "This is a full-stack application: React client, Node HTTP API, SQLite. The model",
+      "wrote `src/App.tsx` and `server/schema.sql`; `scripts/package-app.py` writes the",
+      "Vite project, the server that serves both the client and `/api/<table>`, and the",
+      "`Dockerfile`. The API is derived from the tables in the schema, so a table the",
+      "schema does not declare does not exist at runtime.",
+      "",
+    );
+    lines.push(
+      "```bash",
+      `python3 scripts/package-app.py ${specSlug(project.title)}   # client build + archive`,
+      `python3 scripts/app-runtime.py --up ${specSlug(project.title)} --build   # image + container`,
+      "```",
+      "",
+    );
+    lines.push(
+      "Each app runs as its own container with its own loopback port and its own SQLite",
+      "file under `OLYMPUS_APPS_ROOT` — see `docs/site-publishing.md`.",
+      "",
+    );
+  }
 
   // A website is not finished by generating it, and the difference is the whole
   // reason the spec has a kind. Saying so here is what stops the factory (or a
@@ -308,11 +379,15 @@ export function nextSteps(project: Project, filename: string): string[] {
     steps.push(
       "Built sites live under /var/lib/olympus/sites — serve one on a name with `make site-publish SLUG=" +
         slug +
-        " HOST=<name>` (see docs/site-publishing.md).",
+        "` (see docs/site-publishing.md).",
     );
   } else {
+    steps.push(`Package the client: \`python3 scripts/package-app.py ${slug}\``);
     steps.push(
-      "The app is self-contained: open builds/" + slug + "/index.html, or drop it on any static host.",
+      `Build and run it as its own container: \`python3 scripts/app-runtime.py --up ${slug} --build\``,
+    );
+    steps.push(
+      `Put it on a name: \`make site-publish SLUG=${slug}\` — the app's vhost is generated, so the edge needs nothing app-specific (see docs/site-publishing.md).`,
     );
   }
 

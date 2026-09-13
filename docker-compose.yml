@@ -167,6 +167,9 @@ services:
   # meant to be public. Nothing else about this container is exposed; it has no
   # shell access to the repo and the sites tree is mounted read-only.
   #
+  # The site is chosen by HOSTNAME (`<slug>.<SITE_HOST_SUFFIX>`) and, for direct
+  # address access, by path (`/<slug>/`). See deploy/nginx-sites.conf.template.
+  #
   # This is a plain static file server with no auth. Sites published here are open
   # to the LAN on purpose, and the name they answer on is what makes them public.
   # If a site needs to be private, do not publish it — Studio's zip download is the
@@ -181,9 +184,22 @@ services:
       # One substitution only — see the header of the template. Without the filter,
       # envsubst would blank nginx's own `$uri` in try_files.
       SITE_PORT: ${SITE_PORT:-20130}
-      NGINX_ENVSUBST_FILTER: SITE_PORT
+      # The leftmost label of a published name is the site's directory, so the
+      # template needs this too. Both are in the filter and nothing else is —
+      # an unfiltered envsubst would blank nginx's own `$uri` and `$site`.
+      SITE_HOST_SUFFIX: ${SITE_HOST_SUFFIX:-studio.olympus.innotel.us}
+      NGINX_ENVSUBST_FILTER: SITE_PORT|SITE_HOST_SUFFIX
     volumes:
       - ${OLYMPUS_SITES_ROOT:-/var/lib/olympus/sites}:/srv/sites:ro
+      # One generated `server` block per running application, written here by
+      # scripts/app-runtime.py and included from the template below.
+      #
+      # This is how an app gets a name without the edge config growing: the block's
+      # `server_name` is exact, and nginx prefers an exact name over the template's
+      # regex, so `<slug>.<suffix>` reaches the app's container while everything
+      # else still falls through to the static tree. `nginx -s reload` picks up a new
+      # file; nothing else has to change.
+      - ${OLYMPUS_APPS_ROOT:-/var/lib/olympus/apps}/nginx:/etc/nginx/app-conf.d:ro
       # Named `default.conf.template` on purpose: the image's entrypoint renders
       # templates to /etc/nginx/conf.d/<same name>, so this replaces the stock
       # default.conf instead of sitting beside it. Laid down under any other name

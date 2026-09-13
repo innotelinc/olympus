@@ -296,6 +296,173 @@ class TestValidateRequest(RepoFixture):
         )
 
 
+class TestPublishSteps(RepoFixture):
+    """The commands a publish runs, which differ by kind and in a load-bearing way."""
+
+    def steps(self, kind: str) -> list[str]:
+        instance = runner.Runner(self.repo, self.queue, poll_seconds=1)
+        return [" ".join(command) for command in instance.publish_steps("todo", kind)]
+
+    def test_a_website_is_packaged_and_staged(self) -> None:
+        steps = self.steps("website")
+        self.assertTrue(any("package-website.py todo --publish" in step for step in steps))
+        self.assertTrue(any("studio-sites.py --publish todo" in step for step in steps))
+
+    def test_an_app_is_packaged_then_run_then_named(self) -> None:
+        steps = self.steps("app")
+        # The order is the point: naming an app before its container exists points
+        # the edge at a port nothing is listening on.
+        self.assertIn("package-app.py todo", steps[0])
+        self.assertIn("app-runtime.py --up todo --build", steps[1])
+        self.assertIn("studio-sites.py --publish todo", steps[2])
+        self.assertEqual(len(steps), 3)
+
+    def test_the_edge_is_never_told_an_app_specific_port(self) -> None:
+        # The app's own vhost does that routing. If this ever grew a `--forward-port`
+        # the edge would need a host per app, which is the design the wildcard
+        # exists to avoid.
+        for step in self.steps("app"):
+            self.assertNotIn("--forward-port", step)
+
+    def test_the_image_name_matches_what_the_packager_writes(self) -> None:
+        self.assertEqual(runner.image_tag_for("todo"), "olympus-app-todo:latest")
+
+
+class TestPublishRequest(RepoFixture):
+    """The publish action: same queue, different job, and its own refusals."""
+
+    def publish(self, **overrides: object) -> dict:
+        payload = {
+            "v": 1,
+            "job": "0123456789abcdef",
+            "action": "publish",
+            "slug": "todo",
+            "title": "Todo",
+            "kind": "website",
+            "requested_by": "studio",
+            "requested_at": "2026-09-13T00:00:00+00:00",
+            "files": [{"path": "src/App.tsx", "contents": "export default () => null;\n"}],
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_a_publish_needs_no_spec(self) -> None:
+        # A spec is factory input. A publish manufactures nothing, and writing one
+        # would leave a spec behind for the next bare `make app` to build — a
+        # publish with a build as a side effect.
+        job = runner.validate_request(self.repo, self.publish())
+        self.assertEqual(job["action"], "publish")
+        self.assertEqual(job["spec"], "")
+        self.assertIsNone(job["spec_path"])
+
+    def test_the_slug_still_has_to_be_safe(self) -> None:
+        for slug in ("../escape", "a/b", "UPPER", "-leading", 7, None):
+            with self.assertRaises(runner.RequestError, msg=repr(slug)):
+                runner.validate_request(self.repo, self.publish(slug=slug))
+
+    def test_files_are_required(self) -> None:
+        for value in (None, [], "nope", {}):
+            with self.assertRaises(runner.RequestError, msg=repr(value)):
+                runner.validate_request(self.repo, self.publish(files=value))
+
+    def test_every_file_path_is_checked(self) -> None:
+        for path in ("../evil.sh", "/etc/passwd", "a/../../b", "C:/windows", "", ".."):
+            with self.assertRaises(runner.RequestError, msg=repr(path)):
+                runner.validate_request(
+                    self.repo, self.publish(files=[{"path": path, "contents": "x"}])
+                )
+
+    def test_a_windows_separator_is_normalised_not_trusted(self) -> None:
+        # Same contract as the stored files: `a\\b` is `a/b`, relative and inside
+        # the app directory. Normalising is not acceptance — `..\\..` still fails,
+        # which the case above covers.
+        job = runner.validate_request(
+            self.repo, self.publish(files=[{"path": "src\\App.tsx", "contents": "x"}])
+        )
+        self.assertEqual(job["files"][0]["path"], "src/App.tsx")
+
+    def test_a_bad_entry_is_a_refusal_not_a_drop(self) -> None:
+        # Dropping it would publish a site missing part of itself and report
+        # success, which is the failure nobody would look for.
+        with self.assertRaises(runner.RequestError):
+            runner.validate_request(
+                self.repo,
+                self.publish(
+                    files=[
+                        {"path": "index.html", "contents": "x"},
+                        {"path": "../escape", "contents": "x"},
+                    ]
+                ),
+            )
+
+    def test_a_duplicate_path_is_refused(self) -> None:
+        with self.assertRaises(runner.RequestError):
+            runner.validate_request(
+                self.repo,
+                self.publish(
+                    files=[
+                        {"path": "a.txt", "contents": "1"},
+                        {"path": "a.txt", "contents": "2"},
+                    ]
+                ),
+            )
+
+    def test_an_oversized_file_is_refused(self) -> None:
+        with self.assertRaises(runner.RequestError):
+            runner.validate_request(
+                self.repo,
+                self.publish(files=[{"path": "a.txt", "contents": "x" * (runner.MAX_FILE_CHARS + 1)}]),
+            )
+
+
+class TestMaterialize(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.build = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_writes_the_files_it_was_given(self) -> None:
+        runner.materialize(self.build, [{"path": "src/App.tsx", "contents": "hello\n"}])
+        self.assertEqual((self.build / "src" / "App.tsx").read_text(encoding="utf-8"), "hello\n")
+
+    def test_a_deleted_file_does_not_survive(self) -> None:
+        # Studio's set is the whole truth: a file the operator removed there must
+        # not be published because it was left on disk from the previous publish.
+        runner.materialize(
+            self.build,
+            [{"path": "src/App.tsx", "contents": "1"}, {"path": "src/Old.tsx", "contents": "2"}],
+        )
+        runner.materialize(self.build, [{"path": "src/App.tsx", "contents": "3"}])
+
+        self.assertEqual((self.build / "src" / "App.tsx").read_text(encoding="utf-8"), "3")
+        self.assertFalse((self.build / "src" / "Old.tsx").exists())
+
+    def test_a_stale_build_is_cleared(self) -> None:
+        (self.build / "dist").mkdir(parents=True)
+        (self.build / "dist" / "index.html").write_text("stale", encoding="utf-8")
+
+        runner.materialize(self.build, [{"path": "src/App.tsx", "contents": "1"}])
+
+        # `dist/` is the packager's output: it is regenerated, so a stale one can
+        # never be served against source that has changed.
+        self.assertFalse((self.build / "dist" / "index.html").exists())
+
+    def test_the_install_cache_survives(self) -> None:
+        # Deleting `node_modules/` would make every publish re-download the whole
+        # dependency tree, and `package-lock.json` is what makes the rebuild
+        # deterministic — neither is part of the payload, so neither is swept.
+        (self.build / "node_modules").mkdir()
+        (self.build / "node_modules" / "x.js").write_text("x", encoding="utf-8")
+        (self.build / "package-lock.json").write_text("{}", encoding="utf-8")
+
+        runner.materialize(self.build, [{"path": "src/App.tsx", "contents": "1"}])
+
+        self.assertTrue((self.build / "node_modules" / "x.js").exists())
+        self.assertTrue((self.build / "package-lock.json").exists())
+
+
 class TestSiteManifest(unittest.TestCase):
     """`read_site_manifest` is what tells a packaged site from a generated one."""
 
@@ -481,6 +648,26 @@ class TestProcess(RepoFixture):
         script.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
         script.chmod(0o755)
 
+    def fake_packager(self, kind: str = "app") -> None:
+        """Stand in for the packaging step.
+
+        Every kind now has one, and `process()` only reports a build as succeeded
+        when the packager says it packaged. This is here to prove that `process()`
+        runs it and reads what it wrote — scripts/tests/test_package_app.py is what
+        tests the packager itself.
+        """
+        manifest = "app.manifest.json" if kind == "app" else "site.manifest.json"
+        script = self.repo / "scripts" / runner.Runner.PACKAGERS[kind]
+        script.write_text(
+            "import json, pathlib, sys\n"
+            "target = pathlib.Path('builds') / sys.argv[1] / %r\n"
+            "target.write_text(json.dumps({'v': 1, 'kind': %r, 'slug': sys.argv[1],\n"
+            "    'dist_files': 2, 'dist_bytes': 100, 'source_files': 1,\n"
+            "    'entry': 'dist/index.html',\n"
+            "    'image': 'olympus-app-' + sys.argv[1] + ':latest'}))\n" % (manifest, kind),
+            encoding="utf-8",
+        )
+
     def make_runner(self) -> "runner.Runner":
         return runner.Runner(self.repo, self.queue, poll_seconds=1)
 
@@ -504,6 +691,7 @@ class TestProcess(RepoFixture):
             "> builds/todo/MANIFEST.json\n"
             'echo "manufacture: done"\n'
         )
+        self.fake_packager("app")
 
         self.enqueue()
         status = self.status()
@@ -513,9 +701,30 @@ class TestProcess(RepoFixture):
         self.assertEqual(status["slug"], "todo")
         self.assertEqual(status["artifact"]["files"], 1)
         self.assertEqual(status["artifact"]["entry"], "index.html")
+        # The packaging summary, not the agent's manifest, is what says the build is
+        # runnable — and for an app it names the image that would run it.
+        self.assertEqual(status["site"]["dist_files"], 2)
+        self.assertEqual(status["site"]["image"], "olympus-app-todo:latest")
         self.assertIsNotNone(status["started_at"])
         self.assertIsNotNone(status["finished_at"])
         self.assertIn("manufacture: done", status["log_tail"])
+
+    def test_a_generated_but_unpackaged_build_is_not_a_success(self) -> None:
+        # The files exist and the agent exited 0, but nothing built them. Reporting
+        # that as built hands the operator a directory that runs nothing.
+        self.fake_manufacture(
+            "set -euo pipefail\n"
+            "mkdir -p builds/todo\n"
+            'printf %s \'{"artifact":{"files":1,"bytes":1,"entry":"index.html"}}\' > builds/todo/MANIFEST.json\n'
+        )
+        script = self.repo / "scripts" / runner.Runner.PACKAGERS["app"]
+        script.write_text("import sys\nsys.exit(2)\n", encoding="utf-8")
+
+        self.enqueue()
+        status = self.status()
+
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("did not package", status["message"])
 
     def test_a_cancelled_build_is_recorded_as_cancelled(self) -> None:
         # The marker is dropped by the build itself, which is exactly how a click
@@ -553,6 +762,7 @@ class TestProcess(RepoFixture):
             'printf %s \'{"artifact":{"dir":"builds/todo","files":1,"bytes":1,"entry":"index.html"}}\' '
             "> builds/todo/MANIFEST.json\n"
         )
+        self.fake_packager("app")
 
         self.enqueue()
 
@@ -601,6 +811,7 @@ class TestProcess(RepoFixture):
             "mkdir -p builds/todo\n"
             'printf %s \'{"artifact":{"files":1,"bytes":1,"entry":"index.html"}}\' > builds/todo/MANIFEST.json\n'
         )
+        self.fake_packager("app")
 
         self.enqueue(replace=True)
 

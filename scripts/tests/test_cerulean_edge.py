@@ -172,12 +172,51 @@ class SelectCertificate(unittest.TestCase):
         )
         self.assertEqual(chosen["id"], 2)
 
-    def test_a_wildcard_does_not_count_as_covering_the_name(self) -> None:
-        # `*.olympus.innotel.us` is a different certificate for a different
-        # purpose; treating it as a match would skip the issuance and leave the
-        # host pointing at a name the certificate does not carry.
+    def test_a_wildcard_does_not_cover_two_labels(self) -> None:
+        # The limit of a wildcard, and the reason this cannot be a substring test:
+        # `*.olympus.innotel.us` covers one label, not `a.b.olympus.innotel.us`.
+        # Getting this wrong in the permissive direction attaches a certificate to
+        # a name it does not carry, which the edge serves as a browser warning.
         wildcard = certificate(domain="*.olympus.innotel.us", domains=["*.olympus.innotel.us"])
-        self.assertIsNone(edge.select_certificate([wildcard], "gateway.olympus.innotel.us", NOW))
+        self.assertIsNone(
+            edge.select_certificate([wildcard], "a.b.olympus.innotel.us", NOW)
+        )
+
+    def test_a_wildcard_does_not_cover_the_bare_name(self) -> None:
+        wildcard = certificate(domain="*.olympus.innotel.us", domains=["*.olympus.innotel.us"])
+        self.assertIsNone(edge.select_certificate([wildcard], "olympus.innotel.us", NOW))
+
+    def test_a_wildcard_is_reused_when_it_is_the_only_cover(self) -> None:
+        # The change that makes publishing a site instant: without wildcard reuse,
+        # every published name requests its own certificate and "instant" is a
+        # minute of waiting per site.
+        wildcard = certificate(
+            id=7, domain="*.studio.olympus.innotel.us", domains=["*.studio.olympus.innotel.us"]
+        )
+        chosen = edge.select_certificate([wildcard], "todo-list.studio.olympus.innotel.us", NOW)
+        self.assertIsNotNone(chosen)
+        self.assertEqual(chosen["id"], 7)
+
+    def test_a_dedicated_certificate_beats_a_wildcard(self) -> None:
+        # A wildcard is a legitimate fallback and a poor default: it couples one
+        # name's certificate to every other name it covers.
+        wildcard = certificate(
+            id=1, domain="*.studio.olympus.innotel.us", domains=["*.studio.olympus.innotel.us"]
+        )
+        dedicated = certificate(
+            id=2, domain="todo.studio.olympus.innotel.us", domains=["todo.studio.olympus.innotel.us"]
+        )
+        chosen = edge.select_certificate(
+            [wildcard, dedicated], "todo.studio.olympus.innotel.us", NOW
+        )
+        self.assertEqual(chosen["id"], 2)
+
+    def test_the_longer_validity_wins_within_a_tier(self) -> None:
+        near = certificate(id=1, domain="*.studio.olympus.innotel.us", domains=["*.studio.olympus.innotel.us"])
+        far = certificate(id=2, domain="*.studio.olympus.innotel.us", domains=["*.studio.olympus.innotel.us"])
+        far["expiresAt"] = "Mar 01 00:00:00 2027 GMT"
+        chosen = edge.select_certificate([near, far], "x.studio.olympus.innotel.us", NOW)
+        self.assertEqual(chosen["id"], 2)
 
 
 if __name__ == "__main__":

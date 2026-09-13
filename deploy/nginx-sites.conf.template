@@ -2,30 +2,75 @@
 #
 # A TEMPLATE, not a config: the nginx image runs envsubst over files in
 # /etc/nginx/templates/ on start, and compose sets NGINX_ENVSUBST_FILTER to
-# SITE_PORT so that `${SITE_PORT}` here is the only substitution performed — an
-# unfiltered envsubst would also eat nginx's own `$uri` and blank out try_files.
+# `SITE_PORT|SITE_HOST_SUFFIX` so only those two are substituted. An unfiltered
+# envsubst would also eat nginx's own `$uri` and `$site` here and blank out the
+# routing — which is a site that serves nothing, with no error to point at.
 #
-# It replaces the image's default.conf entirely, so nginx listens on exactly one
-# port and does not also answer on 80. SITE_PORT must be the same value
-# `make site-publish` registers at the edge; if they disagree, publishing succeeds
-# and the name answers 502 — so both read the one variable (docs/site-publishing.md).
+# TWO SERVERS, AND THE FIRST ONE IS THE POINT.
 #
-# Each site is a directory under the mounted root (`/srv/sites/<slug>/`), written by
-# scripts/package-website.py. `try_files $uri $uri/ /index.html` deliberately falls
-# back to `/index.html` rather than 404: the sites are single-page apps built from
-# one entry, and a deep link that answered 404 would look like a broken deploy.
+#   * The wildcard vhost selects a site by HOSTNAME: the leftmost label of
+#     <slug>.<suffix> is the directory under the sites root. That is what makes the
+#     edge configurable as a plain forward to this port — no path rewriting, no
+#     custom locations in NPM, one proxy host per published name.
+#
+#   * The catch-all serves the same tree by PATH (/<slug>/…) for anything that
+#     arrives by address rather than by name — `curl http://127.0.0.1:SITE_PORT/
+#     <slug>/`, which is how a site is checked before it has a name at all.
+#
+# Both are read-only over /srv/sites; nothing here writes.
+#
+# APPLICATIONS COME FIRST. A running Studio application gets one generated `server`
+# block per slug, written by scripts/app-runtime.py into /etc/nginx/app-conf.d and
+# included here. Its `server_name` is an exact name, and nginx resolves an exact name
+# before it tries the wildcard regex below — so a name that is an app is proxied to
+# that app's container, and every other name still falls through to the static tree.
+# Nothing about this file changes when an application is published or removed; the
+# include is the whole integration.
+include /etc/nginx/app-conf.d/*.conf;
 
+# --- by hostname: <slug>.SITE_HOST_SUFFIX (static) --------------------------
 server {
     listen       ${SITE_PORT};
-    listen       [::]:${SITE_PORT};
+    listen  [::]:${SITE_PORT};
+    server_name  ~^(?<site>[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\.${SITE_HOST_SUFFIX}$;
+
+    root  /srv/sites/$site;
+    index index.html;
+
+    # Vite content-addresses its build output, so the hashed assets are safe to
+    # cache hard. The entry point is not, or a republished site keeps serving the
+    # previous build's HTML while its hashed assets have already changed.
+    location /assets/ {
+        access_log off;
+        expires    1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    location / {
+        add_header Cache-Control "no-cache";
+        # `=404`, NOT a fallback to `/index.html`. A fallback to a file that may
+        # not exist is a redirect cycle when the site is missing, which nginx
+        # reports as a 500 with its own error page — measured here, for the common
+        # case of a name published before its build was staged.
+        try_files $uri $uri/ =404;
+    }
+
+    error_page 404 = @missing;
+    location @missing {
+        default_type text/plain;
+        return 404 "No site is staged for $host. Publish one with: make site-publish SLUG=<slug>\n";
+    }
+}
+
+# --- by path: /<slug>/… (default server) ------------------------------------
+server {
+    listen       ${SITE_PORT} default_server;
+    listen  [::]:${SITE_PORT} default_server;
     server_name  _;
 
     root  /srv/sites;
     index index.html;
 
-    # Vite content-addresses its build output, so the hashed assets are safe to
-    # cache hard. Matched per site, because the path is /<slug>/assets/... — a
-    # plain `location /assets/` never matches and would silently do nothing.
     location ~ ^/[^/]+/assets/ {
         access_log off;
         expires    1y;
@@ -33,22 +78,13 @@ server {
     }
 
     location / {
-        # The entry point must not be cached, or a republished site keeps serving
-        # the previous build's HTML while its hashed assets have already changed.
         add_header Cache-Control "no-cache";
-        # `=404`, NOT a fallback to `/index.html`. A fallback to a file that may not
-        # exist is a redirect cycle when the site is missing, and nginx answers that
-        # with a 500 and its own error page — measured here before this was fixed,
-        # for the common case of a name published before its build was staged.
         try_files $uri $uri/ =404;
     }
 
-    # A missing site is the common case, and nginx's stock 404 says nothing about
-    # what to do. This says it.
     error_page 404 = @missing;
-
     location @missing {
         default_type text/plain;
-        return 404 "No site is staged at this path. Publish one with: make site-package SLUG=<slug>\n";
+        return 404 "No site is staged at this path. Stage one with: make site-package SLUG=<slug>\n";
     }
 }

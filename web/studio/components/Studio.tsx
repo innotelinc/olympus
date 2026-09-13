@@ -2,32 +2,39 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { BuildLog, BuildStatus, RunnerState } from "@/lib/build-queue";
-import { EMPTY_DOCUMENT, buildPreviewDocument, currentFileFrom, parseFiles, type GeneratedFile } from "@/lib/files";
+import { currentFileFrom, parseFiles, type GeneratedFile } from "@/lib/files";
 import type { ProjectKind } from "@/lib/projects";
 import CodeView from "./CodeView";
-import Preview from "./Preview";
+
+// No `Preview` here on purpose. Both kinds are React: an app's client needs a build
+// and a server before it renders at all, and a website's needs a build. The
+// sandboxed frame could only ever show a blank page, so the Preview tab explains
+// what each kind has to go through instead of pretending. `components/Preview.tsx`
+// still exists — it is what the frame was, and what it will be again if a preview
+// ever has something real to point at.
 
 type Status = "idle" | "streaming" | "error";
 type Tab = "preview" | "code";
 
 const EXAMPLES = [
-  "A pomodoro timer with a circular progress ring and start, pause, and reset controls.",
-  "A kanban board with three columns where cards can be dragged between them.",
-  "A tip splitter: bill total, party size, and a slider that updates the per-person amount live.",
-  "A markdown notes app with a live preview pane and a saved-notes sidebar.",
+  "A weight-loss tracker: enter a weight each morning and see the trend against a goal.",
+  "A recipe box: save recipes with ingredients and steps, and search them by name.",
+  "A shift rota where each person's shifts are entered once and the week is shown as a grid.",
+  "A habit tracker with one row per habit and a tick for each day of the week.",
 ];
 
 /**
  * What each kind actually produces, said as the difference rather than as a name.
  *
- * The two are not variations of one thing: an app is a self-contained page that is
- * finished when it renders, and a website is a React project that has to be built
- * before it exists. An operator picking for the first time has no way to know that
- * from the labels alone, and picking wrong costs a whole generation.
+ * The two are not variations of one thing. An app keeps state: it has a database and
+ * an API, so what someone enters today is there tomorrow. A website is static —
+ * there is nowhere for an entry to be written down, and a form on one is decoration.
+ * An operator picking for the first time has no way to know that from the labels
+ * alone, and picking wrong costs a whole generation.
  */
 const KIND_HELP: Record<ProjectKind, string> = {
-  app: "One self-contained page (HTML/CSS/JS). Previews instantly, no build step. Download it as a zip or hand it to the factory.",
-  website: "A React + TypeScript site (Vite). Real components and a dev-shaped source tree. It needs a build, so it is packaged into dist/ and can be published on a name.",
+  app: "A full-stack application: React client, its own API and a SQLite database, run as its own container. It saves what people enter. Package it, run it, publish it on a name.",
+  website: "A React + TypeScript site (Vite) with no server and no data — a brochure, a landing page, a portfolio. It is packaged into dist/ and served as static files.",
 };
 
 const STORAGE_KEY = "studio.token";
@@ -50,6 +57,17 @@ function timestampLabel(value: string): string {
 function titleFromPrompt(prompt: string): string {
   const line = prompt.trim().split(/\n/)[0] ?? "";
   return line.trim().slice(0, 60);
+}
+
+/**
+ * The name a slug would publish under, for the hint that explains a staged build.
+ *
+ * The slug comes from the runner's own status, not from the title on screen, so
+ * the preview names the same host the publish would — a mismatch here is the
+ * operator finding out later that `<name>.example` is a different site.
+ */
+function slugPreview(slug: string | null, suffix: string): string {
+  return slug && suffix ? `https://${slug}.${suffix}` : "a name under the site suffix";
 }
 
 /** m:ss elapsed label. */
@@ -144,13 +162,23 @@ const PHASE_LABEL: Record<BuildPhase, string> = {
 
 const PHASE_ORDER: BuildPhase[] = ["connecting", "thinking", "writing", "finalizing"];
 
-export default function Studio({ user = null }: { user?: string | null }) {
+export default function Studio({
+  user = null,
+  siteSuffix = "",
+}: {
+  user?: string | null;
+  /** The domain a published site answers under, e.g. `studio.olympus.innotel.us`. */
+  siteSuffix?: string;
+}) {
   const [prompt, setPrompt] = useState("");
   const [files, setFiles] = useState<GeneratedFile[]>([]);
   const [raw, setRaw] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("preview");
+  // On the code, not the preview: with nothing to preview, the files are the only
+  // thing on this screen that is worth looking at, and the build output on the right
+  // says where they got to.
+  const [tab, setTab] = useState<Tab>("code");
   // What is being built. It decides the system prompt AND the delivery path, so it
   // is part of the build, not a display option — it is sent with every turn and
   // saved with the project.
@@ -158,7 +186,6 @@ export default function Studio({ user = null }: { user?: string | null }) {
   const [turns, setTurns] = useState(0);
   const [token, setToken] = useState("");
   const [showSettings, setShowSettings] = useState(false);
-  const [previewDoc, setPreviewDoc] = useState(EMPTY_DOCUMENT);
 
   // Live progress, driven by the stream itself: which file is open, how much
   // of it has arrived, when the build started, and when data last moved.
@@ -193,6 +220,10 @@ export default function Studio({ user = null }: { user?: string | null }) {
   const [runner, setRunner] = useState<RunnerState | null>(null);
   const [buildBusy, setBuildBusy] = useState(false);
   const [buildError, setBuildError] = useState<string | null>(null);
+  // Publishing is its own in-flight state, not a flavour of building: the two go
+  // to different places and a single "busy" would make one button's spinner
+  // explain the other's.
+  const [publishBusy, setPublishBusy] = useState(false);
   // The log of the build being shown, fetched on its own cadence: it is tens of
   // kilobytes, so it does not belong in the status poll that runs every 3s.
   const [buildLog, setBuildLog] = useState<BuildLog | null>(null);
@@ -259,16 +290,6 @@ export default function Studio({ user = null }: { user?: string | null }) {
     const id = window.setInterval(() => setNowTick((tick) => tick + 1), 1000);
     return () => window.clearInterval(id);
   }, [status]);
-
-  // Rebuild the preview on a delay while streaming so the iframe is not torn
-  // down and recreated on every token.
-  useEffect(() => {
-    const delay = status === "streaming" ? 400 : 0;
-    const id = window.setTimeout(() => {
-      setPreviewDoc(buildPreviewDocument(activeFiles));
-    }, delay);
-    return () => window.clearTimeout(id);
-  }, [activeFiles, status]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -732,6 +753,74 @@ export default function Studio({ user = null }: { user?: string | null }) {
   ]);
 
   /**
+   * Put what is on screen on a name.
+   *
+   * Not a factory build with a flag: the runner is sent this project's files and
+   * packages those. The distinction is the whole value of the button — a rebuild
+   * would publish whatever the model produced this time, which is a different
+   * build from the one being looked at.
+   *
+   * Saved first, because the request carries the saved files and a publish that
+   * disagreed with the library would be a name pointing at a build nobody can
+   * reopen.
+   */
+  const publishApp = useCallback(async () => {
+    if (activeFiles.length === 0 || status === "streaming") return;
+
+    setPublishBusy(true);
+    setBuildError(null);
+    setLibraryError(null);
+    setLibraryNote(null);
+
+    try {
+      const app = await persistApp({
+        id: activeAppId,
+        title: appTitle || titleFromPrompt(prompt),
+        prompt,
+        files: activeFiles,
+        kind: activeAppId ? undefined : kind,
+      });
+      setActiveAppId(app.id);
+      setAppTitle(app.title);
+      await listSavedApps();
+
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (token) headers["x-studio-token"] = token;
+
+      const response = await fetch(`/api/projects/${encodeURIComponent(app.id)}/build`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ action: "publish" }),
+      });
+
+      const payload = (await response.json()) as {
+        job?: string;
+        runner?: RunnerState;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(payload.error ?? `Publish failed to start (${response.status}).`);
+
+      setRunner(payload.runner ?? null);
+      if (payload.job) await fetchBuild(app.id, payload.job);
+    } catch (thrown) {
+      setBuildError(thrown instanceof Error ? thrown.message : "Could not publish this build.");
+    } finally {
+      setPublishBusy(false);
+    }
+  }, [
+    activeAppId,
+    activeFiles,
+    appTitle,
+    fetchBuild,
+    kind,
+    listSavedApps,
+    persistApp,
+    prompt,
+    status,
+    token,
+  ]);
+
+  /**
    * Ask the runner to stop the build, then wait for the status to say so.
    *
    * The 202 this gets back means "the request is on disk", not "stopped" — the
@@ -1135,7 +1224,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
               </>
             ) : (
               <button type="button" className="primary" onClick={submit} disabled={!prompt.trim()}>
-                {turns > 0 ? "Revise" : "Build"}
+                {turns > 0 ? "Add on" : "Build It"}
               </button>
             )}
             <span className="hint">
@@ -1295,16 +1384,28 @@ export default function Studio({ user = null }: { user?: string | null }) {
                   says it was built into something servable. */}
               {build?.site ? (
                 <p className="hint">
-                  packaged: {build.site.distFiles ?? 0} dist file(s),{" "}
-                  {kilobytes(build.site.distBytes ?? 0)} — served at {build.site.entry ?? "unknown"}
+                  packaged: {build.site.distFiles ?? 0}{" "}
+                  {kind === "app" ? "client" : "dist"} file(s),{" "}
+                  {kilobytes(build.site.distBytes ?? 0)} — {build.site.entry ?? "unknown"}
                   {build.site.zip ? ` · ${build.site.zip}` : ""}
                 </p>
               ) : null}
 
-              {build?.state === "succeeded" && kind === "website" ? (
+              {/* Where the build actually lives, once a publish has put it
+                  somewhere. The URL is the runner's own report rather than one
+                  this component composes, so what is shown is what happened. */}
+              {build?.publishedUrl ? (
                 <p className="hint">
-                  Staged under /var/lib/olympus/sites/{build.slug ?? ""}. Publish the name with{" "}
-                  <code>make site-publish SLUG={build.slug ?? "<slug>"}</code>.
+                  Live at{" "}
+                  <a className="link-button" href={build.publishedUrl} target="_blank" rel="noreferrer">
+                    {build.publishedUrl}
+                  </a>
+                </p>
+              ) : build?.state === "succeeded" ? (
+                <p className="hint">
+                  {kind === "app" ? "Packaged" : "Packaged and staged"}. Put it on a name with{" "}
+                  <em>Publish It</em>
+                  {siteSuffix ? <> — it would answer at {slugPreview(build.slug, siteSuffix)}</> : null}.
                 </p>
               ) : null}
 
@@ -1407,35 +1508,59 @@ export default function Studio({ user = null }: { user?: string | null }) {
               >
                 {activeAppId ? "Update" : "Save"}
               </button>
+            </div>
+
+            {/*
+              * FOUR DELIVERIES, EACH WITH ONE JOB.
+              *
+              * These used to overlap — one button both rebuilt and published —
+              * and the words gave no clue which did what. Now each names exactly
+              * one destination:
+              *
+              *   Factory Build  run `make app` (Archon + the model) from a spec
+              *   Publish It     take the files on screen and put them on a name
+              *   Export It      write a build-requests spec for CI or a hand-off
+              *   Download It    a zip of the source, and of dist/ once built
+              *
+              * Publish It deliberately does NOT run the factory. Publishing what a
+              * rebuild would produce, rather than what the operator is looking at,
+              * is a different app with the same name.
+              */}
+            <div className="deliveries">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => void runBuild(true)}
+                disabled={!hasFiles || busy || libraryBusy || buildBusy || build?.state === "running"}
+                title={
+                  kind === "website"
+                    ? "Run make app from a spec, then package the result into dist/"
+                    : "Run make app from a spec, then package the client and the server around it"
+                }
+              >
+                {buildBusy ? "Building…" : "Factory Build"}
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => void publishApp()}
+                disabled={!hasFiles || busy || libraryBusy || publishBusy || build?.state === "running"}
+                title={
+                  kind === "website"
+                    ? `Package these files and serve them at <name>.${siteSuffix}`
+                    : `Package these files, build the image, run the container and serve it at <name>.${siteSuffix}`
+                }
+              >
+                {publishBusy ? "Publishing…" : "Publish It"}
+              </button>
               <button
                 type="button"
                 className="ghost"
                 onClick={() => void exportApp()}
                 disabled={!hasFiles || busy || libraryBusy}
-                title="Write a build-requests spec so the factory can continue this app"
+                title="Write a build-requests spec so the factory or CI can continue this app"
               >
-                Export to factory
-              </button>
-              {/* A website's build ends with packaging, and "publish" is the
-                  separate decision to stage dist/ where the site server serves
-                  it. For an app this is just the factory build — there is nothing
-                  to package and nowhere to publish to. */}
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => void runBuild(kind === "website")}
-                disabled={!hasFiles || busy || libraryBusy || buildBusy || build?.state === "running"}
-                title={
-                  kind === "website"
-                    ? "Run make app, package it into dist/, and stage the built site for the host to serve"
-                    : "Run make app on the host runner and report the result here"
-                }
-              >
-                {build?.state === "running"
-                  ? "Building…"
-                  : kind === "website"
-                    ? "Build & publish"
-                    : "Build it"}
+                Export It
               </button>
               <button
                 type="button"
@@ -1445,10 +1570,10 @@ export default function Studio({ user = null }: { user?: string | null }) {
                 title={
                   kind === "website"
                     ? "Download a zip of the source (and of dist/, once it has been packaged)"
-                    : "Download this build as a zip"
+                    : "Download a zip of the client, the server and the Dockerfile"
                 }
               >
-                Download .zip
+                Download It
               </button>
             </div>
 
@@ -1602,7 +1727,9 @@ export default function Studio({ user = null }: { user?: string | null }) {
           {!busy && turns > 0 ? (
             <div className="alert note">
               <span>
-                Iterate in plain language — the current files are sent with the next instruction.
+                Keep going — this is not a one-shot. Send another instruction and the current files
+                go with it, so each turn develops the same app rather than starting over. Add a
+                screen, change the data, make it better.
               </span>
             </div>
           ) : null}
@@ -1617,7 +1744,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
               aria-selected={tab === "preview"}
               onClick={() => setTab("preview")}
             >
-              {kind === "website" ? "Preview (after build)" : "Preview"}
+              Preview (after build)
             </button>
             <button
               type="button"
@@ -1632,21 +1759,34 @@ export default function Studio({ user = null }: { user?: string | null }) {
 
           <div className="stage-body">
             {tab === "preview" ? (
-              kind === "website" ? (
-                /* A React site genuinely cannot preview here, and pretending
-                   otherwise is the worst option: the sandboxed iframe runs no JSX
-                   and no bundler, so it would sit blank and read as a failure. */
-                <div className="site-note">
-                  <strong>A React site has no preview until it is built</strong>
-                  <span>
-                    JSX needs a compiler, so these components render only after packaging.
-                    Read them under <em>Code</em>, then use <em>Build &amp; publish</em> — that
-                    runs the Vite build on the host and produces a servable <code>dist/</code>.
-                  </span>
-                </div>
-              ) : (
-                <Preview source={previewDoc} />
-              )
+              /* Neither kind can preview here, and pretending otherwise is the
+                 worst option: the sandboxed iframe runs no JSX and no bundler, so
+                 it would sit blank and read as a failure. What each one needs
+                 before it can be seen is different, and saying which is the
+                 difference between a dead pane and a next step. */
+              <div className="site-note">
+                <strong>
+                  {kind === "app"
+                    ? "An application has no preview until it is running"
+                    : "A React site has no preview until it is built"}
+                </strong>
+                <span>
+                  {kind === "app" ? (
+                    <>
+                      The client is React, so it renders only after packaging — and the API it
+                      reads from does not exist until the app is running. Read it under{" "}
+                      <em>Code</em>, then use <em>Publish It</em>: that builds the client, starts
+                      the container and puts the name in front of it.
+                    </>
+                  ) : (
+                    <>
+                      JSX needs a compiler, so these components render only after packaging.
+                      Read them under <em>Code</em>, then use <em>Publish It</em> — that runs the
+                      Vite build on the host and produces a servable <code>dist/</code>.
+                    </>
+                  )}
+                </span>
+              </div>
             ) : (
               <CodeView files={activeFiles} />
             )}
