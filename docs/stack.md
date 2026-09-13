@@ -47,6 +47,19 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 | Coding brain | Codex (`auto/coding`) via OmniRoute Responses API (`wire_api = "responses"`) | Repository code modifications dispatched by the factory consumer + harness E2E (`omniroute launch-codex -p auto-coding`) |
 | `web/studio/` | Next.js (App Router) + Authentik OIDC | Browser vibe-coding surface — prompt in, runnable app out, gateway key held server-side; saved apps are scoped per identity (OIDC subject) on the stack's own volume |
 
+> **Known gateway behaviour — a combo turn pins.** `auto/coding` is a *combo*, and the
+> gateway pins a native Codex turn to whichever member served the first turn
+> (`pinNativeCodexTurn`, 45-minute TTL, keyed by request body + combo name). When the
+> provider behind that member has no credentials the pinned path answers
+> `503 No credentials for opencode` — while the *unpinned* path serves the same model
+> fine, which is why the first turn of a run can succeed and every turn after it fail.
+> Credentials live in `provider_connections` inside the gateway's `storage.sqlite`, and
+> it is empty on this deployment: the stack runs entirely on free providers. Two
+> consequences worth carrying into any agent work here — name a **concrete** model
+> rather than the combo for anything multi-turn (`OMNIROUTE_MODEL_FALLBACK` in
+> `.env.example` is the app-builder's case of this), and never read an agent's exit code
+> as evidence it did anything, because Codex exits **0** after a refused request.
+
 > **Scope of this checkout.** This repository is the deployment surface. The
 > factory state machine, the harness, and the Archon workflow definitions
 > (`factory/**` beyond `doctor.py`/`trigger.py`, `harness/**`,
