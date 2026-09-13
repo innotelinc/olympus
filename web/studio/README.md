@@ -69,7 +69,7 @@ failing obscurely.
 | --- | --- | --- |
 | `OMNIROUTE_BASE_URL` | `http://127.0.0.1:20128/v1` | Gateway root. Use `http://omniroute:20128/v1` from inside the compose network. |
 | `OMNIROUTE_API_KEY` | — | Bearer key for the gateway. Required. |
-| `OMNIROUTE_MODEL` | `auto/coding` | Model routed through the gateway. |
+| `OMNIROUTE_MODEL` | `auto/coding` | Model routed through the gateway. `.env.example` pins a concrete, tool-calling model instead — `auto/coding` is a combo that walks the whole catalogue, so which brain answers is luck (see the root README). |
 | `OMNIROUTE_CHAT_PATH` | `/chat/completions` | Override only if the gateway exposes the route elsewhere. |
 | `STUDIO_PORT` | `3001` | Host port for the dev server. |
 | `STUDIO_ACCESS_TOKEN` | — | When set, every route requires an `x-studio-token` header. Empty = open. |
@@ -352,9 +352,12 @@ handoff still works on a deployment that never mounted the directory.
 (`archon-greenfield`) through the Archon CLI. It resolves and bounds the spec, runs
 Codex over it, **asserts on the artifact rather than the agent's exit code**, and only
 then writes a `MANIFEST.json` + `README.md` recording the spec's SHA-256 and the model
-that produced the app. See the root README for the model-fallback note
-(`OMNIROUTE_MODEL_FALLBACK`) — the gateway's combo routing cannot serve a multi-turn
-native Codex build on the free tier, so the build node retries against a concrete model.
+that produced the app. See the root README for the model note: the build model comes from
+the checkout's `.env` (Archon strips those keys out of a node's environment, so exporting
+them does not reach the build), and it has to be a model that **calls tools** — one that
+answers in prose still "completes" while leaving the app directory empty. The build node
+retries against `OMNIROUTE_MODEL_FALLBACK` when the first model writes nothing, which is
+what makes a rate-limited primary survivable.
 
 > **Permissions.** Studio runs as uid 1001, so the bind mount has to be writable
 > by that uid. `make studio-export-dir` settles it — idempotent, and `setup.sh`

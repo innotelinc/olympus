@@ -96,11 +96,47 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 > `omniroute providers auth <provider>` flow and free ones need no credential at all;
 > the script reports both as skipped rather than dropping them silently.
 >
+> **What the restore does NOT buy you.** Connections are not capacity. Of the ten accounts
+> imported here, agentrouter returned `402 budget pool quota exhausted`, openrouter `401
+> all connection(s) credits exhausted`, and openai `429 no credits remaining` — the gemini
+> accounts were the only ones that answered, and their free tier cools down for 15–23
+> minutes after a burst (`429 … all credentials cooling down`). Nine connections looked
+> restored and none of them was a durable build model. Check the account, not the
+> connection count:
+>
+> ```bash
+> curl -s $OMNIROUTE_BASE_URL/responses -H "Authorization: Bearer $OMNIROUTE_API_KEY" \
+>   -H 'Content-Type: application/json' \
+>   -d '{"model":"gemini/gemini-3-flash-preview","input":"make a file with the shell tool",
+>        "tools":[{"type":"function","name":"shell","parameters":{"type":"object",
+>        "properties":{"command":{"type":"string"}},"required":["command"]}}]}'
+> ```
+>
+> A 200 is not the whole check either — the response has to contain a `function_call`.
+> Two measured ways a model "succeeds" while building nothing:
+>
+> * `oc/big-pickle`, the free member `auto/coding` prefers, returns 200 and writes the
+>   file contents out as *chat text*. The app directory stays empty, the agent looks busy
+>   for minutes, and there is no error message — the reason the build model is pinned in
+>   `.env` rather than left to the auto policy, which walks the whole catalogue (`Trying
+>   model 1109/1388`) and so decides the outcome by luck.
+> * `gemini/gemini-2.5-flash` answers a hand-made tool request and returns `400 Function
+>   calling config is set without function_declarations` under the tool payload Codex
+>   actually sends. A gateway-side translation gap, not a repo bug — and the reason
+>   `.env.example` names it as known-bad instead of leaving it to be rediscovered.
+>
+> The `.env` is also the *only* place that setting takes effect. Archon strips the repo's
+> `.env` keys from a script node's environment and runs the workflow from a copy under
+> `artifacts/runs/<id>/workflow-source/`, so a node reading only `os.environ`, or walking
+> up from its own file, silently uses its code defaults — measured: a deployment pinned to
+> `gemini/gemini-3-flash-preview` asked the gateway for `auto/coding`. `build-app.py` now
+> reads the checkout `.env` located through the app directory it was handed.
+>
 > Two habits worth keeping for any agent work here: never read an agent's exit code as
 > evidence it did anything (Codex exits **0** after a refused request), and if you do
 > fall back to a concrete model name rather than the combo — naming a model keeps the
-> turn off the combo path entirely (`OMNIROUTE_MODEL_FALLBACK` in `.env.example` is the
-> app-builder's case of this).
+> turn off the combo path entirely (`OMNIROUTE_MODEL` / `OMNIROUTE_MODEL_FALLBACK` in
+> `.env.example` are the app-builder's case of this).
 
 > **Scope of this checkout.** This repository is the deployment surface. The
 > factory state machine, the harness, and the Archon workflow definitions
