@@ -20,7 +20,7 @@ Olympus is a deterministic issue → PR factory for the repo it lives in: Archon
 
 | Area | Change |
 | --- | --- |
-| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files, Authentik OIDC sign-in, sandboxed output, saved builds scoped to the signed-in identity, and five deliveries with one job each: **Build It** (write or add on), **Factory Build** (`make app` for real on the host runner, with its progress and a **Cancel**), **Publish It** (put *what is on screen* on a name), **Export It** (a `build-requests/` spec for CI or a hand-off), **Download It** (a zip). Two kinds: an **app** is full-stack — React client, its own API and a SQLite database, run as one container per app — and a **website** is static React. Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
+| **Studio** | `web/studio/` — the browser vibe-coding surface. Prompt → streamed files, Authentik OIDC sign-in, sandboxed output, saved builds scoped to the signed-in identity, and five deliveries with one job each: **Build It** (write or add on), **Factory Build** (`make app` for real on the host runner, with its progress and a **Cancel**), **Publish It** (put *what is on screen* on a name), **Export It** (a `build-requests/` spec for CI or a hand-off), **Download It** (a zip). Two kinds: an **app** keeps state on a server and runs as one container per app; a **website** is static content served over HTTP. The stack is not fixed — a plan is proposed from your prompt, shown for confirmation, and then built, packaged and run from it (`scripts/package-project.py`, `scripts/app-runtime.py`). Runs on its own port, in the stack (`docker compose up -d studio`) or standalone (`make studio-dev`). |
 | **SecretOps** | Infisical is **replaced by Cerulean Vault** (KV v2). The `infisical://` reference convention becomes `vault://`, and the bootstrap helper is now `scripts/omniroute-vault.sh` (was `scripts/omniroute-infisical.sh`). |
 | **Compose** | `compose.vault.yml` runs Vault locally; `compose.host-gateway.yml` is a host-network override for when the gateway is published on loopback only. |
 | **Factory** | `factory/doctor.py` and `factory/trigger.py` are published and report the factory's **real** state (no simulated poll loop); CI pins the Archon integration and only manufactures a real new spec. |
@@ -166,14 +166,28 @@ make builds                       # list ./builds (volume, gitignored)
 ```
 
 `make app` runs the `archon-greenfield` workflow (`.archon/workflows/app/greenfield/`)
-through the Archon CLI: it resolves and bounds the spec, runs Codex over it, **asserts
-on the artifact rather than the exit code**, and only then writes a `MANIFEST.json` +
-`README.md` recording which spec (by SHA-256) and which model produced the app. An
-agent that exits 0 having written nothing fails the run — worth knowing because this
-gateway does that: Codex exits 0 even when its last request was refused.
+through the Archon CLI: it resolves and bounds the spec, **plans the stack**, runs Codex
+over the plan, **asserts on the artifact rather than the exit code**, and only then
+writes a `MANIFEST.json` + `README.md` recording which spec (by SHA-256) and which model
+produced the app. An agent that exits 0 having written nothing fails the run — worth
+knowing because this gateway does that: Codex exits 0 even when its last request was
+refused.
+
+**The stack is planned before the agent runs.** One turn against the gateway decides the
+language, the commands that install, build and start the project, the port it listens on
+and the files it will contain, and writes `plan.json` into the app directory. Three
+things read that file and must agree on it: the agent is told the plan and builds to it,
+`scripts/package-project.py` writes the Dockerfile from it, and `scripts/app-runtime.py`
+runs the container on its port. A planning turn that produces no usable plan stops the
+run, because the alternative is minutes of agent time against a stack nobody chose —
+which is what used to happen: the prompt said "match the spec's tech stack" while the
+packager demanded a fixed React + Node/SQLite scaffold, so a spec that asked for anything
+else was built to neither and failed at packaging. By hand:
+`python3 scripts/project_plan.py --spec build-requests/my-todo.md`.
 
 The build node retries while the app directory is still empty, and switches model
-between attempts: `OMNIROUTE_MODEL` first, then `OMNIROUTE_MODEL_FALLBACK`. Both are read
+between attempts: `OMNIROUTE_MODEL` first, then `OMNIROUTE_MODEL_FALLBACK`, then
+`auto/coding` as a **last** attempt. Both of the first two are read
 from this checkout's `.env`, and that is not a detail you can skip — Archon strips the
 repo's own `.env` keys out of a script node's environment ("stripped 42 keys") *and* runs
 the workflow from a copy under `artifacts/runs/<id>/`, so the node used to fall back to
@@ -181,6 +195,15 @@ its code defaults while `.env` said otherwise: a deployment pinned to
 `gemini/gemini-3-flash-preview` asked the gateway for `auto/coding` and the manifest
 recorded the model nobody configured. Changing `.env` is therefore how you change the
 build model; exporting the variable does not survive.
+
+The third attempt is measured rather than theoretical. This gateway's models run on free
+tiers that go into cooldown, and a run whose two configured models were both unavailable —
+`oc/mimo-v2.5-free` timing out upstream and `gemini/gemini-3-flash-preview` reporting
+`model_cooldown` with a 23-minute reset — failed three times in a row while a third of the
+catalogue was answering. The composed route walks the catalogue, so it is placed last on
+purpose: ahead of it the configured model is the deliberate choice, behind it luck is
+better than nothing. The **planning** node uses the same chain, in the same order, so a
+spec cannot plan with one model and generate with another.
 
 Pin a **concrete, tool-calling model**. A model that answers in prose still "completes"
 while writing nothing, which shows up as a build that runs for minutes and leaves an

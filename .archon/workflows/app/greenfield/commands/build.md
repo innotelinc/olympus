@@ -14,12 +14,16 @@ is the app directory:
 
 {{SPEC_BODY}}
 
+{{PLAN}}
+
 ## What to produce
 
-Write the application into the working directory as **real files**. The spec's
-"Tech Stack" decides the shape, its "Key Features & Pages" decides the behaviour, and
-its "Reference build" section — when present — is a previous Studio build of the same
-app: use it for intent and details, not as a structure you must preserve.
+Write the application into the working directory as **real files**. The plan above —
+when there is one — decides the stack, the commands and the files, because it is what
+the project is packaged and run from. The spec's "Key Features & Pages" decides the
+behaviour, and its "Reference build" section — when present — is a previous Studio
+build of the same app: use it for intent and details, not as a structure you must
+preserve.
 
 - Implement **every** feature the spec lists. A feature you skip is the one that gets
   noticed; a feature you half-build is worse than one you leave out, because the spec
@@ -37,8 +41,10 @@ app: use it for intent and details, not as a structure you must preserve.
   do not create a git repository.
 - No network at runtime: an app that needs a reachable API it does not ship is not a
   finished app.
-- Match the stack the spec declares. Do not add a build step, a framework, or a
-  dependency the spec did not ask for.
+- Write no `plan.json` and no `MANIFEST.json`: those are the workflow's records, not
+  the app's, and a plan you write would be overwritten by the one already here.
+- Match the stack the plan names, or the one the spec declares when there is no plan.
+  Do not add a build step, a framework, or a dependency that neither asks for.
 
 ## When you are done
 

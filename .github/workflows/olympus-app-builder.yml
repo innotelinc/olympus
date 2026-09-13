@@ -146,7 +146,29 @@ jobs:
           OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
         run: |
           set -euo pipefail
+          mkdir -p .factory-ci
           for spec in $SPECS; do
             echo "Manufacturing from $spec"
-            ./scripts/manufacture.sh "$spec"
+            # Tee'd rather than left on the terminal. This step failing with no
+            # readable log is why a red run here could not be diagnosed at all: the
+            # job log needs repo-admin rights, and the failure was "exit 1" with
+            # nothing attached to it. `pipefail` keeps the step's status honest
+            # through the pipe.
+            ./scripts/manufacture.sh "$spec" 2>&1 | tee -a .factory-ci/manufacture.log
           done
+
+      - name: 📎 Keep the build log and what it produced
+        # On failure as well as success, which is the point: a log you only get when
+        # nothing went wrong is not evidence.
+        if: always() && steps.spec.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: manufacture-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            .factory-ci/
+            builds/*/MANIFEST.json
+            builds/*/project.manifest.json
+            builds/*/plan.json
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true

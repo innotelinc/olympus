@@ -82,10 +82,20 @@ jobs:
           WF=.archon/workflows/app/greenfield
           [ -f "$WF/archon-greenfield.yaml" ] || { echo "::error::missing $WF/archon-greenfield.yaml"; exit 1; }
           python3 -m compileall -q "$WF/scripts"
-          # Every script the YAML references must exist, or the node fails at run time.
-          for s in load-spec build-app verify-app record; do
-            [ -f "$WF/scripts/$s.py" ] || { echo "::error::missing script node $s ($WF/scripts/$s.py)"; exit 1; }
+          # Every script the YAML references must exist. Read out of the workflow
+          # rather than listed here: a node added to the YAML whose script was not
+          # added beside it otherwise fails at run time, inside a model run that
+          # costs minutes — and a list in this file does not notice it was not
+          # updated, which is exactly how the missing workflow this checks for got
+          # written in the first place.
+          grep -oE '^[[:space:]]+script: [a-z0-9-]+' "$WF/archon-greenfield.yaml" \
+            | awk '{print $2}' | sort -u | while read -r s; do
+            [ -f "$WF/scripts/$s.py" ] \
+              || { echo "::error::missing script node $s ($WF/scripts/$s.py)"; exit 1; }
           done
+          # The node list is not empty, so the grep above is still matching something.
+          nodes=$(grep -cE '^[[:space:]]+script: [a-z0-9-]+' "$WF/archon-greenfield.yaml")
+          [ "$nodes" -ge 4 ] || { echo "::error::only $nodes script node(s) found in the workflow"; exit 1; }
 
       - name: Compose files render
         run: |

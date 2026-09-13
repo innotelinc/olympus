@@ -27,8 +27,11 @@ spec built in 2m18s with real `exec_command` calls. The combo path also 503s out
 ("No credentials for opencode") when its pinned member has no credentials rows, which is
 what the earlier empty `provider_connections` produced.
 
-So attempt 1 uses the configured model and later attempts use a concrete one. Pin
-OMNIROUTE_MODEL to a concrete tool-calling model (see .env.example) to make this
+So attempt 1 uses the configured model, attempt 2 the configured fallback, and attempt 3
+the combo as a last resort — three different strategies over three bounded attempts,
+because the configured models here run on free tiers that go into cooldown and two of
+them cooling down at once used to end a run that the wider catalogue could have served.
+Pin OMNIROUTE_MODEL to a concrete tool-calling model (see .env.example) to make this
 deterministic rather than a coin toss.
 
 Reads (env):
@@ -36,7 +39,7 @@ Reads (env):
     INPUTS_APP_DIR              where the app must be written
     INPUTS_TITLE                the app's title
     OMNIROUTE_MODEL             primary model (default "auto/coding")
-    OMNIROUTE_MODEL_FALLBACK    concrete model for retries (default "oc/big-pickle")
+    OMNIROUTE_MODEL_FALLBACK    second attempt (default "oc/big-pickle")
     OMNIROUTE_BASE_URL          the gateway (default "http://127.0.0.1:20128/v1")
 
 Each `OMNIROUTE_*` is read from this node's environment and then from the checkout's
@@ -50,6 +53,7 @@ Emits {exit_code, model, attempts, log}.
 from __future__ import annotations
 
 import functools
+import importlib.util
 import json
 import os
 import shutil
@@ -66,7 +70,17 @@ INLINE_SPEC_LIMIT = 40_000
 # retry is to cover a rate-limited free tier, not to argue with a task the agent cannot
 # do. A third attempt that also writes nothing is evidence, not bad luck.
 MAX_ATTEMPTS = 3
-RETRY_DELAY_SECONDS = 20
+# The wait before each retry grows, because the thing being waited out is a rate-limit
+# window and those are measured in minutes, not seconds. Measured on this deployment: a
+# run whose three attempts were 20s apart failed all three with `429 Too Many Requests`,
+# and an identical invocation succeeded four minutes later. A flat 20s retry spent three
+# agent runs learning nothing.
+RETRY_DELAY_SECONDS = 30
+RETRY_BACKOFF = 4  # 30s, then 120s
+# Said out loud when every attempt was refused rather than empty: "the agent wrote
+# nothing" is true of a rate limit and of a model that cannot use tools, and they need
+# different answers from whoever reads the failure.
+RATE_LIMIT_MARKERS = (" 429 ", "429 too many requests", "too many requests", "exceeded retry limit")
 
 DEFAULT_MODEL = "auto/coding"
 # A CONCRETE model, not a combo. Combos pin a native Codex turn to one member, and the
@@ -181,6 +195,61 @@ def setting(key: str) -> str:
     return (os.environ.get(key) or "").strip() or repo_omniroute().get(key, "")
 
 
+@functools.lru_cache(maxsize=1)
+def plan_contract():
+    """`scripts/project_plan.py` from the checkout, or None when it is not there.
+
+    Loaded by path rather than imported by name: this node runs from a copy of the
+    workflow under `artifacts/runs/`, where the script beside it is the copy and the
+    checkout's copy is the deployment's. Returns None rather than failing so a
+    checkout without the module builds the way it did before it existed — a missing
+    contract is not a reason to stop a build that has a spec.
+    """
+    for start in _search_roots():
+        for parent in (start, *start.parents):
+            candidate = parent / "scripts" / "project_plan.py"
+            if not candidate.is_file():
+                continue
+            spec = importlib.util.spec_from_file_location("project_plan_under_test", candidate)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+    return None
+
+
+def is_workflow_file(app_dir: Path, path: Path) -> bool:
+    """Whether a path in the app directory is the workflow's rather than the app's."""
+    module = plan_contract()
+    if module is None:
+        return path.name == "plan.json"
+    try:
+        return bool(module.is_control_file(str(path.relative_to(app_dir))))
+    except ValueError:
+        return False
+
+
+def plan_section(app_dir: Path) -> str:
+    """The plan section of the prompt: the contract, or a sentence saying there is none.
+
+    A build with no plan is not refused — the spec is still a spec — but it is said
+    out loud instead of leaving `{{PLAN}}` in the prompt as prose the agent has to
+    interpret, which is how a placeholder becomes an instruction.
+    """
+    module = plan_contract()
+    plan = module.read_plan_file(app_dir) if module is not None else None
+    if plan is None:
+        return (
+            "## The stack is not decided for you\n\n"
+            "No plan was written for this build, so the specification's tech stack decides\n"
+            "the shape. Match it, and keep the project runnable on its own: nothing will be\n"
+            "installed for you, and the app has to start without help."
+        )
+    return module.plan_prompt_block(plan)
+
+
 def agent_env(gateway: str) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key in INHERIT}
     for key in HIJACKS:
@@ -198,14 +267,22 @@ def model_chain() -> list[str]:
     """The models to try, in order, across attempts.
 
     Primary first so the deployment's configured model gets its chance, then the
-    concrete fallback. Deduplicated, because retrying the same failing model twice is
-    just waiting longer for the same answer.
+    concrete fallback, then the composed route as a last resort. Three strategies
+    rather than a repeat, and deduplicated, because retrying the same failing model
+    twice is just waiting longer for the same answer.
     """
     primary = setting("OMNIROUTE_MODEL") or DEFAULT_MODEL
     fallback = setting("OMNIROUTE_MODEL_FALLBACK") or DEFAULT_FALLBACK_MODEL
     chain = [primary]
     if fallback and fallback != primary:
         chain.append(fallback)
+    # Last, the composed route: it walks every member with credentials until one
+    # answers. Not the first or second choice — which member serves a turn, and whether
+    # it can call tools, is luck — but by the last attempt a coin toss beats stopping.
+    # Measured: three attempts against two cooling-down free models wrote nothing while
+    # the wider catalogue was answering.
+    if DEFAULT_MODEL not in chain:
+        chain.append(DEFAULT_MODEL)
     return chain
 
 
@@ -241,15 +318,37 @@ def gateway_overrides() -> list[str]:
     ]
 
 
+def retry_delay(attempt: int) -> int:
+    """How long to wait before this attempt. Grows, because a rate limit does.
+
+    `attempt` is 1-based, and the first attempt never waits.
+    """
+    if attempt <= 1:
+        return 0
+    return RETRY_DELAY_SECONDS * (RETRY_BACKOFF ** (attempt - 2))
+
+
+def looked_rate_limited(output: str) -> bool:
+    """Whether what the agent said was a refusal to answer rather than an empty reply."""
+    lowered = output.lower()
+    return any(marker in lowered for marker in RATE_LIMIT_MARKERS)
+
+
 def has_artifact(app_dir: Path) -> bool:
     """Whether the agent has produced anything at all.
 
-    Any file counts, nested or not. Deliberately not a quality judgement — verify owns
-    that. This answers one narrow question: would another attempt be repeating a no-op,
-    or destroying work?
+    Any file counts, nested or not — except the workflow's own. `plan.json` is written
+    into this directory by the planning node *before* the agent runs, so counting it
+    would end the retry before the first attempt had a chance to write anything: the
+    node reads "something exists, stop here" and hands an empty app to verify.
+
+    Deliberately not a quality judgement — verify owns that. This answers one narrow
+    question: would another attempt be repeating a no-op, or destroying work?
     """
     try:
-        return any(path.is_file() for path in app_dir.rglob("*"))
+        return any(
+            path.is_file() and not is_workflow_file(app_dir, path) for path in app_dir.rglob("*")
+        )
     except OSError:
         return False
 
@@ -315,6 +414,7 @@ def main() -> int:
         .replace("{{TITLE}}", title)
         .replace("{{APP_DIR}}", str(app_dir))
         .replace("{{SPEC_BODY}}", spec_body)
+        .replace("{{PLAN}}", plan_section(app_dir))
     )
 
     app_dir.mkdir(parents=True, exist_ok=True)
@@ -338,11 +438,12 @@ def main() -> int:
         # the chain is a single entry, every attempt uses it.
         model = chain[min(attempt - 1, len(chain) - 1)]
         if attempt > 1:
+            delay = retry_delay(attempt)
             note(
                 f"retry {attempt}/{MAX_ATTEMPTS} on {model} — nothing written yet, "
-                f"waiting {RETRY_DELAY_SECONDS}s"
+                f"waiting {delay}s"
             )
-            time.sleep(RETRY_DELAY_SECONDS)
+            time.sleep(delay)
 
         argv = [
             codex, "exec",
@@ -363,7 +464,17 @@ def main() -> int:
             # not throw away. Whether that app is any good is verify's question.
             break
 
-    # Reported, not judged. verify-app decides whether an app exists.
+    # Reported, not judged — verify-app decides whether an app exists — but named when
+    # nothing exists and the reason is a rate limit, because the run's failure will say
+    # "the agent wrote nothing" and the operator would otherwise have to read the log to
+    # learn that the gateway refused every turn rather than that the model failed.
+    if not has_artifact(app_dir) and looked_rate_limited(output):
+        note(
+            "every attempt was rate-limited (HTTP 429) — the free pool was busy. This is "
+            "not a fault in the spec or the prompt: re-run the workflow, or pin a model "
+            "with quota in OMNIROUTE_MODEL."
+        )
+
     print(json.dumps({
         "exit_code": exit_code,
         "model": model,
