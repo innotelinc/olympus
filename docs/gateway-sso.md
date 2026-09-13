@@ -203,6 +203,63 @@ applies *behind* the proxy, so a session needs both Authentik and that password
 Cerulean Vault — `scripts/omniroute-vault.sh`). And the proxy only ever sees
 credentials over HTTPS because the edge terminates TLS.
 
+## "It's not resolving" — check the chain, don't guess
+
+The name is four things in series, and every one of them fails with the same
+sentence in a browser:
+
+```
+DNS        gateway.olympus.innotel.us  CNAME  innotel.us  → A  73.68.203.71
+edge       NPM (192.168.1.71) :443     →  http://192.168.1.10:20129
+proxy      oauth2-proxy                →  Authentik, for everything but /ping
+gateway    omniroute, loopback only     →  127.0.0.1:20128
+```
+
+A resolver that does not answer is a DNS error. A dead edge is a connection
+timeout. A lapsed certificate is a privacy warning. A stopped proxy is a 502. All
+four are reported as "it's not resolving", and three of them are not the name.
+
+`make gateway-edge-check` walks the chain in order, reports every link, and names
+the first broken one:
+
+```
+$ make gateway-edge-check
+  gateway.olympus.innotel.us
+    1. dns
+       system    127.0.0.53       NOERROR via innotel.us 73.68.203.71
+       cerulean  192.168.1.46     NOERROR via innotel.us 73.68.203.71
+    ok   tls    YR2 · expires Dec 12 12:24:25 2026 GMT (89d)
+    ok   edge   HTTP 302 · openresty · redirects to the identity provider, as the SSO proxy should
+    ok   proxy  HTTP 200 · OK
+
+ok: gateway.olympus.innotel.us is reachable and gated as expected.
+```
+
+Exit `0` is reachable, `1` is broken with the link named, `2` is "the check could
+not run". `--host` checks another name (a published site, say, with `--no-sso`),
+`--json` is for anything that wants to consume it, and `--resolver` overrides the
+platform resolver it asks alongside the system one.
+
+`scripts/gateway-edge-alert.sh` runs it daily under
+`olympus-gateway-edge-check.timer` (`sudo scripts/install-token-check-timer.sh
+TARGET=gateway-edge`) and Telegrams the report when a link is broken. It is the one
+check in that set that looks outward rather than at this host, which is exactly why
+it exists.
+
+### The finding that makes this worth having
+
+The record is a CNAME to the zone apex, and both of the zone's own nameservers —
+`ns1.innotel.us` and `ns2.innotel.us` — resolve to **the same address**, on the same
+host as the edge, Authentik and Cerulean. So when that host is down, every name
+under `innotel.us` stops resolving at once: internally and publicly, `gateway`,
+`studio`, `auth` and the rest. It presents as one name failing to resolve and it is
+in fact a platform outage, so the report says *which resolver failed and which
+answered* rather than just failing.
+
+Two nameservers on one host is not redundancy, and that is a network change rather
+than something this repo can make. What this repo can do is make the next
+occurrence say so in one line instead of costing an afternoon.
+
 ## The one thing left worth doing by hand
 
 **Close port 20129 to everything but the edge.** The proxy listens on `0.0.0.0`
@@ -229,6 +286,7 @@ bigger change than the exposure it closes.
 
 * `compose.gateway-sso.yml` — the proxy, and why it needs host networking.
 * `scripts/cerulean-edge.py` — DNS + certificate + edge host, and `make gateway-edge`.
+* `scripts/gateway-edge-check.py` — the four-link check above, and `make gateway-edge-check`.
 * `scripts/authentik-studio-app.py` — the client registration, and `make gateway-oidc`.
 * `docs/stack.md` — how the stack fits together.
 * `scripts/omniroute-vault.sh` — where the dashboard password comes from.

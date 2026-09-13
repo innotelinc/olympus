@@ -6,7 +6,7 @@
 #   olympus-<target>-check.service   runs scripts/<target>-alert.sh
 #   olympus-<target>-check.timer     fires it daily, and 2 min after boot
 #
-# Four targets exist:
+# Five targets exist:
 #
 #   studio-token   credential expiry check for `make studio-oidc`
 #                  (scripts/studio-token-alert.sh)
@@ -16,6 +16,14 @@
 #                  (scripts/build-model-alert.sh)
 #   gateway-backup the gateway's connections + the key that decrypts them, into
 #                  Vault (scripts/gateway-backup-alert.sh)
+#   gateway-edge   is the gateway's public name reachable, and if not, which link
+#                  broke — DNS, TLS, edge or the SSO proxy
+#                  (scripts/gateway-edge-alert.sh)
+#
+# gateway-edge is the one target that looks outward rather than at this host, and
+# that is why it exists: the name is four things in series, and when one of them
+# breaks the report that reaches a person is "it's not resolving". Running it daily
+# means the sentence arrives with the broken link already named.
 #
 # gateway-backup is the one target here that writes something — into Vault, over
 # the network, which is why it still fits this hardening: it reads the gateway's
@@ -55,6 +63,7 @@ resolve_target() {
         vault-renew)    TARGET_SCRIPT=vault-renew-alert.sh ;;
         build-model)    TARGET_SCRIPT=build-model-alert.sh ;;
         gateway-backup) TARGET_SCRIPT=gateway-backup-alert.sh ;;
+        gateway-edge)   TARGET_SCRIPT=gateway-edge-alert.sh ;;
         *) return 1 ;;
     esac
     UNIT_BASE="olympus-$1-check"
@@ -74,13 +83,13 @@ for arg in "$@"; do
     case "$arg" in
         --uninstall) uninstall_only=true ;;
         TARGET=*) targets+=("${arg#TARGET=}") ;;
-        *) echo "unknown argument: $arg (expected TARGET=<studio-token|vault-renew|build-model|gateway-backup> and/or --uninstall)" >&2; exit 2 ;;
+        *) echo "unknown argument: $arg (expected TARGET=<studio-token|vault-renew|build-model|gateway-backup|gateway-edge> and/or --uninstall)" >&2; exit 2 ;;
     esac
 done
-if [[ ${#targets[@]} -eq 0 ]]; then targets=(studio-token vault-renew build-model gateway-backup); fi
+if [[ ${#targets[@]} -eq 0 ]]; then targets=(studio-token vault-renew build-model gateway-backup gateway-edge); fi
 
 for target in "${targets[@]}"; do
-    resolve_target "$target" || { echo "unknown target: $target (expected studio-token, vault-renew, build-model or gateway-backup)" >&2; exit 2; }
+    resolve_target "$target" || { echo "unknown target: $target (expected studio-token, vault-renew, build-model, gateway-backup or gateway-edge)" >&2; exit 2; }
 
     [[ -f "$REPO_ROOT/scripts/$TARGET_SCRIPT" ]] || {
         echo "scripts/$TARGET_SCRIPT is missing next to this installer" >&2
@@ -151,4 +160,5 @@ if ! $uninstall_only; then
     echo "                     $REPO_ROOT/scripts/vault-renew-alert.sh --test-telegram"
     echo "                     $REPO_ROOT/scripts/build-model-alert.sh --test-telegram"
     echo "                     $REPO_ROOT/scripts/gateway-backup-alert.sh --test-telegram"
+    echo "                     $REPO_ROOT/scripts/gateway-edge-alert.sh --test-telegram"
 fi
