@@ -6,23 +6,33 @@
 #   olympus-<target>-check.service   runs scripts/<target>-alert.sh
 #   olympus-<target>-check.timer     fires it daily, and 2 min after boot
 #
-# Two targets exist:
+# Three targets exist:
 #
 #   studio-token   credential expiry check for `make studio-oidc`
 #                  (scripts/studio-token-alert.sh)
 #   vault-renew    daily renewal of the stack's periodic Vault token
 #                  (scripts/vault-renew-alert.sh)
+#   build-model    can the configured build model call a tool, twice over
+#                  (scripts/build-model-alert.sh)
 #
-# On expiry the units land in `systemctl --failed`, which is the fallback signal
-# when Telegram is not configured yet; the service is hardened (read-only
-# filesystems, no new privileges) because both wrappers are read-only by design.
+# On expiry or failure the units land in `systemctl --failed`, which is the
+# fallback signal when Telegram is not configured yet; the service is hardened
+# (read-only filesystems, no new privileges) because all three wrappers are
+# read-only by design. `build-model` is read-only in the same sense and one thing
+# more: it makes a model request, and never executes what the model proposes.
+#
+# build-model runs on the same daily schedule as the others. Quota exhaustion is
+# its usual finding and quota recovers, so the cost of a daily request is the
+# price of being told the day a chain goes quiet rather than the day someone
+# notices an empty app.
 #
 # The service's WorkingDirectory and command are substituted from THIS checkout,
 # so re-running the installer after moving the repo re-points the units. The
 # wrappers are idempotent and read .env themselves, so nothing else is needed.
 #
-#   scripts/install-token-check-timer.sh                          # both
+#   scripts/install-token-check-timer.sh                          # all three
 #   scripts/install-token-check-timer.sh TARGET=vault-renew       # one
+#   scripts/install-token-check-timer.sh TARGET=build-model       # one
 #   scripts/install-token-check-timer.sh TARGET=studio-token --uninstall
 #   systemctl list-timers 'olympus-*-check.timer'
 #   systemctl start olympus-studio-token-check.service   # run one now
@@ -37,6 +47,7 @@ resolve_target() {
     case "$1" in
         studio-token) TARGET_SCRIPT=studio-token-alert.sh ;;
         vault-renew)  TARGET_SCRIPT=vault-renew-alert.sh ;;
+        build-model)  TARGET_SCRIPT=build-model-alert.sh ;;
         *) return 1 ;;
     esac
     UNIT_BASE="olympus-$1-check"
@@ -56,13 +67,13 @@ for arg in "$@"; do
     case "$arg" in
         --uninstall) uninstall_only=true ;;
         TARGET=*) targets+=("${arg#TARGET=}") ;;
-        *) echo "unknown argument: $arg (expected TARGET=<studio-token|vault-renew> and/or --uninstall)" >&2; exit 2 ;;
+        *) echo "unknown argument: $arg (expected TARGET=<studio-token|vault-renew|build-model> and/or --uninstall)" >&2; exit 2 ;;
     esac
 done
-if [[ ${#targets[@]} -eq 0 ]]; then targets=(studio-token vault-renew); fi
+if [[ ${#targets[@]} -eq 0 ]]; then targets=(studio-token vault-renew build-model); fi
 
 for target in "${targets[@]}"; do
-    resolve_target "$target" || { echo "unknown target: $target (expected studio-token or vault-renew)" >&2; exit 2; }
+    resolve_target "$target" || { echo "unknown target: $target (expected studio-token, vault-renew or build-model)" >&2; exit 2; }
 
     [[ -f "$REPO_ROOT/scripts/$TARGET_SCRIPT" ]] || {
         echo "scripts/$TARGET_SCRIPT is missing next to this installer" >&2
@@ -131,4 +142,5 @@ if ! $uninstall_only; then
     echo "read the output:     journalctl -u olympus-studio-token-check -n 20"
     echo "test the channel:    $REPO_ROOT/scripts/studio-token-alert.sh --test-telegram"
     echo "                     $REPO_ROOT/scripts/vault-renew-alert.sh --test-telegram"
+    echo "                     $REPO_ROOT/scripts/build-model-alert.sh --test-telegram"
 fi
