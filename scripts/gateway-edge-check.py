@@ -8,6 +8,7 @@ fails with the same sentence in a browser:
     DNS        gateway.olympus.innotel.us  CNAME  innotel.us  → A  73.68.203.71
     edge       NPM (192.168.1.71) :443     →  http://192.168.1.10:20129
     proxy      oauth2-proxy                →  Authentik (302) for anything but /ping
+    session    oauth2-proxy                →  redis at 127.0.0.1:16379
     gateway    omniroute, loopback         →  127.0.0.1:20128
 
 A resolver that does not answer produces a DNS error; an edge that is down produces
@@ -18,6 +19,20 @@ them are not the name at all.
 So this walks the chain in order and stops at the first link that is broken, saying
 which one it was and what that means. It is deliberately not a smoke test that
 returns 0/1 — the diagnosis is the product.
+
+THE SESSION LINK IS HERE BECAUSE OF ONE PARTICULAR 502, and it is the odd one out:
+it is the only link that cannot be reached with `curl` at all. The proxy keeps its
+sessions in redis rather than in a cookie, and the reason is the login callback. A
+cookie session carries the email, the ID token and every group the identity claims;
+an account in a few dozen groups overflows the 4KB cookie limit, oauth2-proxy splits
+the session across several `Set-Cookie` headers, and the edge — whose
+`proxy_buffer_size` is smaller than that — answers the request that would have
+FINISHED the login with `502 Bad Gateway`. The site is perfectly reachable at the
+front door and cannot be logged into, which is why this walked the chain, found
+nothing wrong, and reported "ok" while the name was unusable. It cannot be probed
+from outside, because the whole point is that the answer comes only after you
+authenticate. So it checks the two things that make it work — the store answers,
+and the proxy is pointed at it — and says so rather than implying more.
 
 A WORTHWHILE THING IT TURNS UP: the record is a CNAME to the zone apex, and the
 zone's own authoritative servers are both on the same host as the edge, Authentik
@@ -43,9 +58,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -55,7 +72,9 @@ from pathlib import Path
 # --- configuration ------------------------------------------------------------
 
 DEFAULT_SSO_PORT = 20129
+DEFAULT_REDIS_PORT = 16379
 DEFAULT_HOST = "gateway.olympus.innotel.us"
+SSO_CONTAINER = "olympus-gateway-sso"
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -437,6 +456,143 @@ def check_proxy(port: int, timeout: float = 5.0) -> dict:
     return {"link": "proxy", "ok": True, "status": status, "body": body}
 
 
+def redis_encode(*parts: str) -> bytes:
+    """One RESP command. A `*N` array is ONE command, not a line-up of them.
+
+    This is the trap worth naming: `AUTH <password> PING` sent as a single
+    three-element array is not "authenticate, then ping" — it is one command
+    called AUTH carrying two arguments, and redis answers `-WRONGPASS`. Which
+    reads exactly like a wrong password, and cost an afternoon. Commands go in
+    separate arrays, one per command.
+    """
+    payload = f"*{len(parts)}\r\n".encode()
+    for part in parts:
+        raw = part.encode()
+        payload += b"$%d\r\n%s\r\n" % (len(raw), raw)
+    return payload
+
+
+def redis_read_line(connection: socket.socket) -> str:
+    """One reply line, which is all the simple-string replies here need."""
+    buffer = b""
+    while b"\r\n" not in buffer:
+        chunk = connection.recv(1024)
+        if not chunk:
+            break
+        buffer += chunk
+    return buffer.split(b"\r\n", 1)[0].decode("utf-8", "replace")
+
+
+def redis_command(port: int, password: str, command: str, arguments: list[str] | None = None, timeout: float = 5.0) -> str:
+    """Run one command, authenticating first if a password was given.
+
+    Hand-rolled rather than imported for the same reason as the DNS client above:
+    this host has no redis client and no third-party module, and a check that needs
+    a package installed to run is a check that does not run.
+
+    AUTH is sent as its own command and its reply is read before the real one, so
+    the caller gets the *last* reply — an authentication failure must be reported as
+    one, not mistaken for a failed PING.
+    """
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as connection:
+        if password:
+            connection.sendall(redis_encode("AUTH", password))
+            reply = redis_read_line(connection)
+            if not reply.startswith("+"):
+                return reply or "no reply to AUTH"
+        connection.sendall(redis_encode(command, *(arguments or [])))
+        return redis_read_line(connection)
+
+
+def proxy_session_store() -> tuple[str | None, str]:
+    """The session store the running proxy was actually started with.
+
+    Returns (store, note). `store` is None when it cannot be determined — which is a
+    finding about this check, not about the proxy, so it is reported as such rather
+    than counted as a pass. The configuration is read from the container because
+    there is no route that reports it: an unauthenticated request never reaches a
+    session, which is exactly the blind spot this link exists to cover.
+    """
+    if not shutil.which("docker"):
+        return None, "not verified — no docker on this host"
+
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", SSO_CONTAINER, "--format", "{{json .Config.Cmd}}"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, f"not verified — {error}"
+
+    # `the container is not there` is a different finding from `the store is
+    # unreadable`, and on this host it is usually "make gateway-sso-up was never run".
+    if result.returncode != 0:
+        return None, f"{SSO_CONTAINER} is not running"
+
+    command = result.stdout
+    for store in ("redis", "cookie"):
+        if f"--session-store-type={store}" in command:
+            return store, ""
+    return None, "the proxy's session store could not be read from its command"
+
+
+def check_session(env: dict[str, str]) -> dict:
+    """Can a login be completed? The store is the half of that a probe can reach.
+
+    Split from the proxy check because the two fail apart: a proxy on a dead store
+    answers /ping exactly like a healthy one, right up until somebody tries to sign
+    in — and then fails, on the callback, with a 502 from the edge that names no
+    component at all.
+    """
+    port = int(env.get("GATEWAY_SSO_REDIS_PORT") or DEFAULT_REDIS_PORT)
+    password = env.get("GATEWAY_SSO_REDIS_PASSWORD", "")
+    store, note = proxy_session_store()
+    payload: dict = {"link": "session", "port": port, "store": store}
+
+    try:
+        reply = redis_command(port, password, "PING")
+    except OSError as error:
+        payload["ok"] = False
+        payload["error"] = (
+            f"nothing answered on 127.0.0.1:{port}: {error}. The proxy keeps its sessions "
+            "there rather than in a cookie, so logins cannot complete without it."
+        )
+        return payload
+
+    if not reply.startswith("+PONG"):
+        # Redis reports a wrong password as an error reply, not a dropped
+        # connection, so this is the case where the two ends disagree about the
+        # secret rather than one of them being down.
+        payload["ok"] = False
+        payload["error"] = (
+            f"127.0.0.1:{port} answered {reply[:60]!r} — the store is up, but "
+            "GATEWAY_SSO_REDIS_PASSWORD in .env does not match its --requirepass."
+        )
+        return payload
+
+    if store == "cookie":
+        # The regression this link exists for. Not a crash and not a 502 at the
+        # front door, so nothing else would have said anything.
+        payload["ok"] = False
+        payload["error"] = (
+            "the proxy is on `--session-store-type=cookie`, which cannot hold a "
+            "session for an identity in many Authentik groups: it splits the session "
+            "across several cookies, the edge's proxy buffer is smaller than those "
+            "headers, and the login callback gets `502` from the edge. Set it to "
+            "redis in compose.gateway-sso.yml."
+        )
+        return payload
+
+    payload["ok"] = True
+    payload["note"] = "up and answering PING"
+    if note:
+        payload["warning"] = f"the proxy's session store was {note}, so only the store itself was checked"
+    return payload
+
+
 # --- diagnosis ----------------------------------------------------------------
 
 
@@ -449,6 +605,7 @@ def diagnose(links: dict[str, dict], host: str) -> str:
     answering for the zone.
     """
     dns, tls, edge, proxy = links["dns"], links["tls"], links["edge"], links["proxy"]
+    session = links.get("session")
 
     if not dns["ok"]:
         failed = [entry for entry in dns["answers"] if entry.get("error")]
@@ -483,6 +640,15 @@ def diagnose(links: dict[str, dict], host: str) -> str:
             f"{proxy['error']}. The name is fine; the container is not."
         )
 
+    # Checked after the proxy and worded differently from it on purpose: everything
+    # above this line is reachable, so the only thing left that can be wrong is
+    # whether somebody can actually sign in.
+    if session is not None and not session.get("ok"):
+        return (
+            f"{host} is reachable and its proxy is up, but a login would not complete: "
+            f"{session.get('error') or 'the session store did not answer'}"
+        )
+
     return f"{host} is reachable and gated as expected."
 
 
@@ -507,8 +673,10 @@ def report(links: dict[str, dict], host: str) -> None:
     if dns.get("warning"):
         print(f"     warning:  {dns['warning']}")
 
-    for key, label in (("tls", "tls"), ("edge", "edge"), ("proxy", "proxy")):
-        payload = links[key]
+    for key, label in (("tls", "tls"), ("edge", "edge"), ("proxy", "proxy"), ("session", "session")):
+        payload = links.get(key)
+        if payload is None:
+            continue
         detail = ""
         if key == "tls" and payload.get("ok"):
             detail = f"{payload.get('issuer')} · expires {payload.get('expires')} ({payload.get('days_left')}d)"
@@ -516,10 +684,15 @@ def report(links: dict[str, dict], host: str) -> None:
             detail = f"HTTP {payload.get('status')} · {payload.get('server')} · {payload.get('note') or 'serving'}"
         elif key == "proxy" and payload.get("ok"):
             detail = f"HTTP {payload.get('status')} · {payload.get('body')}"
+        elif key == "session" and payload.get("ok"):
+            store = payload.get("store") or "unreadable"
+            detail = f"127.0.0.1:{payload.get('port')} · sessions in {store} · {payload.get('note')}"
         else:
             detail = payload.get("error") or ""
         mark = "ok  " if payload.get("ok") else "FAIL"
         print(f"  {mark} {label:<6} {detail}")
+        if payload.get("warning"):
+            print(f"     warning:  {payload['warning']}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -554,6 +727,10 @@ def main(argv: list[str] | None = None) -> int:
         "edge": check_edge(host, expect_sso=not args.no_sso),
         "proxy": check_proxy(port),
     }
+    # A published site has no proxy and no session store; asking about them there
+    # would report a page's name as broken for not having a login.
+    if not args.no_sso:
+        links["session"] = check_session(env)
 
     verdict = diagnose(links, host)
     code = exit_code(links)

@@ -7,19 +7,32 @@ passing ones — and the DNS parser is fed synthetic packets rather than trusted
 because a response is untrusted input and the script's whole job is to report
 rather than to crash.
 
-What is deliberately not tested: anything that needs the network. `check_tls`,
-`check_edge` and `check_proxy` are thin wrappers over sockets; the decisions they
-make are split into pure functions (`edge_verdict`, `parse_response`, `exit_code`)
-and those are asserted here.
+What is deliberately not tested: anything that needs the network outside this
+process. `check_tls`, `check_edge` and `check_proxy` are thin wrappers over
+sockets; the decisions they make are split into pure functions (`edge_verdict`,
+`parse_response`, `exit_code`) and those are asserted here.
+
+The session store is the exception, and it gets a real socket: a fake redis on a
+loopback port, because the failure it exists to catch was a WIRE-LEVEL mistake in
+this very file — `AUTH <password> PING` sent as one three-element array is not two
+commands, it is one malformed AUTH, and redis answers `-WRONGPASS`. That reads
+exactly like a wrong password and is not one. A test that mocked the socket would
+have missed it, so the fake server decodes the wire format and asserts on the
+commands it actually received.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import io
+import socket
 import struct
 import sys
+import threading
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 
@@ -282,6 +295,283 @@ class ConfigTests(unittest.TestCase):
 
     def test_a_missing_env_file_is_empty_not_an_error(self) -> None:
         self.assertEqual(check.load_env(Path("/nonexistent/.env")), {})
+
+
+# --- a fake redis, so the wire format is asserted and not assumed ---------------
+
+
+def parse_commands(buffer: bytes) -> tuple[list[list[str]], bytes]:
+    """Split a RESP byte stream into complete commands. Returns (commands, rest).
+
+    Deliberately strict, and deliberately in the test: if this cannot parse what
+    `redis_encode` produced, the encoder is wrong.
+    """
+    commands: list[list[str]] = []
+    while buffer.startswith(b"*"):
+        head, _, rest = buffer.partition(b"\r\n")
+        count = int(head[1:])
+        arguments: list[str] = []
+        buffer = rest
+        for _ in range(count):
+            size_line, _, rest = buffer.partition(b"\r\n")
+            if not size_line.startswith(b"$"):
+                raise AssertionError(f"expected a bulk string, got {size_line!r}")
+            size = int(size_line[1:])
+            if len(rest) < size + 2:
+                raise AssertionError("truncated bulk string")
+            arguments.append(rest[:size].decode())
+            buffer = rest[size + 2 :]
+        commands.append(arguments)
+    return commands, buffer
+
+
+class FakeRedis:
+    """A redis that answers AUTH and PING and records what it was sent."""
+
+    def __init__(self, password: str = "s3cret", accept_auth: bool = True) -> None:
+        self.password = password
+        self.accept_auth = accept_auth
+        self.commands: list[list[str]] = []
+        self._server = socket.socket()
+        self._server.bind(("127.0.0.1", 0))
+        self._server.listen(1)
+        self.port = self._server.getsockname()[1]
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        connection, _ = self._server.accept()
+        with connection:
+            buffer = b""
+            while True:
+                chunk = connection.recv(1024)
+                if not chunk:
+                    return
+                received, buffer = parse_commands(buffer + chunk)
+                for arguments in received:
+                    self.commands.append(arguments)
+                    connection.sendall(self._reply(arguments))
+
+    def _reply(self, arguments: list[str]) -> bytes:
+        if arguments[0] == "AUTH":
+            if not self.accept_auth or arguments[-1] != self.password:
+                return b"-WRONGPASS invalid username-password pair or user is disabled.\r\n"
+            return b"+OK\r\n"
+        if arguments[0] == "PING":
+            return b"+PONG\r\n"
+        return b"-ERR unknown command\r\n"
+
+    def close(self) -> None:
+        self._thread.join(timeout=5)
+        self._server.close()
+
+
+class RedisWireTests(unittest.TestCase):
+    """The mistake that cost an afternoon, held down by a test."""
+
+    def test_one_command_is_one_array(self) -> None:
+        self.assertEqual(check.redis_encode("PING"), b"*1\r\n$4\r\nPING\r\n")
+        self.assertEqual(check.redis_encode("AUTH", "hunter2"), b"*2\r\n$4\r\nAUTH\r\n$7\r\nhunter2\r\n")
+
+    def test_concatenated_commands_parse_as_separate_commands(self) -> None:
+        # The distinction that matters: `*3` carrying AUTH, a password and PING is
+        # ONE command, and redis answers it with -WRONGPASS.
+        both = check.redis_encode("AUTH", "hunter2") + check.redis_encode("PING")
+        commands, rest = parse_commands(both)
+        self.assertEqual(commands, [["AUTH", "hunter2"], ["PING"]])
+        self.assertEqual(rest, b"")
+
+        one_array = check.redis_encode("AUTH", "hunter2", "PING")
+        commands, _ = parse_commands(one_array)
+        self.assertEqual(len(commands), 1, "this is the shape that fails")
+        self.assertEqual(len(commands[0]), 3)
+
+    def test_auth_and_the_command_are_sent_as_two_commands(self) -> None:
+        server = FakeRedis(password="hunter2")
+        try:
+            reply = check.redis_command(server.port, "hunter2", "PING")
+        finally:
+            server.close()
+
+        self.assertEqual(server.commands, [["AUTH", "hunter2"], ["PING"]])
+        self.assertEqual(reply, "+PONG")
+
+    def test_a_wrong_password_is_returned_rather_than_the_ping_reply(self) -> None:
+        # If the AUTH reply were skipped, a caller could read the PING reply of an
+        # unauthenticated connection and call the store healthy.
+        server = FakeRedis(password="hunter2")
+        try:
+            reply = check.redis_command(server.port, "wrong", "PING")
+        finally:
+            server.close()
+
+        self.assertTrue(reply.startswith("-WRONGPASS"), reply)
+        self.assertEqual(server.commands, [["AUTH", "wrong"]])
+
+    def test_no_password_means_no_auth_command(self) -> None:
+        server = FakeRedis(password="hunter2")
+        try:
+            check.redis_command(server.port, "", "PING")
+        finally:
+            server.close()
+        self.assertEqual(server.commands, [["PING"]])
+
+
+class SessionStoreTests(unittest.TestCase):
+    """The link that cannot be reached with curl, and the regression it covers."""
+
+    def session(self, store: str | None, note: str = "", password: str = "hunter2", accept: bool = True):
+        server = FakeRedis(password=password, accept_auth=accept)
+        self.addCleanup(server.close)
+        env = {"GATEWAY_SSO_REDIS_PORT": str(server.port), "GATEWAY_SSO_REDIS_PASSWORD": password}
+        with mock.patch.object(check, "proxy_session_store", return_value=(store, note)):
+            return check.check_session(env), server
+
+    def test_a_healthy_store_passes_and_says_where_sessions_live(self) -> None:
+        payload, server = self.session("redis")
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["store"], "redis")
+        self.assertEqual(payload["port"], server.port)
+        self.assertNotIn("error", payload)
+
+    def test_cookie_sessions_are_reported_as_the_502_they_cause(self) -> None:
+        # The whole reason this link exists. A cookie session overflows on an
+        # identity with many groups, the edge's buffer is smaller than the resulting
+        # Set-Cookie headers, and the login callback gets a 502 that names nothing.
+        payload, _ = self.session("cookie")
+        self.assertFalse(payload["ok"])
+        self.assertIn("session-store-type=cookie", payload["error"])
+        self.assertIn("502", payload["error"])
+
+    def test_a_dead_store_names_the_consequence_not_just_the_port(self) -> None:
+        # Nothing listening: bind a port, then close it, so it is definitely free.
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        env = {"GATEWAY_SSO_REDIS_PORT": str(port), "GATEWAY_SSO_REDIS_PASSWORD": "x"}
+        with mock.patch.object(check, "proxy_session_store", return_value=("redis", "")):
+            payload = check.check_session(env)
+
+        self.assertFalse(payload["ok"])
+        self.assertIn(str(port), payload["error"])
+        self.assertIn("logins cannot complete", payload["error"])
+
+    def test_a_password_mismatch_is_not_reported_as_a_dead_store(self) -> None:
+        # Redis answers a wrong password with an error reply rather than dropping the
+        # connection, so the two cases are distinguishable and must read differently:
+        # the fixes are "check the store" and "check the secret".
+        payload, server = self.session("redis", password="hunter2", accept=False)
+        self.assertFalse(payload["ok"])
+        self.assertIn("GATEWAY_SSO_REDIS_PASSWORD", payload["error"])
+        self.assertIn(str(server.port), payload["error"])
+
+    def test_an_unreadable_store_config_is_a_warning_not_a_bare_pass(self) -> None:
+        # Without docker the proxy's own configuration cannot be read, so only half
+        # the question was answered. Passing is right; passing silently is not.
+        payload, _ = self.session(None, note="not verified — no docker on this host")
+        self.assertTrue(payload["ok"], payload)
+        self.assertIsNone(payload["store"])
+        self.assertIn("no docker", payload["warning"])
+
+    def test_the_store_is_read_from_the_running_proxy_not_from_the_file(self) -> None:
+        # The container is the thing serving traffic; `.env` is what somebody meant.
+        def run(argv, **_kwargs):
+            self.assertEqual(argv[:3], ["docker", "inspect", check.SSO_CONTAINER])
+            return mock.Mock(returncode=0, stdout='["oauth2-proxy","--session-store-type=redis","--provider=oidc"]')
+
+        with mock.patch.object(check.shutil, "which", return_value="/usr/bin/docker"):
+            with mock.patch.object(check.subprocess, "run", side_effect=run):
+                self.assertEqual(check.proxy_session_store(), ("redis", ""))
+
+    def test_cookie_sessions_are_recognised_from_the_container_command(self) -> None:
+        with mock.patch.object(check.shutil, "which", return_value="/usr/bin/docker"):
+            with mock.patch.object(
+                check.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=0, stdout='["oauth2-proxy","--session-store-type=cookie"]'),
+            ):
+                self.assertEqual(check.proxy_session_store(), ("cookie", ""))
+
+    def test_a_command_with_no_session_flag_is_unreadable_not_assumed_cookie(self) -> None:
+        # The default IS cookie, but inferring it from a flag that is not there
+        # would report a regression on the strength of a missing line.
+        with mock.patch.object(check.shutil, "which", return_value="/usr/bin/docker"):
+            with mock.patch.object(
+                check.subprocess, "run", return_value=mock.Mock(returncode=0, stdout='["oauth2-proxy"]')
+            ):
+                store, note = check.proxy_session_store()
+        self.assertIsNone(store)
+        self.assertIn("could not be read", note)
+
+    def test_a_missing_container_is_reported_as_such(self) -> None:
+        with mock.patch.object(check.shutil, "which", return_value="/usr/bin/docker"):
+            with mock.patch.object(check.subprocess, "run", return_value=mock.Mock(returncode=1, stdout="")):
+                store, note = check.proxy_session_store()
+        self.assertIsNone(store)
+        self.assertIn(check.SSO_CONTAINER, note)
+
+    def test_no_docker_means_not_verified_rather_than_broken(self) -> None:
+        with mock.patch.object(check.shutil, "which", return_value=None):
+            store, note = check.proxy_session_store()
+        self.assertIsNone(store)
+        self.assertIn("not verified", note)
+
+    def test_a_broken_session_link_fails_the_check_and_says_why(self) -> None:
+        links = {
+            "dns": {"ok": True},
+            "tls": {"ok": True},
+            "edge": {"ok": True},
+            "proxy": {"ok": True},
+            "session": {"ok": False, "error": "the store is down"},
+        }
+        verdict = check.diagnose(links, "gateway.example")
+        self.assertIn("a login would not complete", verdict)
+        self.assertIn("the store is down", verdict)
+        self.assertEqual(check.exit_code(links), 1)
+
+    def test_a_healthy_session_link_changes_nothing_about_the_verdict(self) -> None:
+        links = {
+            "dns": {"ok": True},
+            "tls": {"ok": True},
+            "edge": {"ok": True},
+            "proxy": {"ok": True},
+            "session": {"ok": True, "store": "redis"},
+        }
+        self.assertIn("reachable and gated", check.diagnose(links, "gateway.example"))
+        self.assertEqual(check.exit_code(links), 0)
+
+    def test_a_diagnosis_without_a_session_link_still_works(self) -> None:
+        # `--no-sso` checks a published site, which has no proxy and no store.
+        links = {"dns": {"ok": True}, "tls": {"ok": True}, "edge": {"ok": True}, "proxy": {"ok": True}}
+        self.assertIn("reachable and gated", check.diagnose(links, "site.example"))
+        self.assertEqual(check.exit_code(links), 0)
+
+    def test_the_session_link_is_skipped_for_a_name_without_sso(self) -> None:
+        # Without this the store would be reported as broken for a published site,
+        # which has no login to fail.
+        def run(argv):
+            with redirect_stdout(io.StringIO()) as output:
+                code = check.main(argv)
+            return code, output.getvalue()
+
+        healthy = {"ok": True}
+        dns = {"ok": True, "answers": []}
+        with mock.patch.object(check, "check_dns", return_value=dns):
+            with mock.patch.object(check, "check_tls", return_value=healthy):
+                with mock.patch.object(check, "check_edge", return_value=healthy):
+                    with mock.patch.object(check, "check_proxy", return_value=healthy):
+                        broken = {"ok": False, "error": "the store is down"}
+                        with mock.patch.object(check, "check_session", return_value=broken) as session:
+                            _, with_sso = run(["--host", "a.example", "--env-file", "/nonexistent/.env"])
+                            self.assertEqual(session.call_count, 1)
+                            _, without = run(
+                                ["--host", "a.example", "--no-sso", "--env-file", "/nonexistent/.env"]
+                            )
+                            self.assertEqual(session.call_count, 1, "not called again with --no-sso")
+
+        self.assertIn("session", with_sso)
+        self.assertNotIn("session", without)
 
 
 class CliTests(unittest.TestCase):
