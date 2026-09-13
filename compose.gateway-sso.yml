@@ -96,11 +96,15 @@ services:
       # So "reachable on the LAN" and "the dashboard is not exposed" are both true,
       # and neither is achieved by widening the gateway's own binding.
       #
-      # NOT skipped, and this one is deliberate: `/api/auth/login` is the
-      # dashboard's OWN password login. Exempting it would hand anyone holding that
-      # password a dashboard session that never touched Authentik, which turns the
-      # group check into decoration. To sign in you go through SSO first, then the
-      # password — two gates, in that order.
+      # NOT skipped, and this one is deliberate: `/api/auth/login` is the dashboard's
+      # OWN login. It is a no-op today — `make gateway-auth-mode` sets
+      # `requireLogin=false`, so the gateway does not gate itself and this route has
+      # nothing to hand out; there is exactly one gate, and it is Authentik. It stays
+      # unexempted because it costs nothing and because a future release that
+      # reintroduces a password check must not find it sitting outside the SSO door.
+      # Verified rather than assumed: with a session, `/dashboard` answers 200 and
+      # never reaches OmniRoute's `/login`; without one, the public name is a 302 to
+      # Authentik.
       - --skip-auth-route=^/v1/
       - --skip-auth-route=^/healthz$
       - --redirect-url=https://${GATEWAY_PUBLIC_HOST}/oauth2/callback

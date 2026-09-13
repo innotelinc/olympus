@@ -193,17 +193,59 @@ Verified against the live deployment:
 | One OmniRoute only | one container, one listener on `20128`; the `olympus` container no longer publishes that port and no longer starts a bundled gateway |
 | `make gateway-edge` re-run | reports all three steps already done; writes nothing |
 | Scanner traffic | internet scanners that found the new name (it is minutes old) get the same `302` to Authentik, never the dashboard |
-| A completed sign-in | driven end to end through the Authentik flow executor: identification → password → authorize → `/oauth2/callback` → `302 /`, then `/dashboard` answered by OmniRoute. The session's group list contained `cerulean-platform`, so `--allowed-group` matched rather than being reasoned about |
+| A completed sign-in | driven end to end through the Authentik flow executor: identification → password → authorize → `/oauth2/callback` → `302 /`, then `/dashboard` answered **200** — OmniRoute's own `/login` is never reached |
+| One gate only | `make gateway-auth-mode --verify` → exit 0; the gateway's own login is off |
+| The gateway does not gate itself | `GET /api/providers` on `127.0.0.1:20128` answers `200` with no session, which is what `requireLogin=false` means |
+| Nothing but the proxy can reach it | `192.168.1.10:20128` and `192.168.1.10:16379` both refuse, so reachability is the whole control and the proxy holds it |
 
 The sign-in is no longer the thing that is unverified — that paragraph used to say
 it was, and then the broken version of exactly that step (see the next section)
 went unnoticed for want of it. Driving it is what found the 502.
 
-Two further layers remain, deliberately. The dashboard's own password still
-applies *behind* the proxy, so a session needs both Authentik and that password
-(the stock `CHANGEME` was rotated off the documented default; the value is in
-Cerulean Vault — `scripts/omniroute-vault.sh`). And the proxy only ever sees
-credentials over HTTPS because the edge terminates TLS.
+The proxy only ever sees credentials over HTTPS because the edge terminates TLS.
+
+## One gate, and it is Authentik
+
+There used to be two logins for one surface: the proxy, then OmniRoute's own
+dashboard password. The second guarded nothing — the proxy had already established
+who you were, and the management API it protected is reachable only through the
+proxy — and it hid the fact that the *first* one is the only one that can work,
+because OmniRoute's own OIDC cannot be enabled (the `iss` mismatch at the top of
+this file). Two credential systems, one of which cannot authenticate anybody.
+
+`make gateway-auth-mode` removes the gateway's own login:
+
+```
+make gateway-auth-mode --dry-run     # what it would do
+make gateway-auth-mode               # do it
+make gateway-auth-mode --verify      # exit non-zero unless Authentik is the only gate
+```
+
+**What it actually does, measured on a throwaway instance rather than assumed:**
+`requireLogin=false` makes the gateway stop gating its own management API.
+
+| | before | after |
+| --- | --- | --- |
+| `GET /api/settings` with no session | `401 Authentication required` | `200` |
+| `GET /api/providers` with no session | `401 Authentication required` | `200` |
+| `GET /dashboard` with no session | `200` (the shell was always public) | `200` |
+
+The dashboard is then served straight through, and the sign-in that mattered is the
+Authentik one. **This makes the reachability of port 20128 the entire control**, and
+that is why the script checks the binding before it changes anything and refuses if
+it is not loopback — see below. It is not a preference; without that binding this
+change would be a hole.
+
+The stored dashboard password is **kept**. It grants nothing once `requireLogin` is
+false, and it is the way back in if a future release resets the flag: `requireLogin =
+true` with no password is a lockout needing a volume edit. Removing it would have
+been the tidier-looking change and the worse one.
+
+The order matters and is enforced by the API, not by us: `requireLogin` is a
+security-impacting setting, so OmniRoute answers `400 PASSWORD_REQUIRED` unless the
+current password travels with the request — a hijacked session cannot open the
+dashboard on its own. The script resolves that password from the `vault://`
+reference in `.env` and sends it.
 
 ## Why the session is not a cookie
 
@@ -324,7 +366,9 @@ occurrence say so in one line instead of costing an afternoon.
 **Close port 20129 to everything but the edge.** The proxy listens on `0.0.0.0`
 so the edge (a different host) can reach it, which also means anything else on
 the LAN can. That is not an authentication problem — every path still needs an
-Authentik session in the allowed group — but it is unnecessary surface.
+Authentik session in the allowed group — but it is unnecessary surface, and it
+matters more than it used to: the proxy is now the *only* gate, so an open 20129
+is an open door to a gateway that no longer authenticates anything itself.
 
 `--trusted-ip` was tried and **removed**: oauth2-proxy warns on every request that
 mixing it with `--reverse-proxy` is unsafe, and it is right — with reverse-proxy
