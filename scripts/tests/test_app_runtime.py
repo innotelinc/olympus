@@ -187,6 +187,115 @@ class VhostTests(Fixture):
         self.assertTrue(body.rstrip().endswith("}"))
 
 
+class PlanTests(Fixture):
+    """What the runtime reads out of the plan the project was packaged from.
+
+    These two values are the ones whose failure is invisible: the wrong container
+    port is a published name proxying to nothing, and the wrong healthcheck path is
+    a runtime that declares a working app dead on arrival — or, worse, one that
+    accepts a running-but-broken app as up.
+    """
+
+    def plan_file(self, payload: object) -> Path:
+        app_dir = self.root / "builds" / "todo"
+        app_dir.mkdir(parents=True, exist_ok=True)
+        (app_dir / runtime_module.PLAN_NAME).write_text(json.dumps(payload), encoding="utf-8")
+        return app_dir
+
+    def test_reads_a_plan(self) -> None:
+        app_dir = self.plan_file({"run": {"port": 8000, "healthcheck": "/healthz"}})
+        plan = runtime_module.read_plan(app_dir)
+        self.assertEqual(runtime_module.plan_port(plan), 8000)
+        self.assertEqual(runtime_module.plan_healthcheck(plan), "/healthz")
+
+    def test_absent_or_unreadable_plan_is_the_old_defaults(self) -> None:
+        # A project packaged before the planner existed has an image and a
+        # Dockerfile but no plan.json. Refusing to start it would break every app
+        # already published.
+        app_dir = self.root / "builds" / "legacy"
+        app_dir.mkdir(parents=True)
+        self.assertEqual(runtime_module.read_plan(app_dir), {})
+        self.assertEqual(runtime_module.plan_port({}), runtime_module.CONTAINER_PORT)
+        self.assertEqual(runtime_module.plan_healthcheck({}), "/api/health")
+
+        (app_dir / runtime_module.PLAN_NAME).write_text("not json")
+        self.assertEqual(runtime_module.read_plan(app_dir), {})
+
+    def test_an_out_of_range_port_falls_back_rather_than_failing_the_publish(self) -> None:
+        # No published project can listen on :80 without a root the container does not
+        # have. The planner refuses the same value at the other end; this is the second
+        # gate, and it exists so a bad number cannot make a project that builds and
+        # cannot run.
+        for port in (80, 0, -1, 70000, None, "", "not a port"):
+            self.assertEqual(
+                runtime_module.plan_port({"run": {"port": port}}), runtime_module.CONTAINER_PORT
+            )
+
+    def test_a_numeric_string_is_still_understood(self) -> None:
+        # Studio normalises the port to a number before it ever leaves the browser, so
+        # this only comes up for a hand-written plan.json — and reading it is kinder
+        # than starting the app somewhere nobody is looking for it.
+        self.assertEqual(runtime_module.plan_port({"run": {"port": "8000"}}), 8000)
+
+    def test_a_healthcheck_that_is_not_a_path_falls_back(self) -> None:
+        for value in ("http://example.com", "", None, 7):
+            self.assertEqual(
+                runtime_module.plan_healthcheck({"run": {"healthcheck": value}}),
+                "/api/health",
+            )
+
+    def test_a_query_string_is_dropped_from_the_healthcheck(self) -> None:
+        self.assertEqual(
+            runtime_module.plan_healthcheck({"run": {"healthcheck": "/health?deep=1"}}), "/health"
+        )
+
+    def test_healthcheck_asks_the_path_it_is_given(self) -> None:
+        # The socket is real; what is asserted is that the request line carries the
+        # plan's path, which is the part that used to be hardcoded to /api/health.
+        seen: list[bytes] = []
+
+        class FakeSocket:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *arguments):
+                return False
+
+            def sendall(self_inner, data: bytes) -> None:
+                seen.append(data)
+
+            def recv(self_inner, size: int) -> bytes:
+                return b"HTTP/1.0 200 OK\r\n"
+
+        original = runtime_module.socket.create_connection
+        runtime_module.socket.create_connection = lambda *a, **k: FakeSocket()
+        try:
+            answered = runtime_module.health(self.runtime, "todo", 1, 1.0, "/healthz")
+        finally:
+            runtime_module.socket.create_connection = original
+
+        self.assertTrue(answered)
+        self.assertEqual(seen[0].split(b"\r\n")[0], b"GET /healthz HTTP/1.0")
+
+    def test_already_packaged_needs_a_dockerfile_and_a_manifest(self) -> None:
+        app_dir = self.root / "builds" / "todo"
+        app_dir.mkdir(parents=True)
+        self.assertFalse(runtime_module.already_packaged(app_dir))
+
+        (app_dir / "Dockerfile").write_text("FROM x\n")
+        self.assertFalse(runtime_module.already_packaged(app_dir))
+
+        (app_dir / runtime_module.MANIFEST_NAMES[0]).write_text("{}")
+        self.assertTrue(runtime_module.already_packaged(app_dir))
+
+    def test_an_older_manifest_counts_as_packaged(self) -> None:
+        app_dir = self.root / "builds" / "todo"
+        app_dir.mkdir(parents=True)
+        (app_dir / "Dockerfile").write_text("FROM x\n")
+        (app_dir / "app.manifest.json").write_text("{}")
+        self.assertTrue(runtime_module.already_packaged(app_dir))
+
+
 class CliTests(Fixture):
     def test_an_unsafe_slug_is_refused_before_docker_is_touched(self) -> None:
         with self.assertRaises(SystemExit) as raised:

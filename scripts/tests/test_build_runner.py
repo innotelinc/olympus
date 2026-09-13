@@ -299,9 +299,25 @@ class TestValidateRequest(RepoFixture):
 class TestPublishSteps(RepoFixture):
     """The commands a publish runs, which differ by kind and in a load-bearing way."""
 
-    def steps(self, kind: str) -> list[str]:
+    def steps(self, kind: str, plan: dict | None = None) -> list[str]:
         instance = runner.Runner(self.repo, self.queue, poll_seconds=1)
-        return [" ".join(command) for command in instance.publish_steps("todo", kind)]
+        return [" ".join(command) for command in instance.publish_steps("todo", kind, plan)]
+
+    def planned(self) -> dict:
+        return runner.parse_plan(
+            {
+                "name": "Todo",
+                "kind": "app",
+                "runtime": {"language": "python", "database": "sqlite"},
+                "run": {
+                    "install": "pip install -r requirements.txt",
+                    "build": "",
+                    "start": "python app.py",
+                    "port": 8000,
+                    "healthcheck": "/healthz",
+                },
+            }
+        )
 
     def test_a_website_is_packaged_and_staged(self) -> None:
         steps = self.steps("website")
@@ -326,6 +342,24 @@ class TestPublishSteps(RepoFixture):
 
     def test_the_image_name_matches_what_the_packager_writes(self) -> None:
         self.assertEqual(runner.image_tag_for("todo"), "olympus-app-todo:latest")
+
+    def test_a_planned_project_takes_the_same_three_steps_whatever_the_kind(self) -> None:
+        # A website ends as an image too now: nginx is its server, and a container is
+        # how you get one without a toolchain on the host.
+        for kind in ("app", "website"):
+            steps = self.steps(kind, self.planned())
+            self.assertIn("package-project.py todo", steps[0])
+            self.assertIn("app-runtime.py --up todo --build", steps[1])
+            self.assertIn("studio-sites.py --publish todo", steps[2])
+            self.assertEqual(len(steps), 3)
+
+    def test_a_planned_website_is_not_staged_into_the_static_tree(self) -> None:
+        # The old path copies `dist/` for the wildcard regex to serve. A planned
+        # project has an exact-name vhost instead, and staging as well would leave two
+        # servers claiming the same name.
+        for step in self.steps("website", self.planned()):
+            self.assertNotIn("package-website.py", step)
+            self.assertNotIn("--publish", step.replace("studio-sites.py --publish", ""))
 
 
 class TestPublishRequest(RepoFixture):
@@ -724,7 +758,11 @@ class TestProcess(RepoFixture):
         status = self.status()
 
         self.assertEqual(status["state"], "failed")
-        self.assertIn("did not package", status["message"])
+        # The wording says "build" rather than "package" because for a planned project
+        # this is `docker build`: the install step runs inside the image, and the
+        # failure is the package manager's own message rather than a missing scaffold.
+        self.assertIn("did not build", status["message"])
+        self.assertIn("exit 2", status["message"])
 
     def test_a_cancelled_build_is_recorded_as_cancelled(self) -> None:
         # The marker is dropped by the build itself, which is exactly how a click
@@ -857,3 +895,152 @@ class TestProcess(RepoFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPlanParsing(RepoFixture):
+    """The plan out of a request, which is the boundary a plan crosses a browser at.
+
+    Every field that reaches a command, a port or a base image is re-read here.
+    A plan is written by Studio from a model's reply, sent to a browser, confirmed
+    by a person and sent back — so it is untrusted input wearing the user's
+    approval, and the checks below are the ones whose absence is a silent failure.
+    """
+
+    def test_absent_is_allowed_and_means_no_plan(self) -> None:
+        # A project saved before the planner existed has no plan, and its own
+        # packager still builds it. Refusing here would strand the whole library.
+        self.assertIsNone(runner.parse_plan(None))
+
+    def test_reads_the_run_section(self) -> None:
+        plan = runner.parse_plan(
+            {
+                "name": "Tracker",
+                "kind": "app",
+                "runtime": {"language": "python", "database": "sqlite"},
+                "run": {"install": "pip install -r r.txt", "start": "python app.py", "port": 8000},
+            }
+        )
+        assert plan is not None
+        self.assertEqual(plan["runtime"]["language"], "python")
+        self.assertEqual(plan["run"]["start"], "python app.py")
+        self.assertEqual(plan["run"]["port"], 8000)
+        self.assertEqual(plan["run"]["install"], "pip install -r r.txt")
+
+    def test_refuses_something_that_is_not_an_object(self) -> None:
+        for value in ("a plan", 42, [1, 2]):
+            with self.assertRaises(runner.RequestError):
+                runner.parse_plan(value)
+
+    def test_refuses_a_plan_with_no_run_section(self) -> None:
+        with self.assertRaises(runner.RequestError):
+            runner.parse_plan({"name": "x"})
+
+    def test_refuses_a_plan_with_no_start_command(self) -> None:
+        with self.assertRaises(runner.RequestError):
+            runner.parse_plan({"run": {"install": "npm ci", "start": "  "}})
+
+    def test_refuses_a_command_that_is_not_a_string(self) -> None:
+        with self.assertRaises(runner.RequestError):
+            runner.parse_plan({"run": {"start": "npm start", "install": ["rm", "-rf", "/"]}})
+
+    def test_refuses_a_command_over_the_length_limit(self) -> None:
+        with self.assertRaises(runner.RequestError):
+            runner.parse_plan({"run": {"start": "npm start", "install": "x" * 501}})
+
+    def test_flattens_a_command_onto_one_line(self) -> None:
+        # A newline inside a Dockerfile RUN is a continuation: it would join the next
+        # instruction onto this command, which is how a plan stops meaning what it says.
+        plan = runner.parse_plan({"run": {"start": "npm   run   start\n  "}})
+        assert plan is not None
+        self.assertEqual(plan["run"]["start"], "npm run start")
+
+    def test_a_port_that_is_not_a_number_becomes_none(self) -> None:
+        # The packager reads the port from plan.json and refuses a bad one; here it is
+        # recorded as absent so nothing downstream can treat '8000' as 8000.
+        plan = runner.parse_plan({"run": {"start": "npm start", "port": "8000"}})
+        assert plan is not None
+        self.assertIsNone(plan["run"]["port"])
+
+    def test_a_healthcheck_that_is_not_a_path_falls_back(self) -> None:
+        plan = runner.parse_plan({"run": {"start": "npm start", "healthcheck": "http://x"}})
+        assert plan is not None
+        self.assertEqual(plan["run"]["healthcheck"], "/")
+
+    def test_kind_defaults_to_app(self) -> None:
+        plan = runner.parse_plan({"run": {"start": "npm start"}})
+        assert plan is not None
+        self.assertEqual(plan["kind"], "app")
+        plan = runner.parse_plan({"kind": "website", "run": {"start": "npm start"}})
+        assert plan is not None
+        self.assertEqual(plan["kind"], "website")
+
+    def test_the_request_carries_it_through(self) -> None:
+        payload = self.request(plan={"run": {"start": "python app.py", "port": 8000}})
+        job = runner.validate_request(self.repo, payload)
+        self.assertEqual(job["plan"]["run"]["start"], "python app.py")
+
+    def test_a_request_without_a_plan_is_still_valid(self) -> None:
+        job = runner.validate_request(self.repo, self.request())
+        self.assertIsNone(job["plan"])
+
+    def test_a_broken_plan_refuses_the_request_rather_than_the_build(self) -> None:
+        # Refused before a job is claimed: a plan that fails half-way through a publish
+        # has already materialised files and written a vhost.
+        payload = self.request(plan={"run": {"start": ""}})
+        with self.assertRaises(runner.RequestError):
+            runner.validate_request(self.repo, payload)
+
+
+class TestWritePlan(RepoFixture):
+    def test_writes_the_plan_where_the_packager_reads_it(self) -> None:
+        directory = self.repo / "builds" / "todo"
+        directory.mkdir(parents=True)
+        runner.write_plan(directory, {"run": {"start": "python app.py"}})
+
+        written = json.loads((directory / "plan.json").read_text())
+        self.assertEqual(written["run"]["start"], "python app.py")
+
+    def test_does_nothing_without_a_plan(self) -> None:
+        directory = self.repo / "builds" / "todo"
+        directory.mkdir(parents=True)
+        runner.write_plan(directory, None)
+        self.assertFalse((directory / "plan.json").exists())
+
+    def test_creates_the_directory(self) -> None:
+        directory = self.repo / "builds" / "fresh"
+        runner.write_plan(directory, {"run": {"start": "npm start"}})
+        self.assertTrue((directory / "plan.json").is_file())
+
+
+class TestProjectManifest(RepoFixture):
+    def test_prefers_the_plan_driven_manifest(self) -> None:
+        directory = self.repo / "builds" / "todo"
+        directory.mkdir(parents=True)
+        (directory / "project.manifest.json").write_text(
+            json.dumps(
+                {
+                    "v": 1,
+                    "kind": "app",
+                    "slug": "todo",
+                    "language": "python",
+                    "image": "olympus-app-todo:latest",
+                    "port": 8000,
+                    "dist_files": 4,
+                    "dist_bytes": 900,
+                }
+            )
+        )
+        site = runner.read_packaged(directory, "app")
+        assert site is not None
+        self.assertEqual(site["language"], "python")
+        self.assertEqual(site["image"], "olympus-app-todo:latest")
+
+    def test_falls_back_to_the_older_manifest(self) -> None:
+        directory = self.repo / "builds" / "todo"
+        directory.mkdir(parents=True)
+        (directory / "app.manifest.json").write_text(
+            json.dumps({"v": 1, "kind": "app", "slug": "todo", "dist_files": 2, "image": "x"})
+        )
+        site = runner.read_packaged(directory, "app")
+        assert site is not None
+        self.assertEqual(site["dist_files"], 2)

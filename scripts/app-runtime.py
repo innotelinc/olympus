@@ -64,9 +64,22 @@ DEFAULT_APP_ROOT = "/var/lib/olympus/apps"
 DEFAULT_PORT_BASE = 21400
 DEFAULT_PORT_RANGE = 200
 
-# The port the app listens on *inside* its container. Fixed by the generated
-# Dockerfile, and not the published one: what changes per app is the host side.
+# The port an app listens on *inside* its container when its plan does not say.
+# Not the published one — what changes per app is the host side — and a default
+# rather than a rule: a planned project declares its own port, and it is installed
+# into the image as `ENV PORT`, so the two have to agree or nothing is reachable.
 CONTAINER_PORT = 3000
+
+# The plan the packager built the project from. Read here for the container port and
+# the healthcheck path, because those are two facts the runtime needs and only the
+# plan knows: a Python app on :8000 and a Node app on :3000 are the same publish.
+PLAN_NAME = "plan.json"
+MIN_PORT = 1024
+MAX_PORT = 49151
+
+# Where the packagers leave their summary, newest name first. Their presence is what
+# "already packaged" means — not the image, which is what we are about to build.
+MANIFEST_NAMES = ("project.manifest.json", "app.manifest.json", "site.manifest.json")
 
 # The name `olympus-sites` is started under, so the reload can find it.
 SITES_CONTAINER = "olympus-sites"
@@ -317,21 +330,83 @@ def container_state(name: str) -> str:
     return (result.stdout or "").strip() or "absent"
 
 
-def health(runtime: Runtime, slug: str, port: int, timeout: float) -> bool:
+def read_plan(app_dir: Path) -> dict:
+    """The plan this project was packaged from, or an empty dict.
+
+    A missing plan is not a failure here: a project packaged before the planner
+    existed has an image and a Dockerfile but no `plan.json`, and refusing to start
+    it would break every published app. The defaults below are exactly what those
+    packagers generated, so the old path keeps working unchanged.
+    """
+    try:
+        payload = json.loads((app_dir / PLAN_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def plan_port(plan: dict) -> int:
+    """The port inside the container, from the plan, within the usable range.
+
+    Out-of-range is corrected rather than refused: no published project can be
+    started on :80 without a root the container does not have, and failing the
+    publish would leave the operator with an app that builds and cannot run. The
+    planner refuses the same value at the other end, so this is the second gate.
+    """
+    run = plan.get("run")
+    raw = run.get("port") if isinstance(run, dict) else None
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        return CONTAINER_PORT
+    return port if MIN_PORT <= port <= MAX_PORT else CONTAINER_PORT
+
+
+def plan_healthcheck(plan: dict) -> str:
+    run = plan.get("run")
+    raw = run.get("healthcheck") if isinstance(run, dict) else None
+    if not isinstance(raw, str) or not raw.startswith("/"):
+        return "/api/health"
+    return raw.split("?")[0] or "/api/health"
+
+
+def now_stamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def health(runtime: Runtime, slug: str, port: int, timeout: float, path: str = "/api/health") -> bool:
     """Whether the app answers on loopback. A container that started is not an app
     that works: the process can boot and still fail its first request, which is
-    exactly what the generated Dockerfile's HEALTHCHECK is also looking for."""
+    exactly what the generated Dockerfile's HEALTHCHECK is also looking for.
+
+    The path comes from the plan, so this asks the project's own "am I up" endpoint
+    rather than a path only the generated server had. A 200 is required, not any
+    answer: a 500 is a container that is running and broken.
+    """
+    request = f"GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n".encode()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=2) as connection:
-                connection.sendall(b"GET /api/health HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                connection.sendall(request)
                 if b" 200 " in connection.recv(256):
                     return True
         except OSError:
             pass
         time.sleep(1)
     return False
+
+
+def already_packaged(app_dir: Path) -> bool:
+    """Whether a packager has run here — a Dockerfile *and* a manifest it wrote.
+
+    Both, because either alone is a half-state: a Dockerfile with no manifest is a
+    build that was interrupted before the image was made, and a manifest with no
+    Dockerfile cannot be built at all.
+    """
+    if not (app_dir / "Dockerfile").is_file():
+        return False
+    return any((app_dir / name).is_file() for name in MANIFEST_NAMES)
 
 
 # --- operations --------------------------------------------------------------
@@ -343,6 +418,10 @@ def up(runtime: Runtime, args: argparse.Namespace) -> int:
     if not app_dir.is_dir():
         fail(f"no build at builds/{slug} — package it first (make app-package SLUG={slug})", 2)
 
+    plan = read_plan(app_dir)
+    container_port = plan_port(plan)
+    health_path = plan_healthcheck(plan)
+
     image = args.image or f"olympus-app-{slug}:latest"
     name = args.container or f"olympus-app-{slug}"
     port = runtime.allocate_port(slug)
@@ -350,21 +429,24 @@ def up(runtime: Runtime, args: argparse.Namespace) -> int:
     if args.build or not image_exists(image):
         if args.dry_run:
             note(f"would build {image} from {app_dir}")
+            note(f"would run it on 127.0.0.1:{port}:{container_port}, health {health_path}")
         else:
-            # The app may have been packaged by the runner already. If it has not —
-            # someone ran this by hand against a generated build — package it first,
-            # because `docker build` needs the scaffold and the built client.
-            packaged = (app_dir / "Dockerfile").is_file() and (app_dir / "dist" / "client" / "index.html").is_file()
-            if not packaged:
-                command = ["python3", str(repo_root() / "scripts" / "package-app.py"), slug]
+            # The project may have been packaged by the runner already. If it has not
+            # — someone ran this by hand against a generated build — package it first,
+            # because `docker build` needs the Dockerfile and the install step.
+            if not already_packaged(app_dir):
+                # A plan means the generic packager wrote the Dockerfile; no plan means
+                # this project predates the planner, and its own packager built it.
+                packager = "package-project.py" if plan else "package-app.py"
+                command = ["python3", str(repo_root() / "scripts" / packager), slug]
                 note(f"$ {' '.join(command)}")
                 if subprocess.call(command, cwd=str(repo_root())) != 0:  # noqa: S603
                     fail(f"{slug} did not package, so its image cannot be built", 1)
-
-            command = ["docker", "build", "--tag", image, "."]
-            note(f"$ {' '.join(command)}")
-            if subprocess.call(command, cwd=str(app_dir)) != 0:  # noqa: S603
-                fail(f"the runtime image for {slug} did not build", 1)
+            else:
+                command = ["docker", "build", "--tag", image, "."]
+                note(f"$ {' '.join(command)}")
+                if subprocess.call(command, cwd=str(app_dir)) != 0:  # noqa: S603
+                    fail(f"the runtime image for {slug} did not build", 1)
 
     runtime.data_dir(slug).mkdir(parents=True, exist_ok=True)
     vhost_path = write_vhost(runtime, slug, port)
@@ -390,7 +472,7 @@ def up(runtime: Runtime, args: argparse.Namespace) -> int:
         "--label",
         f"olympus.app={slug}",
         "--publish",
-        f"127.0.0.1:{port}:{CONTAINER_PORT}",
+        f"127.0.0.1:{port}:{container_port}",
         "--volume",
         f"{runtime.data_dir(slug)}:/data",
         image,
@@ -399,10 +481,10 @@ def up(runtime: Runtime, args: argparse.Namespace) -> int:
     if result.returncode != 0:
         fail(f"could not start {name}:\n{result.stdout}", 1)
 
-    if not health(runtime, slug, port, args.wait):
+    if not health(runtime, slug, port, args.wait, health_path):
         logs = docker("logs", "--tail", "30", name).stdout or ""
         docker("rm", "-f", name)
-        fail(f"{name} did not answer /api/health within {args.wait}s:\n{logs}", 1)
+        fail(f"{name} did not answer {health_path} within {args.wait}s:\n{logs}", 1)
 
     try:
         reload_note = reload_sites(False)
@@ -416,10 +498,16 @@ def up(runtime: Runtime, args: argparse.Namespace) -> int:
         "container": name,
         "image": image,
         "port": port,
+        # Kept in the record as well as the plan: the record is what the runner and
+        # the status read, and a preview needs the path that answers without having
+        # to find and parse a plan that may not exist.
+        "container_port": container_port,
+        "healthcheck": health_path,
+        "language": (plan.get("runtime") or {}).get("language") if isinstance(plan.get("runtime"), dict) else None,
         "url": runtime.url(slug),
         "data": str(runtime.data_dir(slug)),
         "vhost": str(vhost_path),
-        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "started_at": now_stamp(),
     }
     runtime.write(slug, record)
 
@@ -557,8 +645,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--wait",
         type=float,
-        default=30.0,
-        help="seconds to wait for /api/health after starting (default 30)",
+        default=45.0,
+        help="seconds to wait for the plan's healthcheck path after starting (default 45)",
     )
     parser.add_argument("--tail", type=int, default=50, help="lines for --logs")
     parser.add_argument("--json", action="store_true", help="machine-readable output")

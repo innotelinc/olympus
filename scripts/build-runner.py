@@ -280,6 +280,11 @@ def validate_request(repo: Path, payload: object) -> dict:
     if kind not in (None, "app", "website"):
         raise RequestError(f"unknown kind: {kind!r} (expected 'app' or 'website')")
 
+    # The plan the operator confirmed, re-checked here because this file has been to
+    # the browser and back. Absent is allowed and means something specific: a
+    # project saved before the planner existed, which its own packager still builds.
+    plan = parse_plan(payload.get("plan"))
+
     action = payload.get("action")
     if action not in (None, "build", "publish"):
         raise RequestError(f"unknown action: {action!r} (expected 'build' or 'publish')")
@@ -324,12 +329,92 @@ def validate_request(repo: Path, payload: object) -> dict:
         "replace": payload.get("replace") is True,
         "kind": kind or "app",
         "action": action,
+        "plan": plan,
         "files": files,
         # Whether to stage `dist/` for the host to serve once it is built. A
         # website is packaged either way — a site that is not packaged is not a
         # site — but publishing is a separate, visible decision.
         "publish": payload.get("publish") is True,
     }
+
+
+def parse_plan(value: object) -> dict | None:
+    """The plan out of a request, or None when there is not one.
+
+    Checked rather than trusted, and checked *here* rather than in the packager,
+    because this is the boundary: the plan was written by Studio from a model's
+    reply, sent to a browser, confirmed by a person and sent back. Every field that
+    reaches a command or a port is re-read, and a plan that fails is refused before
+    a job is claimed rather than half-way through a publish.
+
+    The commands are deliberately only bounded by length and line count. A build
+    runs inside a container with no host mounts and no inherited secrets, and the
+    whole point of the plan is that the commands are the user's choice — so the
+    containment is the container, not an allow-list that would refuse `make`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise RequestError("plan is not an object")
+
+    run = value.get("run")
+    if not isinstance(run, dict):
+        raise RequestError("plan has no `run` section")
+
+    def command(key: str) -> str:
+        raw = run.get(key)
+        if raw in (None, ""):
+            return ""
+        if not isinstance(raw, str):
+            raise RequestError(f"plan run.{key} is not a string")
+        # One line, because a newline in a Dockerfile RUN is a line continuation and
+        # would silently join the next instruction onto this command.
+        text = " ".join(raw.split())
+        if len(text) > 500:
+            raise RequestError(f"plan run.{key} is longer than 500 characters")
+        return text
+
+    start = command("start")
+    if not start:
+        raise RequestError("plan has no start command")
+
+    runtime = value.get("runtime") if isinstance(value.get("runtime"), dict) else {}
+
+    return {
+        "v": 1,
+        "name": str(value.get("name") or "")[:120],
+        "kind": "website" if value.get("kind") == "website" else "app",
+        "summary": str(value.get("summary") or "")[:400],
+        "runtime": {
+            "language": str(runtime.get("language") or "")[:40],
+            "database": (str(runtime.get("database"))[:40] if runtime.get("database") else None),
+        },
+        "run": {
+            "install": command("install"),
+            "build": command("build"),
+            "start": start,
+            "port": run.get("port") if isinstance(run.get("port"), int) else None,
+            "healthcheck": (
+                str(run.get("healthcheck"))[:200]
+                if isinstance(run.get("healthcheck"), str) and run.get("healthcheck").startswith("/")
+                else "/"
+            ),
+        },
+        "notes": (str(value.get("notes"))[:1200] if value.get("notes") else None),
+    }
+
+
+def write_plan(build_dir: Path, plan: dict | None) -> None:
+    """Put the plan where the packager and the runtime read it.
+
+    Written after `materialize`, which deletes everything it was not given: a plan
+    written first would be swept away, and the packager would report a project with
+    no plan as if the operator had never confirmed one.
+    """
+    if not plan:
+        return
+    build_dir.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(build_dir / "plan.json", plan)
 
 
 def read_json(path: Path) -> object | None:
@@ -504,9 +589,40 @@ def read_app_manifest(build_dir: Path) -> dict | None:
     }
 
 
+def read_project_manifest(build_dir: Path) -> dict | None:
+    """The summary `package-project.py` wrote, for a project built from a plan.
+
+    Preferred over the two older manifests when it is there, because a planned
+    project replaced them: the language and the port are what the status reports,
+    and reading the wrong file would say "React" about a Flask app.
+    """
+    manifest = read_json(build_dir / "project.manifest.json")
+    if not isinstance(manifest, dict):
+        return None
+
+    return {
+        "entry": None,
+        "dist_files": manifest.get("dist_files"),
+        "dist_bytes": manifest.get("dist_bytes"),
+        "source_files": manifest.get("source_files"),
+        "image": manifest.get("image"),
+        "language": manifest.get("language"),
+        "port": manifest.get("port"),
+        "zip": manifest.get("zip"),
+        "built_at": manifest.get("built_at"),
+    }
+
+
 def read_packaged(build_dir: Path, kind: str) -> dict | None:
-    """Whatever the packager for this kind left behind, or None."""
-    return read_app_manifest(build_dir) if kind == "app" else read_site_manifest(build_dir)
+    """Whatever the packager left behind, or None.
+
+    The plan-driven manifest first, then the per-kind ones: a project packaged
+    before the planner existed has no `project.manifest.json`, and reporting it as
+    un-packaged would take away a working publish for the sake of a rename.
+    """
+    return read_project_manifest(build_dir) or (
+        read_app_manifest(build_dir) if kind == "app" else read_site_manifest(build_dir)
+    )
 
 
 def image_tag_for(slug: str) -> str:
@@ -734,7 +850,8 @@ class Runner:
         # something — packaging an empty directory would fail with a compiler error
         # about a missing src/App.tsx, which says nothing about the real problem.
         package_code = 0
-        if state_override is None and exit_code == 0 and spec.get("kind") in self.PACKAGERS:
+        planned = isinstance(spec.get("plan"), dict)
+        if state_override is None and exit_code == 0 and (planned or spec.get("kind") in self.PACKAGERS):
             # Only when the agent actually produced something. Packaging a directory
             # the agent never wrote fails on a missing src/App.tsx, and that message
             # says nothing about the real problem — which is that nothing was
@@ -779,7 +896,7 @@ class Runner:
         # exist but the thing does not run until it packages, and reporting it as
         # built would hand the operator a directory to deploy that deploys nothing.
         succeeded = exit_code == 0 and package_code == 0 and artifact is not None
-        if succeeded and kind in self.PACKAGERS:
+        if succeeded and (planned or kind in self.PACKAGERS):
             succeeded = site is not None
 
         if succeeded:
@@ -787,10 +904,13 @@ class Runner:
                 f"Built builds/{slug} — {artifact.get('files')} file(s), "
                 f"{artifact.get('bytes')} bytes, entry {artifact.get('entry')}."
             )
-            if site and kind == "app":
+            if site and site.get("image"):
+                # A planned project ends as an image, app or website alike. The
+                # language is what the operator chose and the plan is what carries it.
+                language = site.get("language") or kind
                 message += (
-                    f" Packaged: {site.get('dist_files')} client file(s), "
-                    f"{site.get('dist_bytes')} bytes — Publish It to run it as "
+                    f" Packaged as {language}: {site.get('dist_files')} file(s), "
+                    f"{site.get('dist_bytes')} bytes. Publish It to run it as "
                     f"{site.get('image')}."
                 )
             elif site:
@@ -799,7 +919,7 @@ class Runner:
                     f"{site.get('dist_bytes')} bytes, served at {site.get('entry')}."
                 )
         elif exit_code == 0 and package_code != 0:
-            message = detail or "The site did not package. See the build log."
+            message = detail or "The project did not build. See the build log."
         elif exit_code == 0 and artifact is None:
             message = (
                 "The build command reported success but wrote no manifest — "
@@ -827,11 +947,16 @@ class Runner:
     @staticmethod
     def job_fields(spec: dict) -> dict:
         """The identity fields every status carries, so a reader never has to merge."""
+        plan = spec.get("plan") if isinstance(spec.get("plan"), dict) else None
+        runtime = plan.get("runtime") if plan and isinstance(plan.get("runtime"), dict) else {}
         return {
             "slug": spec["slug"],
             "title": spec["title"],
             "spec": spec["spec"],
             "kind": spec.get("kind", "app"),
+            # The language the project was planned in, when it has a plan. Reported on
+            # every status of the job so a running build can say what it is building.
+            "language": (str(runtime.get("language"))[:40] if runtime.get("language") else None),
             "requested_at": spec["requested_at"],
             "requested_by": spec["requested_by"],
         }
@@ -988,19 +1113,24 @@ class Runner:
         """
         slug = str(spec["slug"])
         kind = spec.get("kind") if spec.get("kind") in self.PACKAGERS else "app"
+        plan = spec.get("plan") if isinstance(spec.get("plan"), dict) else None
         files = spec.get("files") or []
         build_dir = resolve_build_dir(self.repo, slug)
 
-        steps = self.publish_steps(slug, kind)
+        steps = self.publish_steps(slug, kind, plan)
+        what = plan.get("runtime", {}).get("language") if plan else kind
 
-        log(f"publishing {slug} from {len(files)} file(s) as a {kind}")
+        log(f"publishing {slug} from {len(files)} file(s) as {what}")
         with self.log_path(job).open("ab") as sink:
-            sink.write(f"\n=== publishing {slug} ({kind}) ===\n".encode())
+            sink.write(f"\n=== publishing {slug} ({what}) ===\n".encode())
             sink.write(f"materialising {len(files)} file(s) into builds/{slug}\n".encode())
             sink.flush()
 
             try:
                 materialize(build_dir, files)
+                # After the sweep, never before: materialize removes everything it was
+                # not given, so a plan written first would not survive it.
+                write_plan(build_dir, plan)
             except OSError as error:
                 return 1, f"Could not write the files into builds/{slug}: {error}", None, None
 
@@ -1024,7 +1154,7 @@ class Runner:
                     # last step failed, and the last step is the name. Saying only
                     # "failed" would read as "nothing happened", and the retry is a
                     # different command from the one that produced the container.
-                    if kind == "app" and Path(command[1]).name == "studio-sites.py":
+                    if Path(command[1]).name == "studio-sites.py":
                         record = read_app_runtime(slug)
                         if record:
                             detail += (
@@ -1039,33 +1169,48 @@ class Runner:
         url = f"https://{slug}.{suffix}" if suffix else None
         detail = f"Published {slug}"
         if site:
-            noun = "client file(s)" if kind == "app" else "dist file(s)"
+            noun = f"{site.get('language')} file(s)" if site.get("language") else "file(s)"
             detail += f" — {site.get('dist_files')} {noun}, {site.get('dist_bytes')} bytes"
-        if kind == "app":
-            detail += f". Running as {image_tag_for(slug)}."
-        detail += f" Live at {url}." if url else "."
+        # An image is what runs, and every published project has one now.
+        detail += f". Running as {image_tag_for(slug)}." if site and site.get("image") else "."
+        if url:
+            detail += f" Live at {url}."
         return 0, detail, site, url
 
-    def publish_steps(self, slug: str, kind: str) -> list[list[str]]:
-        """The commands a publish runs, in order, for each kind.
+    def publish_steps(self, slug: str, kind: str, plan: dict | None) -> list[list[str]]:
+        """The commands a publish runs, in order.
 
-        A website is staged and the edge points at the static server. An app has two
-        more things to do, and both are the difference between "packaged" and
-        "running": the runtime image is built and its container started on a loopback
-        port (`app-runtime.py`), and *then* the name is pointed at the sites port —
-        which proxies to that app because `app-runtime.py` wrote it a vhost. The edge
-        never learns a per-app port; that is what keeps the wildcard sufficient.
+        Three steps, and the same three whether the project is an app or a website:
+
+          1. `package-project.py` — the Dockerfile from the plan, install, build,
+             image. Every kind ends as an image now, because a website is served by
+             nginx and an app by its own process, and a container is how you get
+             either without a toolchain on the host.
+          2. `app-runtime.py --up --build` — run it on a loopback port and write the
+             vhost that puts its name on it.
+          3. `studio-sites.py --publish` — the DNS record and the edge proxy host.
+
+        A project with no plan is the old path: its own packager builds it, and a
+        website is staged into the static tree instead of run as a container. That
+        path exists only for projects saved before the planner did.
         """
         scripts = self.repo / "scripts"
-        if kind == "app":
+
+        if not plan:
+            if kind == "app":
+                return [
+                    ["python3", str(scripts / "package-app.py"), slug],
+                    ["python3", str(scripts / "app-runtime.py"), "--up", slug, "--build"],
+                    ["python3", str(scripts / "studio-sites.py"), "--publish", slug],
+                ]
             return [
-                ["python3", str(scripts / "package-app.py"), slug],
-                ["python3", str(scripts / "app-runtime.py"), "--up", slug, "--build"],
+                ["python3", str(scripts / "package-website.py"), slug, "--publish"],
                 ["python3", str(scripts / "studio-sites.py"), "--publish", slug],
             ]
 
         return [
-            ["python3", str(scripts / "package-website.py"), slug, "--publish"],
+            ["python3", str(scripts / "package-project.py"), slug],
+            ["python3", str(scripts / "app-runtime.py"), "--up", slug, "--build"],
             ["python3", str(scripts / "studio-sites.py"), "--publish", slug],
         ]
 
@@ -1095,15 +1240,31 @@ class Runner:
         """
         slug = str(spec["slug"])
         kind = spec.get("kind") if spec.get("kind") in self.PACKAGERS else "app"
-        command = ["python3", str(self.repo / "scripts" / self.PACKAGERS[kind]), slug]
-        # Only a website stages `dist/` for the host; an app is served by its own
-        # container, which `run_publish` starts.
-        if spec.get("publish") and kind == "website":
+        plan = spec.get("plan") if isinstance(spec.get("plan"), dict) else None
+        build_dir = resolve_build_dir(self.repo, slug)
+
+        if plan:
+            # A planned project: the generic packager, and no `--publish` flag,
+            # because staging `dist/` is a website-only shortcut for a project with
+            # no runtime. This one has an image.
+            packager = "package-project.py"
+            what = str((plan.get("runtime") or {}).get("language") or kind)
+        else:
+            packager = self.PACKAGERS[kind]
+            what = f"{kind} (no plan)"
+
+        command = ["python3", str(self.repo / "scripts" / packager), slug]
+        if plan is None and spec.get("publish") and kind == "website":
             command.append("--publish")
 
-        log(f"packaging {slug} ({kind} build)")
+        try:
+            write_plan(build_dir, plan)
+        except OSError as error:
+            return 1, f"Could not write the plan into builds/{slug}: {error}"
+
+        log(f"packaging {slug} ({what})")
         with self.log_path(job).open("ab") as sink:
-            sink.write(f"\n=== packaging {slug} ({kind}) ===\n".encode())
+            sink.write(f"\n=== packaging {slug} ({what}) ===\n".encode())
             sink.flush()
             exit_code = subprocess.call(  # noqa: S603 - fixed argv, no shell
                 command,
@@ -1115,10 +1276,10 @@ class Runner:
             )
 
         if exit_code != 0:
-            what = "site" if kind == "website" else "app"
+            noun = "site" if kind == "website" else "app"
             return exit_code, (
-                f"The {what} was generated but did not package (exit {exit_code}). "
-                "The files are in builds/" + slug + " — see the packaging output in the log."
+                f"The {noun} was generated but did not build (exit {exit_code}). "
+                "The files are in builds/" + slug + " — see the build output in the log."
             )
 
         return 0, ""
