@@ -348,6 +348,14 @@ The build is saved before it is exported, so the spec can never describe an olde
 build than the one on screen. `GET` returns the same bytes as a download, so the
 handoff still works on a deployment that never mounted the directory.
 
+`make app` and the CI trigger both run `.archon/workflows/app/greenfield/`
+(`archon-greenfield`) through the Archon CLI. It resolves and bounds the spec, runs
+Codex over it, **asserts on the artifact rather than the agent's exit code**, and only
+then writes a `MANIFEST.json` + `README.md` recording the spec's SHA-256 and the model
+that produced the app. See the root README for the model-fallback note
+(`OMNIROUTE_MODEL_FALLBACK`) — the gateway's combo routing cannot serve a multi-turn
+native Codex build on the free tier, so the build node retries against a concrete model.
+
 > **Permissions.** Studio runs as uid 1001, so the bind mount has to be writable
 > by that uid. `make studio-export-dir` settles it — idempotent, and `setup.sh`
 > runs it on every install, so a fresh deployment needs no manual step. Without

@@ -103,6 +103,23 @@ make app                         # local — or: make docker-app SPEC=build-requ
 make builds                       # list ./builds (volume, gitignored)
 ```
 
+`make app` runs the `archon-greenfield` workflow (`.archon/workflows/app/greenfield/`)
+through the Archon CLI: it resolves and bounds the spec, runs Codex over it, **asserts
+on the artifact rather than the exit code**, and only then writes a `MANIFEST.json` +
+`README.md` recording which spec (by SHA-256) and which model produced the app. An
+agent that exits 0 having written nothing fails the run — worth knowing because this
+gateway does that: Codex exits 0 even when its last request was refused.
+
+The build node retries while the app directory is still empty, and switches model
+between attempts. `OMNIROUTE_MODEL` (default `auto/coding`) is tried first;
+`OMNIROUTE_MODEL_FALLBACK` (default `oc/big-pickle`) covers the retries. The reason is
+gateway behaviour, not preference: `auto/coding` is a **combo**, and the gateway pins a
+native Codex turn to whichever combo member served the first turn. Where the free
+provider has no credentials the pinned path answers `503 No credentials for opencode`,
+so only the first turn ever succeeds — naming a concrete model keeps the turn off the
+combo path entirely. If your gateway has real provider credentials, set both variables
+to the same value to disable the fallback.
+
 Docker also runs the same `push` manufacture trigger in CI: `.github/workflows/olympus-app-builder.yml`
 (`on.push.paths: build-requests/*.md`).
 
