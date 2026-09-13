@@ -111,6 +111,11 @@ make prune                         # old builds + finished queue files (ARGS="--
 scripts/omniroute-restore-providers.py --dry-run   # what would be copied
 scripts/omniroute-restore-providers.py             # copy them, and clear the pin
 
+# ...and the reason to hold a copy of them somewhere else: the key that decrypts
+# those connections lives in that same volume, so the volume IS the gateway.
+make gateway-vault-backup                          # connections + keys -> Vault
+make gateway-vault-check                           # non-zero if it has drifted
+
 # or inside the stack
 docker compose up -d studio
 
@@ -174,7 +179,9 @@ measured as unusable here.
 `make build-model-check` does that check for the whole configured chain — two turns, since
 the failure that cost the most here was on the second one — and exits `1` when a build
 would exit 0 having written nothing. `scripts/install-token-check-timer.sh
-TARGET=build-model` alerts on it daily. **The capacity story, the options for fixing it,
+TARGET=build-model` alerts on it daily, and `TARGET=gateway-backup` keeps the gateway's
+provider connections and the key that decrypts them in Vault on the same schedule.
+**The capacity story, the options for fixing it,
 and what a pass does not prove are in [docs/build-model.md](docs/build-model.md)** — worth
 reading before adding credentials, because a gateway's connection count is not its quota.
 
@@ -213,6 +220,7 @@ python3 factory/doctor.py
 | SecretOps | `compose.vault.yml` + `scripts/vault-bootstrap.py` | Cerulean Vault (KV v2). `VAULT_ADDR` / `VAULT_TOKEN` / `VAULT_PREFIX`; values may be `vault://<name>` references resolved at startup. Tokens are scoped to this stack's own path |
 | Identity | `scripts/authentik-studio-app.py` | Creates the Studio application/provider in Cerulean Authentik; Studio is public until OIDC is set. The gateway dashboard's client is registered the same way |
 | Gateway dashboard | `make gateway-oidc`, `gateway-sso-up`, `gateway-edge` | Puts the OmniRoute dashboard behind Authentik via an identity-aware proxy, restricted to a group, and publishes it — DNS record, certificate and NPM host — through Cerulean. See [docs/gateway-sso.md](docs/gateway-sso.md) |
+| Gateway state | `make gateway-vault-backup`, `gateway-vault-check`, `gateway-vault-restore` | The gateway's provider connections *and* the key that decrypts them, into Cerulean Vault. `--check` exits non-zero when the backup has drifted from the live gateway, so it can go on a timer |
 | Trust / edge | `scripts/` (NPM + Cerulean) | DNS and TLS for the public names are managed through Cerulean and NPM Edge; see [docs/stack.md](docs/stack.md) |
 | Upgrade | `git pull && make setup` | Idempotent; `scripts/factory-pin.sh` pins the factory's upstream SHAs |
 | Verify | `make doctor`, `make studio-test`, `make ps` | Readiness, Studio test suite, supporting-service status |
