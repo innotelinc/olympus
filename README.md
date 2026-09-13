@@ -257,6 +257,7 @@ source checkout of the factory — not in this distribution repo.
 | [web/studio/README.md](web/studio/README.md) | Studio — the vibe-coding web UI: how to run it, configuration, output contract, security posture |
 | [docs/stack.md](docs/stack.md) | This platform's role in the [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) (FactoryOps), including SecretOps via Cerulean Vault (KV v2) and the `vault://` reference convention |
 | [docs/gateway-sso.md](docs/gateway-sso.md) | Putting the OmniRoute dashboard behind Cerulean Authentik — why the gateway cannot do it natively, and the proxy that does |
+| [docs/site-publishing.md](docs/site-publishing.md) | Studio's two kinds of build — an **app** (finished when generated) and a **website** (Vite + React, finished when packaged) — the `make site-package` → `sites-up` → `site-publish` pipeline, and the ONYX (storage/NAS/app-hosting) integration points |
 | [UPSTREAMS.md](UPSTREAMS.md) | Vendored upstream mirrors (Archon, AI Software Factory, skills, OmniRoute, archon-cli) — provenance, pinned SHAs, licenses, recovery and re-sync |
 | [factory/APP_SPEC_TEMPLATE.md](factory/APP_SPEC_TEMPLATE.md) | The spec format `make new-request` scaffolds and the manufacture step reads |
 | `.env.example` | Every knob the stack reads, grouped and commented (gateway, Studio, OIDC, Vault, Cerulean, NPM, Magnate) |

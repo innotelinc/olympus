@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { BuildLog, BuildStatus, RunnerState } from "@/lib/build-queue";
 import { EMPTY_DOCUMENT, buildPreviewDocument, currentFileFrom, parseFiles, type GeneratedFile } from "@/lib/files";
+import type { ProjectKind } from "@/lib/projects";
 import CodeView from "./CodeView";
 import Preview from "./Preview";
 
@@ -16,11 +17,26 @@ const EXAMPLES = [
   "A markdown notes app with a live preview pane and a saved-notes sidebar.",
 ];
 
+/**
+ * What each kind actually produces, said as the difference rather than as a name.
+ *
+ * The two are not variations of one thing: an app is a self-contained page that is
+ * finished when it renders, and a website is a React project that has to be built
+ * before it exists. An operator picking for the first time has no way to know that
+ * from the labels alone, and picking wrong costs a whole generation.
+ */
+const KIND_HELP: Record<ProjectKind, string> = {
+  app: "One self-contained page (HTML/CSS/JS). Previews instantly, no build step. Download it as a zip or hand it to the factory.",
+  website: "A React + TypeScript site (Vite). Real components and a dev-shaped source tree. It needs a build, so it is packaged into dist/ and can be published on a name.",
+};
+
 const STORAGE_KEY = "studio.token";
 
 type SavedApp = {
   id: string;
   title: string;
+  /** Absent on anything saved before the split; the server reports "app" for those. */
+  kind: ProjectKind;
   updatedAt: string;
   fileCount: number;
 };
@@ -135,6 +151,10 @@ export default function Studio({ user = null }: { user?: string | null }) {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("preview");
+  // What is being built. It decides the system prompt AND the delivery path, so it
+  // is part of the build, not a display option — it is sent with every turn and
+  // saved with the project.
+  const [kind, setKind] = useState<ProjectKind>("app");
   const [turns, setTurns] = useState(0);
   const [token, setToken] = useState("");
   const [showSettings, setShowSettings] = useState(false);
@@ -194,6 +214,10 @@ export default function Studio({ user = null }: { user?: string | null }) {
   const tokenRef = useRef("");
   const activeAppRef = useRef<string | null>(null);
   const appTitleRef = useRef("");
+  // A mirror of `kind` for the streaming core, which reads its inputs from refs so
+  // a queued turn starts with what the previous one used rather than what the
+  // render closure captured.
+  const kindRef = useRef<ProjectKind>("app");
 
   useEffect(() => {
     try {
@@ -224,6 +248,9 @@ export default function Studio({ user = null }: { user?: string | null }) {
   useEffect(() => {
     appTitleRef.current = appTitle;
   }, [appTitle]);
+  useEffect(() => {
+    kindRef.current = kind;
+  }, [kind]);
 
   // Re-render once a second while streaming so the elapsed counter and the
   // waiting indicator move without waiting for stream data.
@@ -416,7 +443,14 @@ export default function Studio({ user = null }: { user?: string | null }) {
   );
 
   const persistApp = useCallback(
-    async (input: { id?: string | null; title?: string; prompt?: string; files: GeneratedFile[] }) => {
+    async (input: {
+      id?: string | null;
+      title?: string;
+      prompt?: string;
+      files: GeneratedFile[];
+      /** Omitted on a revision, which keeps the kind the app was created with. */
+      kind?: ProjectKind;
+    }) => {
       const response = await request("/api/projects", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -424,6 +458,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
           id: input.id ?? undefined,
           title: input.title ?? "",
           prompt: input.prompt ?? "",
+          kind: input.kind,
           files: input.files.map((file) => ({ path: file.path, contents: file.contents })),
         }),
       });
@@ -444,6 +479,9 @@ export default function Studio({ user = null }: { user?: string | null }) {
         title: appTitle || titleFromPrompt(prompt),
         prompt,
         files: activeFiles,
+        // A saved app that has never existed sends its kind; an existing one keeps
+        // whatever it was created as, and the server ignores this.
+        kind: activeAppId ? undefined : kind,
       });
       setActiveAppId(app.id);
       setAppTitle(app.title);
@@ -454,7 +492,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
     } finally {
       setLibraryBusy(false);
     }
-  }, [activeAppId, activeFiles, appTitle, listSavedApps, persistApp, prompt, status]);
+  }, [activeAppId, activeFiles, appTitle, kind, listSavedApps, persistApp, prompt, status]);
 
   /**
    * Hand this build to the factory.
@@ -476,6 +514,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
         title: appTitle || titleFromPrompt(prompt),
         prompt,
         files: activeFiles,
+        kind: activeAppId ? undefined : kind,
       });
       setActiveAppId(app.id);
       setAppTitle(app.title);
@@ -512,13 +551,20 @@ export default function Studio({ user = null }: { user?: string | null }) {
         filename?: string;
         replaced?: boolean;
         next?: string;
+        nextSteps?: string[];
         error?: string;
       };
       if (!response.ok) throw new Error(payload.error ?? `Export failed (${response.status}).`);
 
+      // The next steps, as the spec itself states them. For a website the list is
+      // longer than "make app" — it has to be packaged before it is a site — and
+      // showing the real list is the difference between the handoff working and
+      // the operator discovering the extra step after the build.
+      const steps = payload.nextSteps ?? [];
       setLibraryNote(
-        `${payload.replaced ? "Replaced" : "Wrote"} build-requests/${payload.filename} — ` +
-          `continue with: ${payload.next ?? "make app"}.`,
+        steps.length > 0
+          ? `${payload.replaced ? "Replaced" : "Wrote"} build-requests/${payload.filename}. Next: ${steps.join(" ")}`
+          : `${payload.replaced ? "Replaced" : "Wrote"} build-requests/${payload.filename} — continue with: ${payload.next ?? "make app"}.`,
       );
     } catch (thrown) {
       setLibraryError(thrown instanceof Error ? thrown.message : "Could not export this app.");
@@ -529,6 +575,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
     activeAppId,
     activeFiles,
     appTitle,
+    kind,
     listSavedApps,
     persistApp,
     prompt,
@@ -545,7 +592,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
    * it is put to the operator rather than resolved silently — `replace` covers
    * both the spec and a previous `builds/<slug>`.
    */
-  const runBuild = useCallback(async () => {
+  const runBuild = useCallback(async (publish = false) => {
     if (activeFiles.length === 0 || status === "streaming") return;
 
     setBuildBusy(true);
@@ -559,6 +606,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
         title: appTitle || titleFromPrompt(prompt),
         prompt,
         files: activeFiles,
+        kind: activeAppId ? undefined : kind,
       });
       setActiveAppId(app.id);
       setAppTitle(app.title);
@@ -571,7 +619,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
         fetch(`/api/projects/${encodeURIComponent(app.id)}/build`, {
           method: "POST",
           headers,
-          body: JSON.stringify({ replace }),
+          body: JSON.stringify({ replace, publish }),
         });
 
       let response = await send(false);
@@ -602,15 +650,85 @@ export default function Studio({ user = null }: { user?: string | null }) {
     } finally {
       setBuildBusy(false);
     }
-  },    [activeAppId,
+  }, [
+    activeAppId,
     activeFiles,
     appTitle,
     fetchBuild,
+    kind,
     listSavedApps,
     persistApp,
     prompt,
     status,
     token,
+  ]);
+
+  /**
+   * Save, then hand over a zip.
+   *
+   * Saved first because the archive route works on a saved project — it is the
+   * saved record that has an identity to scope the download to, and it is also
+   * what makes the download match what is on screen rather than what was last
+   * written. For a packaged website the server serves the archive the packaging
+   * step produced; otherwise it zips these source files.
+   *
+   * Fetched as a blob rather than navigated to: the request has to carry the
+   * access-token header when one is configured, and a navigation cannot.
+   */
+  const downloadZip = useCallback(async () => {
+    if (activeFiles.length === 0 || status === "streaming") return;
+
+    setLibraryBusy(true);
+    setLibraryError(null);
+    setLibraryNote(null);
+    try {
+      const app = await persistApp({
+        id: activeAppId,
+        title: appTitle || titleFromPrompt(prompt),
+        prompt,
+        files: activeFiles,
+        kind: activeAppId ? undefined : kind,
+      });
+      setActiveAppId(app.id);
+      setAppTitle(app.title);
+      await listSavedApps();
+
+      const response = await request(`/api/projects/${encodeURIComponent(app.id)}/archive`);
+      const blob = await response.blob();
+      const match = /filename="([^"]+)"/.exec(response.headers.get("content-disposition") ?? "");
+      const name = match?.[1] ?? `${app.title || "studio"}.zip`;
+
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+
+      setLibraryNote(
+        `Downloaded ${name}.` +
+          (kind === "website" && !build?.site
+            ? " This build has not been packaged yet, so the archive holds the source — run “Build & publish” to get one with dist/ inside."
+            : ""),
+      );
+    } catch (thrown) {
+      setLibraryError(thrown instanceof Error ? thrown.message : "Could not download this build.");
+    } finally {
+      setLibraryBusy(false);
+    }
+  }, [
+    activeAppId,
+    activeFiles,
+    appTitle,
+    build?.site,
+    kind,
+    listSavedApps,
+    persistApp,
+    prompt,
+    request,
+    status,
   ]);
 
   /**
@@ -652,11 +770,22 @@ export default function Studio({ user = null }: { user?: string | null }) {
       setLibraryError(null);
       try {
         const payload = (await (await request(`/api/projects/${id}`)).json()) as {
-          project: { id: string; title: string; prompt: string; files: GeneratedFile[] };
+          project: {
+            id: string;
+            title: string;
+            kind?: ProjectKind;
+            prompt: string;
+            files: GeneratedFile[];
+          };
         };
         setFiles(payload.project.files);
         setPrompt(payload.project.prompt);
         setAppTitle(payload.project.title);
+        // The kind comes from the saved record, so reopening a website does not
+        // quietly turn the next instruction into an app revision.
+        const opened = payload.project.kind === "website" ? "website" : "app";
+        setKind(opened);
+        kindRef.current = opened;
         setActiveAppId(payload.project.id);
         setRaw("");
         setTurns(1);
@@ -698,6 +827,8 @@ export default function Studio({ user = null }: { user?: string | null }) {
   const newApp = useCallback(() => {
     setActiveAppId(null);
     setAppTitle("");
+    setKind("app");
+    kindRef.current = "app";
     setFiles([]);
     setRaw("");
     setTurns(0);
@@ -749,7 +880,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
         const response = await fetch("/api/generate", {
           method: "POST",
           headers,
-          body: JSON.stringify({ prompt: turnPrompt, files: priorFiles }),
+          body: JSON.stringify({ prompt: turnPrompt, kind: kindRef.current, files: priorFiles }),
           signal: controller.signal,
         });
 
@@ -798,6 +929,9 @@ export default function Studio({ user = null }: { user?: string | null }) {
         // already succeeded, so a failed save must not fail the build.
         if (activeAppRef.current) {
           try {
+            // No `kind` on purpose: this is a revision of a project that already
+            // exists, and a revision keeps the kind it was created with. The files
+            // on screen were written against that contract.
             const app = await persistApp({
               id: activeAppRef.current,
               title: appTitleRef.current,
@@ -941,6 +1075,33 @@ export default function Studio({ user = null }: { user?: string | null }) {
 
       <div className="workspace">
         <section className="composer">
+          {/* Choosing the kind is choosing the product, not a setting: it changes
+              the system prompt, what the preview can show, and what delivery
+              means. Locked while a build is running and while a saved app is
+              open — switching either mid-flight would leave a project whose
+              contents contradict its own kind. */}
+          <div className="kind-picker" role="radiogroup" aria-label="What to build">
+            {(["app", "website"] as const).map((option) => (
+              <button
+                key={option}
+                type="button"
+                role="radio"
+                aria-checked={kind === option}
+                className={`kind-option${kind === option ? " current" : ""}`}
+                disabled={busy || libraryBusy}
+                onClick={() => {
+                  setKind(option);
+                  kindRef.current = option;
+                  if (option === "website") setTab("code");
+                }}
+              >
+                {option === "website" ? "Website" : "App"}
+                <em>{option === "website" ? "React + Vite" : "single page"}</em>
+              </button>
+            ))}
+          </div>
+          <span className="hint kind-hint">{KIND_HELP[kind]}</span>
+
           <div className="field">
             <label htmlFor="prompt">What should it build?</label>
             <textarea
@@ -1128,6 +1289,25 @@ export default function Studio({ user = null }: { user?: string | null }) {
                 </p>
               ) : null}
 
+              {/* The packaged site, which is what a website build actually
+                  produces. Separate from the artifact line above because it
+                  answers a different question: the source was written, and this
+                  says it was built into something servable. */}
+              {build?.site ? (
+                <p className="hint">
+                  packaged: {build.site.distFiles ?? 0} dist file(s),{" "}
+                  {kilobytes(build.site.distBytes ?? 0)} — served at {build.site.entry ?? "unknown"}
+                  {build.site.zip ? ` · ${build.site.zip}` : ""}
+                </p>
+              ) : null}
+
+              {build?.state === "succeeded" && kind === "website" ? (
+                <p className="hint">
+                  Staged under /var/lib/olympus/sites/{build.slug ?? ""}. Publish the name with{" "}
+                  <code>make site-publish SLUG={build.slug ?? "<slug>"}</code>.
+                </p>
+              ) : null}
+
               {runner && !runner.live ? (
                 <p className="hint">No build runner is responding — start olympus-build-runner.</p>
               ) : null}
@@ -1236,14 +1416,39 @@ export default function Studio({ user = null }: { user?: string | null }) {
               >
                 Export to factory
               </button>
+              {/* A website's build ends with packaging, and "publish" is the
+                  separate decision to stage dist/ where the site server serves
+                  it. For an app this is just the factory build — there is nothing
+                  to package and nowhere to publish to. */}
               <button
                 type="button"
                 className="ghost"
-                onClick={() => void runBuild()}
+                onClick={() => void runBuild(kind === "website")}
                 disabled={!hasFiles || busy || libraryBusy || buildBusy || build?.state === "running"}
-                title="Run make app on the host runner and report the result here"
+                title={
+                  kind === "website"
+                    ? "Run make app, package it into dist/, and stage the built site for the host to serve"
+                    : "Run make app on the host runner and report the result here"
+                }
               >
-                {build?.state === "running" ? "Building…" : "Build it"}
+                {build?.state === "running"
+                  ? "Building…"
+                  : kind === "website"
+                    ? "Build & publish"
+                    : "Build it"}
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => void downloadZip()}
+                disabled={!hasFiles || busy || libraryBusy}
+                title={
+                  kind === "website"
+                    ? "Download a zip of the source (and of dist/, once it has been packaged)"
+                    : "Download this build as a zip"
+                }
+              >
+                Download .zip
               </button>
             </div>
 
@@ -1412,7 +1617,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
               aria-selected={tab === "preview"}
               onClick={() => setTab("preview")}
             >
-              Preview
+              {kind === "website" ? "Preview (after build)" : "Preview"}
             </button>
             <button
               type="button"
@@ -1426,7 +1631,25 @@ export default function Studio({ user = null }: { user?: string | null }) {
           </div>
 
           <div className="stage-body">
-            {tab === "preview" ? <Preview source={previewDoc} /> : <CodeView files={activeFiles} />}
+            {tab === "preview" ? (
+              kind === "website" ? (
+                /* A React site genuinely cannot preview here, and pretending
+                   otherwise is the worst option: the sandboxed iframe runs no JSX
+                   and no bundler, so it would sit blank and read as a failure. */
+                <div className="site-note">
+                  <strong>A React site has no preview until it is built</strong>
+                  <span>
+                    JSX needs a compiler, so these components render only after packaging.
+                    Read them under <em>Code</em>, then use <em>Build &amp; publish</em> — that
+                    runs the Vite build on the host and produces a servable <code>dist/</code>.
+                  </span>
+                </div>
+              ) : (
+                <Preview source={previewDoc} />
+              )
+            ) : (
+              <CodeView files={activeFiles} />
+            )}
           </div>
         </section>
       </div>

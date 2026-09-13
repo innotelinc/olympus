@@ -22,7 +22,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { loadRepoEnv, repoRoot } from "./env";
-import type { Project, StoredFile } from "./projects";
+import type { Project, ProjectKind, StoredFile } from "./projects";
 
 /**
  * Cap on the reference appendix. Beyond this the spec lists the files without
@@ -38,6 +38,14 @@ export type FactorySpec = {
   /** Suggested filename inside `build-requests/` — path-safe by construction. */
   filename: string;
   markdown: string;
+  /**
+   * What to do with it next, in order, as commands that work as written.
+   *
+   * Returned alongside the markdown rather than only inside it: the UI offers
+   * these as actions, and an operator should not have to copy a command out of a
+   * document the app just generated in order to run the app's own handoff.
+   */
+  nextSteps: string[];
 };
 
 export type FactoryWriteResult = {
@@ -47,6 +55,7 @@ export type FactoryWriteResult = {
   bytes: number;
   /** True when an existing spec was replaced. */
   replaced: boolean;
+  nextSteps: string[];
 };
 
 /** A refusal the route can turn into a status. Never a crash. */
@@ -96,8 +105,17 @@ export function entryPoint(files: StoredFile[]): string | null {
 
 /* ---- inference ---------------------------------------------------------- */
 
-function detectStack(files: StoredFile[]): string[] {
+function detectStack(files: StoredFile[], kind: ProjectKind): string[] {
   const stack: string[] = [];
+
+  // The kind is stated first and unconditionally. It is not inferred from the file
+  // names because it is not an inference: it is what the operator chose, and the
+  // factory has to honour it (a website needs packaging; an app must not get it).
+  if (kind === "website") {
+    stack.push("Vite + React 19 + TypeScript (packaged to static `dist/`)");
+  } else {
+    stack.push("Self-contained HTML / CSS / JavaScript (no build step)");
+  }
 
   if (matches(files, /(^|\/)package\.json$/)) stack.push("Node.js (`package.json` present)");
   if (matches(files, /(^|\/)requirements\.txt$/) || matches(files, /\.py$/)) stack.push("Python");
@@ -107,14 +125,27 @@ function detectStack(files: StoredFile[]): string[] {
   if (matches(files, /\.(sql|db|sqlite)$/)) stack.push("SQL / SQLite");
   if (matches(files, /\.(json|ya?ml|toml)$/)) stack.push("Config (JSON / YAML / TOML)");
 
-  if (stack.length === 0) {
-    stack.push("Not inferred from the file set — confirm before manufacturing");
+  // The kind line above is what the operator chose; this is what the files say, and
+  // with no files it says nothing. Claiming a stack from an empty build is the one
+  // case where guessing is worse than admitting the gap — the factory would
+  // manufacture something nobody described.
+  if (files.length === 0) {
+    stack.push("Not inferred from the file set — no files were saved, confirm before manufacturing");
   }
 
   return stack;
 }
 
-function verificationCriteria(files: StoredFile[]): string[] {
+function verificationCriteria(files: StoredFile[], kind: ProjectKind): string[] {
+  // A website's bar is the build, and nothing else it does matters if that fails.
+  if (kind === "website") {
+    return [
+      "`npm ci && npm run build` completes and writes `dist/index.html`",
+      "the packaged site is staged with `scripts/package-website.py <slug> --publish`",
+      "`dist/` renders at 360px and 1440px with no console errors",
+    ];
+  }
+
   if (matches(files, /(^|\/)package\.json$/)) return ["`npm ci`", "`npm test`"];
   if (matches(files, /(^|\/)(test_.*|.*_test)\.py$/)) return ["`python3 -m unittest`"];
 
@@ -160,16 +191,21 @@ export function buildFactorySpec(project: Project): FactorySpec {
   const files = project.files;
   const total = files.reduce((sum, file) => sum + file.contents.length, 0);
   const filename = `${specSlug(project.title)}.md`;
+  const kind = project.kind;
+  const steps = nextSteps(project, filename);
 
   const lines: string[] = [];
 
   lines.push(`# Application Specification: ${project.title}`, "");
   lines.push(`> Exported from Olympus Studio on ${project.updatedAt} (project \`${project.id}\`).`);
-  lines.push(">");
-  lines.push(`> Manufacture it locally with \`make app SPEC=build-requests/${filename}\`.`);
-  lines.push(
-    "> Committing it under `build-requests/` also triggers `.github/workflows/olympus-app-builder.yml`.",
-  );
+  lines.push(`>`);
+  lines.push(`> Kind: **${kind === "website" ? "website" : "app"}**.`);
+  lines.push("");
+
+  // The handoff, first because it is the point of the file, and as commands rather
+  // than prose so nothing has to be worked out twice.
+  lines.push("## ▶︎ Next steps", "");
+  steps.forEach((step, index) => lines.push(`${index + 1}. ${step}`));
   lines.push("");
 
   lines.push("## 🎯 Core Purpose", "");
@@ -180,7 +216,7 @@ export function buildFactorySpec(project: Project): FactorySpec {
   );
 
   lines.push("## 🧰 Tech Stack", "");
-  for (const item of detectStack(files)) lines.push(`- ${item}`);
+  for (const item of detectStack(files, kind)) lines.push(`- ${item}`);
   lines.push("");
 
   lines.push("## 🛠️ Key Features & Pages", "");
@@ -198,8 +234,30 @@ export function buildFactorySpec(project: Project): FactorySpec {
   }
 
   lines.push("## 🚦 Verification Criteria", "");
-  for (const item of verificationCriteria(files)) lines.push(`- ${item}`);
+  for (const item of verificationCriteria(files, kind)) lines.push(`- ${item}`);
   lines.push("");
+
+  // A website is not finished by generating it, and the difference is the whole
+  // reason the spec has a kind. Saying so here is what stops the factory (or a
+  // human) treating the source as the deliverable.
+  if (kind === "website") {
+    lines.push("## 🌐 Packaging & delivery", "");
+    lines.push(
+      "This is a React site, so the source does not run anywhere on its own — JSX needs a",
+      "build. The Vite project around `src/App.tsx` is generated by",
+      "`scripts/package-website.py` with fixed dependencies, so the only thing the source",
+      "has to satisfy is `src/App.tsx` default-exporting a component that imports nothing",
+      "except `react`.",
+      "",
+    );
+    lines.push("```bash", `python3 scripts/package-website.py ${specSlug(project.title)} --publish`, "```", "");
+    lines.push(
+      "That writes `builds/<slug>/dist/`, an archive of source + dist, and stages the built",
+      "site under `OLYMPUS_SITES_ROOT` (default `/var/lib/olympus/sites`). Publishing it to a",
+      "public name additionally needs an edge host — see `docs/site-publishing.md`.",
+      "",
+    );
+  }
 
   // The appendix is what makes this "continue building" rather than "build
   // something like this" — bounded so the spec stays readable.
@@ -225,7 +283,40 @@ export function buildFactorySpec(project: Project): FactorySpec {
     }
   }
 
-  return { filename, markdown: lines.join("\n") };
+  return { filename, markdown: lines.join("\n"), nextSteps: steps };
+}
+
+/**
+ * The handoff, as runnable commands.
+ *
+ * A list rather than a paragraph because these are the same two or three steps
+ * every time, and the automatable ones are offered as buttons by the export flow.
+ * The website ones include packaging, because for a website `make app` is only
+ * half the job — it ends with source and nothing that runs.
+ */
+export function nextSteps(project: Project, filename: string): string[] {
+  const slug = specSlug(project.title);
+  const steps = [
+    `Manufacture it here: \`make app SPEC=build-requests/${filename}\``,
+    `Or commit it (\`git add build-requests/${filename}\`) — \`.github/workflows/olympus-app-builder.yml\` builds it on push.`,
+  ];
+
+  if (project.kind === "website") {
+    steps.push(
+      `Package the result into a servable site: \`python3 scripts/package-website.py ${slug} --publish\``,
+    );
+    steps.push(
+      "Built sites live under /var/lib/olympus/sites — serve one on a name with `make site-publish SLUG=" +
+        slug +
+        " HOST=<name>` (see docs/site-publishing.md).",
+    );
+  } else {
+    steps.push(
+      "The app is self-contained: open builds/" + slug + "/index.html, or drop it on any static host.",
+    );
+  }
+
+  return steps;
 }
 
 /* ---- writing ------------------------------------------------------------ */
@@ -306,6 +397,7 @@ export function writeFactorySpec(
     path: target,
     bytes: Buffer.byteLength(spec.markdown, "utf8"),
     replaced,
+    nextSteps: spec.nextSteps,
   };
 }
 

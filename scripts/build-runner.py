@@ -275,6 +275,14 @@ def validate_request(repo: Path, payload: object) -> dict:
     slug = resolve_slug(payload, spec_rel)
 
     title = payload.get("title")
+
+    # What is being built. An unknown value is an app rather than a refusal: every
+    # request written before the split means an app, and a queue that refuses the
+    # requests already in it would strand a build the operator asked for.
+    kind = payload.get("kind")
+    if kind not in (None, "app", "website"):
+        raise RequestError(f"unknown kind: {kind!r} (expected 'app' or 'website')")
+
     return {
         "v": PROTOCOL_VERSION,
         "job": job,
@@ -288,6 +296,11 @@ def validate_request(repo: Path, payload: object) -> dict:
         # Removing a previous build is a real deletion, so it happens only when
         # the request says so explicitly (the UI asks first).
         "replace": payload.get("replace") is True,
+        "kind": kind or "app",
+        # Whether to stage `dist/` for the host to serve once it is built. A
+        # website is packaged either way — a site that is not packaged is not a
+        # site — but publishing is a separate, visible decision.
+        "publish": payload.get("publish") is True,
     }
 
 
@@ -312,6 +325,30 @@ def write_json_atomic(path: Path, payload: dict) -> None:
         os.chmod(path, 0o644)
     except OSError:
         pass
+
+
+def read_site_manifest(build_dir: Path) -> dict | None:
+    """The packaging summary `package-website.py` wrote, for a website build.
+
+    Separate from `read_manifest` on purpose: `MANIFEST.json` says the *agent*
+    produced files, and this says the *toolchain* turned them into something
+    servable. A site that was generated but not packaged is a real and distinct
+    state, and collapsing the two would report it as success.
+    """
+    manifest = read_json(build_dir / "site.manifest.json")
+    if not isinstance(manifest, dict):
+        return None
+    if manifest.get("kind") != "website":
+        return None
+
+    return {
+        "entry": manifest.get("entry"),
+        "dist_files": manifest.get("dist_files"),
+        "dist_bytes": manifest.get("dist_bytes"),
+        "source_files": manifest.get("source_files"),
+        "zip": manifest.get("zip"),
+        "built_at": manifest.get("built_at"),
+    }
 
 
 def read_manifest(build_dir: Path) -> dict | None:
@@ -473,10 +510,21 @@ class Runner:
             started_at=started_at,
             message="starting the build",
             exit_code=None,
+            artifact=None,
+            site=None,
             log_tail="",
         )
 
         exit_code, detail, state_override = self.run_build(job, spec, started_at)
+
+        # A website has one more step. It runs only when the agent produced
+        # something — packaging an empty directory would fail with a compiler error
+        # about a missing src/App.tsx, which says nothing about the real problem.
+        package_code = 0
+        if state_override is None and exit_code == 0 and spec.get("kind") == "website":
+            package_code, package_detail = self.run_package(job, spec)
+            if package_code != 0:
+                detail = package_detail
 
         # A cancelled build is reported as cancelled, not as a failure with an
         # inscrutable exit code — and a half-written app directory is removed, so
@@ -497,6 +545,7 @@ class Runner:
                 exit_code=exit_code,
                 message=detail,
                 artifact=None,
+                site=None,
                 log_tail=log_tail(self.log_path(job)),
             )
             self.cancel_path(job).unlink(missing_ok=True)
@@ -505,13 +554,27 @@ class Runner:
 
         build_dir = resolve_build_dir(self.repo, slug)
         artifact = read_manifest(build_dir)
-        succeeded = exit_code == 0 and artifact is not None
+        site = read_site_manifest(build_dir) if spec.get("kind") == "website" else None
+
+        # For a website, a manifest is necessary and not sufficient: the files exist
+        # but the site does not run until it packages, and reporting it as built
+        # would hand the operator a directory to deploy that deploys nothing.
+        succeeded = exit_code == 0 and package_code == 0 and artifact is not None
+        if succeeded and spec.get("kind") == "website":
+            succeeded = site is not None
 
         if succeeded:
             message = (
                 f"Built builds/{slug} — {artifact.get('files')} file(s), "
                 f"{artifact.get('bytes')} bytes, entry {artifact.get('entry')}."
             )
+            if site:
+                message += (
+                    f" Packaged: {site.get('dist_files')} dist file(s), "
+                    f"{site.get('dist_bytes')} bytes, served at {site.get('entry')}."
+                )
+        elif exit_code == 0 and package_code != 0:
+            message = detail or "The site did not package. See the build log."
         elif exit_code == 0 and artifact is None:
             message = (
                 "The build command reported success but wrote no manifest — "
@@ -530,6 +593,7 @@ class Runner:
             exit_code=exit_code,
             message=message,
             artifact=artifact,
+            site=site,
             log_tail=log_tail(self.log_path(job)),
         )
         running.unlink(missing_ok=True)
@@ -541,6 +605,7 @@ class Runner:
             "slug": spec["slug"],
             "title": spec["title"],
             "spec": spec["spec"],
+            "kind": spec.get("kind", "app"),
             "requested_at": spec["requested_at"],
             "requested_by": spec["requested_by"],
         }
@@ -659,6 +724,7 @@ class Runner:
                             message=f"building — {int(elapsed)}s elapsed",
                             exit_code=None,
                             artifact=None,
+                            site=None,
                             log_tail=log_tail(self.log_path(job)),
                         )
                         self.heartbeat(self.started_at, busy=slug)
@@ -672,6 +738,44 @@ class Runner:
             self.child = None
 
         return exit_code, "", None
+
+    def run_package(self, job: str, spec: dict) -> tuple[int, str]:
+        """Package a website build into `dist/` — the step between generated and real.
+
+        Runs only after the agent has written the source. The model's output is the
+        input here, not the thing being verified: `package-website.py` owns the Vite
+        project, installs the pinned dependencies and builds, and a TypeScript error
+        in the model's component fails *this* step with the compiler's own message
+        rather than being found much later by whoever opened the site.
+
+        Appended to the same job log, so the Studio panel shows one continuous
+        build rather than two that have to be stitched together.
+        """
+        slug = str(spec["slug"])
+        command = ["python3", str(self.repo / "scripts" / "package-website.py"), slug]
+        if spec.get("publish"):
+            command.append("--publish")
+
+        log(f"packaging {slug} as a website")
+        with self.log_path(job).open("ab") as sink:
+            sink.write(f"\n=== packaging {slug} (website) ===\n".encode())
+            sink.flush()
+            exit_code = subprocess.call(  # noqa: S603 - fixed argv, no shell
+                command,
+                cwd=str(self.repo),
+                env=self.build_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=sink,
+                stderr=subprocess.STDOUT,
+            )
+
+        if exit_code != 0:
+            return exit_code, (
+                f"The site was generated but did not package (exit {exit_code}). "
+                "The files are in builds/" + slug + " — see the packaging output in the log."
+            )
+
+        return 0, ""
 
     # ---- lifecycle -------------------------------------------------------
 

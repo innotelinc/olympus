@@ -28,6 +28,9 @@ function project(overrides: Partial<Project> = {}): Project {
   return {
     id: "abc123XY_Z-",
     title: "Markdown Notes",
+    // Stated, not defaulted: the kind decides the prompt, the verification bar and
+    // what "finished" means, and a helper that left it out would hide that.
+    kind: "app",
     prompt: "A markdown notes app with a live preview pane.",
     files: [
       { path: "index.html", contents: "<!doctype html>\n<h1>Notes</h1>\n" },
@@ -186,6 +189,69 @@ describe("buildFactorySpec", () => {
   it("names the file after the app", () => {
     expect(buildFactorySpec(project()).filename).toBe("markdown-notes.md");
     expect(buildFactorySpec(project({ title: "  " })).filename).toBe("studio-app.md");
+  });
+});
+
+/**
+ * A website project, which is the case the split exists for: the spec has to make
+ * the difference between "generated" and "finished" impossible to miss, because
+ * a factory that treats a React site as a finished app produces source nobody can
+ * open.
+ */
+function website(overrides: Partial<Project> = {}): Project {
+  return project({
+    title: "Product Site",
+    kind: "website",
+    prompt: "A product marketing site with a hero, pricing and a footer.",
+    files: [
+      { path: "src/App.tsx", contents: "export default function App() { return null; }\n" },
+      { path: "src/components/Hero.tsx", contents: "export const Hero = () => null;\n" },
+    ],
+    ...overrides,
+  });
+}
+
+describe("website specs", () => {
+  it("states the kind, because everything downstream branches on it", () => {
+    expect(buildFactorySpec(website()).markdown).toContain("Kind: **website**");
+    expect(buildFactorySpec(project()).markdown).toContain("Kind: **app**");
+  });
+
+  it("leads the stack with the kind rather than inferring it from filenames", () => {
+    const { markdown } = buildFactorySpec(website());
+    expect(markdown).toContain("Vite + React 19 + TypeScript");
+    expect(markdown).not.toContain("Self-contained HTML / CSS / JavaScript");
+  });
+
+  it("verifies on the build, not on the files existing", () => {
+    const { markdown } = buildFactorySpec(website());
+    expect(markdown).toContain("npm ci && npm run build");
+    expect(markdown).toContain("dist/index.html");
+    // An app's bar — "someone opened it" — would pass for a site that does not build.
+    expect(markdown).not.toContain("Open `index.html` —");
+  });
+
+  it("names the packaging step, since make app alone leaves a site unbuildable", () => {
+    const { markdown, nextSteps } = buildFactorySpec(website());
+    expect(markdown).toContain("## 🌐 Packaging & delivery");
+    expect(markdown).toContain("scripts/package-website.py product-site --publish");
+    expect(nextSteps.join(" ")).toContain("scripts/package-website.py product-site");
+  });
+
+  it("tells an app it is already the deliverable", () => {
+    const { markdown, nextSteps } = buildFactorySpec(project());
+    expect(markdown).not.toContain("## 🌐 Packaging & delivery");
+    expect(nextSteps.join(" ")).toContain("builds/markdown-notes/index.html");
+  });
+
+  it("returns the next steps as the same list the spec prints", () => {
+    const spec = buildFactorySpec(website());
+    for (const step of spec.nextSteps) {
+      // The markdown renders them as an ordered list, so the leading marker is the
+      // only difference — the text itself has to be identical or the UI and the
+      // document would disagree about what to do next.
+      expect(spec.markdown).toContain(step);
+    }
   });
 });
 

@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   SYSTEM_PROMPT,
+  WEBSITE_SYSTEM_PROMPT,
   buildMessages,
   chatCompletionsUrl,
   isPlaceholderSecret,
+  missingEntryPoint,
   readConfig,
   sseToTextStream,
 } from "@/lib/omniroute";
@@ -86,22 +88,80 @@ describe("chatCompletionsUrl", () => {
 
 describe("buildMessages", () => {
   it("puts the system contract first and the instruction last", () => {
-    const messages = buildMessages("a counter", []);
+    const messages = buildMessages("a counter", [], "app");
     expect(messages).toHaveLength(2);
     expect(messages[0].role).toBe("system");
     expect(messages.at(-1)).toEqual({ role: "user", content: "a counter" });
   });
 
   it("includes prior files so revisions have context", () => {
-    const messages = buildMessages("make it blue", [
-      { path: "index.html", contents: "<html></html>" },
-      { path: "styles.css", contents: "body{}" },
-    ]);
+    const messages = buildMessages(
+      "make it blue",
+      [
+        { path: "index.html", contents: "<html></html>" },
+        { path: "styles.css", contents: "body{}" },
+      ],
+      "app",
+    );
     expect(messages).toHaveLength(3);
     const context = messages[1].content;
     expect(context).toContain('<file path="index.html">');
     expect(context).toContain('<file path="styles.css">');
     expect(messages.at(-1)?.content).toBe("make it blue");
+  });
+
+  // The whole point of threading `kind` this far: the system message is the only
+  // thing that tells the model which of two incompatible products it is making,
+  // and a caller that sent the wrong one would produce a page that looks like a
+  // plugin failure rather than a wrong argument.
+  it("sends the website contract for a website, not the app one", () => {
+    const website = buildMessages("a landing page", [], "website");
+    expect(website[0].content).toBe(WEBSITE_SYSTEM_PROMPT);
+    expect(website[0].content).toContain("src/App.tsx");
+    expect(website[0].content).not.toContain("Always include index.html");
+  });
+
+  it("calls a website's prior files a site, not an app", () => {
+    const messages = buildMessages(
+      "darker",
+      [{ path: "src/App.tsx", contents: "export default () => null;" }],
+      "website",
+    );
+    expect(messages[1].content).toContain("Current version of the site:");
+  });
+
+  it("keeps the app contract for an app", () => {
+    const messages = buildMessages("a timer", [], "app");
+    expect(messages[0].content).toBe(SYSTEM_PROMPT);
+    expect(messages[0].content).toContain("Always include index.html");
+  });
+});
+
+describe("missingEntryPoint", () => {
+  it("passes an app only with index.html", () => {
+    expect(missingEntryPoint([{ path: "index.html", contents: "" }], "app")).toBeNull();
+    expect(missingEntryPoint([{ path: "app.js", contents: "" }], "app")).toBe("index.html");
+  });
+
+  it("needs src/App.tsx for a website, and does not accept index.html for it", () => {
+    expect(missingEntryPoint([{ path: "src/App.tsx", contents: "" }], "website")).toBeNull();
+    // A website that emitted an index.html instead is a website that will fail to
+    // package, so this has to be reported rather than accepted.
+    expect(missingEntryPoint([{ path: "index.html", contents: "" }], "website")).toBe(
+      "src/App.tsx",
+    );
+  });
+});
+
+describe("WEBSITE_SYSTEM_PROMPT", () => {
+  it("pins the contract the packaging step relies on", () => {
+    expect(WEBSITE_SYSTEM_PROMPT).toContain('<file path="src/App.tsx">');
+    expect(WEBSITE_SYSTEM_PROMPT).toContain("NO DEPENDENCIES");
+    // The scaffold owns these; a model that emits them changes nothing but its own
+    // output length, and the prompt has to say so or it will try.
+    for (const owned of ["package.json", "vite.config.ts", "tsconfig.json", "src/main.tsx"]) {
+      expect(WEBSITE_SYSTEM_PROMPT).toContain(owned);
+    }
   });
 });
 

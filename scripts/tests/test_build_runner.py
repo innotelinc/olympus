@@ -269,6 +269,75 @@ class TestValidateRequest(RepoFixture):
         job = runner.validate_request(self.repo, self.request(title="y" * 500))
         self.assertEqual(len(job["title"]), 120)
 
+    def test_an_absent_kind_is_an_app(self) -> None:
+        # Every request written before the split means an app. Refusing them would
+        # strand builds already in the queue.
+        self.assertEqual(runner.validate_request(self.repo, self.request())["kind"], "app")
+
+    def test_accepts_the_two_kinds(self) -> None:
+        for kind in ("app", "website"):
+            self.assertEqual(
+                runner.validate_request(self.repo, self.request(kind=kind))["kind"], kind
+            )
+
+    def test_refuses_an_unknown_kind(self) -> None:
+        # A typo would otherwise silently become an app, and a website built as one
+        # produces source nothing can open.
+        with self.assertRaises(runner.RequestError):
+            runner.validate_request(self.repo, self.request(kind="web"))
+
+    def test_publish_only_for_literal_true(self) -> None:
+        for value in ("true", 1, "yes", None):
+            self.assertIs(
+                runner.validate_request(self.repo, self.request(publish=value))["publish"], False
+            )
+        self.assertIs(
+            runner.validate_request(self.repo, self.request(publish=True))["publish"], True
+        )
+
+
+class TestSiteManifest(unittest.TestCase):
+    """`read_site_manifest` is what tells a packaged site from a generated one."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.build = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def write(self, payload: object) -> None:
+        (self.build / "site.manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_absent_manifest_is_none(self) -> None:
+        self.assertIsNone(runner.read_site_manifest(self.build))
+
+    def test_a_manifest_for_another_kind_is_ignored(self) -> None:
+        # MANIFEST.json (the agent's) is not this, and neither is a stray file.
+        self.write({"kind": "app", "entry": "index.html"})
+        self.assertIsNone(runner.read_site_manifest(self.build))
+
+    def test_reads_the_packaging_summary(self) -> None:
+        self.write(
+            {
+                "kind": "website",
+                "entry": "dist/index.html",
+                "dist_files": 3,
+                "dist_bytes": 1024,
+                "source_files": 2,
+                "zip": "site.zip",
+                "built_at": "2026-09-13T00:00:00Z",
+            }
+        )
+        site = runner.read_site_manifest(self.build)
+        self.assertEqual(site["entry"], "dist/index.html")
+        self.assertEqual(site["dist_files"], 3)
+        self.assertEqual(site["zip"], "site.zip")
+
+    def test_unreadable_json_is_none_not_a_crash(self) -> None:
+        (self.build / "site.manifest.json").write_text("{", encoding="utf-8")
+        self.assertIsNone(runner.read_site_manifest(self.build))
+
 
 class TestRunnerQueue(RepoFixture):
     def make_runner(self, **kwargs: object) -> "runner.Runner":

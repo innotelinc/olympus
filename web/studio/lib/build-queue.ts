@@ -32,7 +32,7 @@ import {
 import { join, resolve } from "node:path";
 import { loadRepoEnv, repoRoot } from "./env";
 import { FactorySpecError, specSlug, writeFactorySpec } from "./factory-spec";
-import type { Project } from "./projects";
+import type { Project, ProjectKind } from "./projects";
 
 /** Job ids as the runner enforces them: lowercase hex, exactly 16 characters. */
 export const JOB_ID_PATTERN = /^[0-9a-f]{16}$/;
@@ -59,6 +59,23 @@ export type BuildArtifact = {
   entry: string | null;
 };
 
+/**
+ * What packaging a website produced, as `package-website.py` recorded it.
+ *
+ * Separate from `artifact` because it answers a different question. `artifact`
+ * says the agent wrote files; this says the toolchain turned them into something
+ * that can be served. A website build can have the first and not the second, and
+ * that state must not render as success.
+ */
+export type BuildSite = {
+  entry: string | null;
+  distFiles: number | null;
+  distBytes: number | null;
+  sourceFiles: number | null;
+  zip: string | null;
+  builtAt: string | null;
+};
+
 export type BuildStatus = {
   job: string;
   state: BuildState;
@@ -73,6 +90,8 @@ export type BuildStatus = {
   exitCode: number | null;
   message: string;
   artifact: BuildArtifact | null;
+  /** Present only for a packaged website build. */
+  site: BuildSite | null;
   logTail: string;
 };
 
@@ -94,6 +113,9 @@ export type QueuedBuild = {
   path: string;
   replaced: boolean;
   runner: RunnerState;
+  /** Echoed back so the UI can say what it queued without re-reading the request. */
+  kind: ProjectKind;
+  publish: boolean;
 };
 
 /** A refusal the routes turn into a status. Never a crash. */
@@ -193,8 +215,12 @@ function newJobId(): string {
  * it, because both destroy something the operator may have been comparing
  * against. The UI asks first, exactly as the export flow does.
  */
-export function queueBuild(project: Project, options: { replace?: boolean } = {}): QueuedBuild {
+export function queueBuild(
+  project: Project,
+  options: { replace?: boolean; publish?: boolean } = {},
+): QueuedBuild {
   const replace = options.replace === true;
+  const publish = options.publish === true;
   const dir = buildQueueDir();
 
   // Writability first. A queue that cannot be written is a deployment fault, and
@@ -231,6 +257,10 @@ export function queueBuild(project: Project, options: { replace?: boolean } = {}
     requested_by: "studio",
     requested_at: new Date().toISOString(),
     replace,
+    // The runner has to know which contract to hold the build to: for a website,
+    // writing files is not the finish line, packaging into `dist/` is.
+    kind: project.kind,
+    publish,
   };
 
   // Beside the target, then renamed: the runner scans this directory
@@ -254,6 +284,8 @@ export function queueBuild(project: Project, options: { replace?: boolean } = {}
     path: target,
     replaced: written.replaced,
     runner,
+    kind: project.kind,
+    publish,
   };
 }
 
@@ -286,6 +318,7 @@ function toBuildStatus(raw: unknown): BuildStatus | null {
   }
 
   const artifact = record.artifact;
+  const site = record.site;
 
   return {
     job,
@@ -307,6 +340,17 @@ function toBuildStatus(raw: unknown): BuildStatus | null {
             files: asNumber((artifact as Record<string, unknown>).files),
             bytes: asNumber((artifact as Record<string, unknown>).bytes),
             entry: asString((artifact as Record<string, unknown>).entry),
+          }
+        : null,
+    site:
+      typeof site === "object" && site !== null
+        ? {
+            entry: asString((site as Record<string, unknown>).entry),
+            distFiles: asNumber((site as Record<string, unknown>).dist_files),
+            distBytes: asNumber((site as Record<string, unknown>).dist_bytes),
+            sourceFiles: asNumber((site as Record<string, unknown>).source_files),
+            zip: asString((site as Record<string, unknown>).zip),
+            builtAt: asString((site as Record<string, unknown>).built_at),
           }
         : null,
     logTail: asString(record.log_tail) ?? "",

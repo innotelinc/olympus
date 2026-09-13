@@ -6,6 +6,7 @@ import {
   sseToTextStream,
   type PriorFile,
 } from "@/lib/omniroute";
+import { parseKind } from "@/lib/projects";
 import { authorizeRequest } from "@/lib/auth";
 import { createHash } from "node:crypto";
 import { checkRateLimit } from "@/lib/ratelimit";
@@ -99,6 +100,10 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const priorFiles = readPriorFiles(body.files);
+  // What is being built decides the system prompt — the app contract and the
+  // website contract are different products, not one with a flag. An unknown or
+  // absent value is an app, which is what every caller before the split meant.
+  const kind = parseKind(body.kind);
   const url = chatCompletionsUrl(config);
 
   let upstream: Response;
@@ -111,7 +116,7 @@ export async function POST(request: Request): Promise<Response> {
       },
       body: JSON.stringify({
         model: config.model,
-        messages: buildMessages(prompt, priorFiles),
+        messages: buildMessages(prompt, priorFiles, kind),
         stream: true,
         temperature: 0.4,
       }),
