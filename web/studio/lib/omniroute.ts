@@ -47,6 +47,318 @@ export function chatCompletionsUrl(config: OmniRouteConfig): string {
   return `${config.baseUrl}${path}`;
 }
 
+/* ---- which model, out of whatever is linked in ---------------------------- */
+
+/**
+ * Studio does not have a model. The gateway does.
+ *
+ * Provider credentials live in OmniRoute, and the set of them changes without
+ * Studio being touched — a key added this morning is a model this afternoon. So the
+ * model is *discovered* from the gateway's own `/v1/models` rather than pinned in
+ * code or in `.env`, which is the difference between "use whatever is linked in"
+ * and a hardcoded id that quietly keeps working after the provider behind it is
+ * swapped out.
+ *
+ * The list is large — 2,064 models across 23 providers, measured — so it is
+ * trimmed to what a picker needs, and the `auto/*` combos come first: those are
+ * OmniRoute's own routers, they do not require the user to know a provider's
+ * naming, and they are the reason a default is a sensible thing to ship.
+ */
+export type GatewayModel = {
+  id: string;
+  provider: string;
+  combo: boolean;
+  contextLength: number | null;
+  capabilities: Record<string, boolean>;
+};
+
+const MODEL_CACHE_MS = 60_000;
+
+/** Module-level, because a picker page fetches this once and generation never blocks on it. */
+let modelCache: { at: number; models: GatewayModel[] } | null = null;
+
+/** Only for tests: a cached catalog would leak between cases. */
+export function resetModelCache(): void {
+  modelCache = null;
+}
+
+function asString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function asCapabilities(value: unknown): Record<string, boolean> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const result: Record<string, boolean> = {};
+  for (const [key, flag] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof flag === "boolean") result[key] = flag;
+  }
+  return result;
+}
+
+/**
+ * Read the gateway's model list. Pure, and defensive on purpose: this is a
+ * response from another service, and one malformed entry must not empty a picker
+ * that has 2,063 good ones behind it.
+ */
+export function parseModels(payload: unknown): GatewayModel[] {
+  const raw = Array.isArray(payload)
+    ? payload
+    : typeof payload === "object" && payload !== null && Array.isArray((payload as Record<string, unknown>).data)
+      ? ((payload as Record<string, unknown>).data as unknown[])
+      : [];
+
+  const models: GatewayModel[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+
+    const id = asString(record.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+
+    const provider = asString(record.owned_by) || asString(record.ownedBy) || "unknown";
+    const context = record.context_length ?? record.contextLength;
+
+    models.push({
+      id,
+      provider,
+      combo: provider === "combo",
+      contextLength: typeof context === "number" && Number.isFinite(context) && context > 0 ? context : null,
+      capabilities: asCapabilities(record.capabilities),
+    });
+  }
+
+  // Combos first, then provider, then id. A stable, comparable order rather than
+  // whatever the gateway happened to serialise, so the picker does not reshuffle
+  // between two fetches a second apart.
+  return models.sort((left, right) => {
+    if (left.combo !== right.combo) return left.combo ? -1 : 1;
+    if (left.provider !== right.provider) return left.provider < right.provider ? -1 : 1;
+    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+  });
+}
+
+/**
+ * The linked models. Throws with a sentence a person can act on — the caller is a
+ * route that turns it into a response, and the alternative is a picker that is
+ * empty for no stated reason.
+ */
+export async function listModels(
+  config: OmniRouteConfig,
+  options: { fresh?: boolean; signal?: AbortSignal } = {},
+): Promise<GatewayModel[]> {
+  const now = Date.now();
+  if (!options.fresh && modelCache && now - modelCache.at < MODEL_CACHE_MS) {
+    return modelCache.models;
+  }
+
+  const url = `${config.baseUrl}/models`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { authorization: `Bearer ${config.apiKey}` },
+      signal: options.signal,
+      cache: "no-store",
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown error";
+    throw new Error(`Could not reach the gateway at ${config.baseUrl} (${detail}).`);
+  }
+
+  if (!response.ok) {
+    const hint =
+      response.status === 401 || response.status === 403
+        ? " The configured OMNIROUTE_API_KEY was rejected."
+        : "";
+    throw new Error(`The gateway answered ${response.status} for its model list.${hint}`);
+  }
+
+  const models = parseModels(await response.json());
+  modelCache = { at: now, models };
+  return models;
+}
+
+/** Exact id first, then case-insensitively — a hand-typed `Auto/Coding` is the same model. */
+export function findModel(models: GatewayModel[], id: string): GatewayModel | null {
+  const wanted = id.trim();
+  if (!wanted) return null;
+
+  const exact = models.find((model) => model.id === wanted);
+  if (exact) return exact;
+
+  const lowered = wanted.toLowerCase();
+  return models.find((model) => model.id.toLowerCase() === lowered) ?? null;
+}
+
+/**
+ * The model to actually ask for, and where that choice came from.
+ *
+ * A requested model that is not in the linked list is a **400**, not a silent
+ * fallback: the user picked it from a list Studio handed them, and quietly
+ * building with a different model produces work they did not ask for and cannot
+ * see. The caller decides what to do with the reason.
+ */
+export function resolveModel(
+  config: OmniRouteConfig,
+  models: GatewayModel[],
+  requested: string,
+): { model: string; source: "requested" | "configured" | "fallback"; reason?: string } {
+  const modelsById = new Map(models.map((model) => [model.id, model]));
+
+  if (requested) {
+    const match = findModel(models, requested);
+    if (!match) {
+      return {
+        model: config.model,
+        source: "fallback",
+        reason: `"${requested}" is not one of the ${models.length} models the gateway has linked in.`,
+      };
+    }
+    return { model: match.id, source: "requested" };
+  }
+
+  if (modelsById.has(config.model)) return { model: config.model, source: "configured" };
+
+  // The configured default is gone — the provider behind it was unlinked, or the
+  // key was removed. `auto/coding` is OmniRoute's own router and survives that, so
+  // it is the honest fallback; guessing a provider-specific id would not be.
+  const combo = models.find((model) => model.id === DEFAULT_MODEL);
+  return {
+    model: combo?.id ?? config.model,
+    source: "fallback",
+    reason: `The configured model "${config.model}" is no longer linked in by the gateway.`,
+  };
+}
+
+/**
+ * The model a route should actually ask for, and whether the caller's choice was
+ * one it could honour.
+ *
+ * Lives here rather than in each route because both the planning and the
+ * generation turn spend the same pool, and two copies of "validate the picked
+ * model" is how they drift — one of them would eventually accept a name the
+ * gateway does not have and produce a confusing upstream error.
+ *
+ * A catalog that cannot be read is not allowed to break either route: with no
+ * catalog there is nothing to validate against, so the caller's choice (or the
+ * configured default) goes through and the gateway owns the answer. Failing here
+ * would turn a read-only hiccup into an outage.
+ */
+export async function chooseModel(
+  config: OmniRouteConfig,
+  requested: string,
+): Promise<{ model: string; reject: string | null }> {
+  try {
+    const models = await listModels(config);
+    const resolved = resolveModel(config, models, requested);
+    return { model: resolved.model, reject: requested && resolved.reason ? resolved.reason : null };
+  } catch {
+    return { model: requested || config.model, reject: null };
+  }
+}
+
+/**
+ * A failure talking to the gateway, with the status a route should answer.
+ *
+ * The gateway's own diagnosis is worth surfacing — it names the model and the
+ * reason — but the upstream status is not the client's status, so a route maps
+ * this rather than forwarding it. The request headers never appear in the
+ * message; the key is in one of them.
+ */
+export class GatewayError extends Error {
+  constructor(
+    message: string,
+    readonly status: number = 502,
+  ) {
+    super(message);
+    this.name = "GatewayError";
+  }
+}
+
+/**
+ * One non-streaming completion.
+ *
+ * Planning uses this rather than the SSE path because a plan is a small JSON
+ * object that is only meaningful once it is whole: streaming it would buy a
+ * partial plan, which is not something a person can confirm.
+ */
+export async function completeChat(
+  config: OmniRouteConfig,
+  options: {
+    model: string;
+    messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+    signal?: AbortSignal;
+    temperature?: number;
+    maxTokens?: number;
+  },
+): Promise<string> {
+  const url = chatCompletionsUrl(config);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: options.model,
+        messages: options.messages,
+        stream: false,
+        temperature: options.temperature ?? 0.2,
+        ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
+      }),
+      signal: options.signal,
+    });
+  } catch (error) {
+    if (options.signal?.aborted) throw new GatewayError("The request was cancelled.", 499);
+    const detail = error instanceof Error ? error.message : "unknown error";
+    throw new GatewayError(`Could not reach the gateway at ${config.baseUrl} (${detail}).`);
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      detail = (await response.text()).slice(0, 400);
+    } catch {
+      detail = "";
+    }
+    const suffix = detail ? ` — ${detail}` : "";
+    const hint =
+      response.status === 401 || response.status === 403
+        ? " The configured OMNIROUTE_API_KEY was rejected."
+        : "";
+    throw new GatewayError(
+      `Gateway responded ${response.status} for model "${options.model}".${hint}${suffix}`,
+    );
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new GatewayError("The gateway answered with something that is not JSON.");
+  }
+
+  const record = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : {};
+  const choices = Array.isArray(record.choices) ? record.choices : [];
+  const first = (choices[0] ?? {}) as Record<string, unknown>;
+  const message = (first.message ?? {}) as Record<string, unknown>;
+  const content = message.content;
+
+  if (typeof content === "string" && content.trim()) return content;
+
+  // Some gateways answer the Responses shape instead of Chat Completions.
+  if (typeof record.output_text === "string" && record.output_text.trim()) {
+    return record.output_text;
+  }
+
+  throw new GatewayError("The gateway returned no text for that request.");
+}
+
 /**
  * The application contract: a real full-stack app, not a self-contained page.
  *

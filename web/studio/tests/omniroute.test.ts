@@ -1,12 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   APP_SYSTEM_PROMPT,
+  GatewayError,
   WEBSITE_SYSTEM_PROMPT,
   buildMessages,
   chatCompletionsUrl,
+  chooseModel,
+  completeChat,
+  findModel,
   isPlaceholderSecret,
+  listModels,
   missingEntryPoint,
+  parseModels,
   readConfig,
+  resetModelCache,
+  resolveModel,
   sseToTextStream,
 } from "@/lib/omniroute";
 
@@ -35,6 +43,12 @@ afterEach(() => {
     if (saved[key] === undefined) delete process.env[key];
     else process.env[key] = saved[key];
   }
+  vi.unstubAllGlobals();
+  resetModelCache();
+});
+
+beforeEach(() => {
+  resetModelCache();
 });
 
 describe("isPlaceholderSecret", () => {
@@ -289,5 +303,200 @@ describe("sseToTextStream", () => {
   it("emits a final frame that arrives without a trailing newline", async () => {
     const source = streamOf([chatChunk("a"), `data: ${JSON.stringify({ choices: [{ delta: { content: "z" } }] })}`]);
     expect(await readAll(sseToTextStream(source))).toBe("az");
+  });
+});
+
+describe("parseModels", () => {
+  it("reads the OpenAI-shaped list", () => {
+    const models = parseModels({
+      data: [{ id: "openai/gpt-4o", owned_by: "openai" }, { id: "auto/coding", owned_by: "combo" }],
+    });
+
+    expect(models.map((model) => model.id)).toEqual(["auto/coding", "openai/gpt-4o"]);
+    expect(models[0].combo).toBe(true);
+    expect(models[1].combo).toBe(false);
+  });
+
+  it("accepts a bare array as well as a data envelope", () => {
+    expect(parseModels([{ id: "a/b", owned_by: "a" }])).toHaveLength(1);
+  });
+
+  it("drops entries with no id, and deduplicates", () => {
+    const models = parseModels({ data: [{ owned_by: "x" }, { id: "a/b", owned_by: "a" }, { id: "a/b", owned_by: "a" }] });
+    expect(models.map((model) => model.id)).toEqual(["a/b"]);
+  });
+
+  it("keeps a context length that is a positive number and ignores the rest", () => {
+    const models = parseModels({
+      data: [
+        { id: "a/b", owned_by: "a", context_length: 128000 },
+        { id: "c/d", owned_by: "c", context_length: "huge" },
+        { id: "e/f", owned_by: "e", context_length: 0 },
+      ],
+    });
+
+    const byId = new Map(models.map((model) => [model.id, model.contextLength]));
+    expect(byId.get("a/b")).toBe(128000);
+    expect(byId.get("c/d")).toBeNull();
+    expect(byId.get("e/f")).toBeNull();
+  });
+
+  it("keeps only the boolean capabilities", () => {
+    const models = parseModels({
+      data: [{ id: "a/b", owned_by: "a", capabilities: { tools: true, vision: false, weird: "yes" } }],
+    });
+    expect(models[0].capabilities).toEqual({ tools: true, vision: false });
+  });
+
+  it("survives a payload that is not a list at all", () => {
+    expect(parseModels(null)).toEqual([]);
+    expect(parseModels("nope")).toEqual([]);
+    expect(parseModels({ data: "nope" })).toEqual([]);
+  });
+
+  it("sorts combos first, then by provider, then by id", () => {
+    const models = parseModels({
+      data: [
+        { id: "zzz/last", owned_by: "zzz" },
+        { id: "aaa/first", owned_by: "aaa" },
+        { id: "auto/coding", owned_by: "combo" },
+      ],
+    });
+    expect(models.map((model) => model.id)).toEqual(["auto/coding", "aaa/first", "zzz/last"]);
+  });
+});
+
+describe("findModel", () => {
+  const models = parseModels({ data: [{ id: "auto/coding", owned_by: "combo" }] });
+
+  it("matches exactly", () => {
+    expect(findModel(models, "auto/coding")?.id).toBe("auto/coding");
+  });
+
+  it("matches case-insensitively, because a hand-typed name is the same model", () => {
+    expect(findModel(models, "Auto/Coding")?.id).toBe("auto/coding");
+  });
+
+  it("returns null for an empty or unknown name", () => {
+    expect(findModel(models, "")).toBeNull();
+    expect(findModel(models, "nope")).toBeNull();
+  });
+});
+
+describe("resolveModel", () => {
+  const config = { baseUrl: "http://gw/v1", apiKey: "k", model: "auto/coding", chatPath: "/chat/completions" };
+  const models = parseModels({ data: [{ id: "auto/coding", owned_by: "combo" }, { id: "openai/gpt-4o", owned_by: "openai" }] });
+
+  it("uses a requested model that is linked in", () => {
+    expect(resolveModel(config, models, "openai/gpt-4o")).toEqual({ model: "openai/gpt-4o", source: "requested" });
+  });
+
+  it("reports a requested model that is not linked in rather than substituting one", () => {
+    const resolved = resolveModel(config, models, "openai/gpt-5");
+    expect(resolved.source).toBe("fallback");
+    expect(resolved.reason).toMatch(/not one of the/);
+  });
+
+  it("falls back to the combo when the configured default is gone", () => {
+    const resolved = resolveModel({ ...config, model: "retired/model" }, models, "");
+    expect(resolved.model).toBe("auto/coding");
+    expect(resolved.source).toBe("fallback");
+    expect(resolved.reason).toMatch(/retired\/model/);
+  });
+});
+
+describe("chooseModel", () => {
+  const config = { baseUrl: "http://gw/v1", apiKey: "k", model: "auto/coding", chatPath: "/chat/completions" };
+
+  it("rejects a model the gateway has not linked in", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: [{ id: "auto/coding", owned_by: "combo" }] })));
+
+    const chosen = await chooseModel(config, "openai/gpt-4o");
+    expect(chosen.reject).toMatch(/not one of the/);
+  });
+
+  it("lets the request through when the catalogue cannot be read", async () => {
+    // A read-only hiccup must not become an outage: with no catalogue there is
+    // nothing to validate against, so the gateway owns the answer.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("connect ECONNREFUSED");
+      }),
+    );
+
+    const chosen = await chooseModel(config, "openai/gpt-4o");
+    expect(chosen).toEqual({ model: "openai/gpt-4o", reject: null });
+  });
+
+  it("uses the configured default when the caller chose nothing", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: [{ id: "auto/coding", owned_by: "combo" }] })));
+
+    expect((await chooseModel(config, "")).model).toBe("auto/coding");
+  });
+});
+
+describe("completeChat", () => {
+  const config = { baseUrl: "http://gw/v1", apiKey: "k", model: "auto/coding", chatPath: "/chat/completions" };
+
+  function stub(impl: () => Response | Promise<Response>) {
+    const mock = vi.fn(impl);
+    vi.stubGlobal("fetch", mock);
+    return mock;
+  }
+
+  it("returns the assistant text", async () => {
+    stub(() => Response.json({ choices: [{ message: { content: '{"ok":true}' } }] }));
+    expect(await completeChat(config, { model: "m", messages: [] })).toBe('{"ok":true}');
+  });
+
+  it("sends the key as a bearer header and asks for a non-streaming answer", async () => {
+    const mock = stub(() => Response.json({ choices: [{ message: { content: "x" } }] }));
+
+    await completeChat(config, { model: "m", messages: [{ role: "user", content: "hi" }] });
+
+    const [url, init] = mock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(String(url)).toBe("http://gw/v1/chat/completions");
+    expect((init.headers as Record<string, string>).authorization).toBe("Bearer k");
+    expect(JSON.parse(String(init.body)).stream).toBe(false);
+  });
+
+  it("reads the Responses shape too", async () => {
+    stub(() => Response.json({ output_text: "hello" }));
+    expect(await completeChat(config, { model: "m", messages: [] })).toBe("hello");
+  });
+
+  it("throws a GatewayError with the gateway's own diagnosis", async () => {
+    stub(() => new Response("model not found", { status: 404 }));
+
+    const error = await completeChat(config, { model: "m", messages: [] }).catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(GatewayError);
+    expect((error as Error).message).toMatch(/404/);
+    expect((error as Error).message).toMatch(/model not found/);
+  });
+
+  it("hints at the key when the gateway refuses it", async () => {
+    stub(() => new Response("unauthorized", { status: 401 }));
+
+    const error = (await completeChat(config, { model: "m", messages: [] }).catch((e: unknown) => e)) as Error;
+    expect(error.message).toMatch(/OMNIROUTE_API_KEY/);
+  });
+
+  it("throws when there is no usable text", async () => {
+    stub(() => Response.json({ choices: [] }));
+    await expect(completeChat(config, { model: "m", messages: [] })).rejects.toThrow(/no text/);
+  });
+
+  it("throws when the body is not JSON", async () => {
+    stub(() => new Response("<html>gateway</html>", { status: 200 }));
+    await expect(completeChat(config, { model: "m", messages: [] })).rejects.toThrow(/not JSON/);
+  });
+
+  it("reports an unreachable gateway with its address", async () => {
+    stub(() => {
+      throw new Error("connect ECONNREFUSED");
+    });
+
+    await expect(completeChat(config, { model: "m", messages: [] })).rejects.toThrow(/Could not reach the gateway/);
   });
 });
