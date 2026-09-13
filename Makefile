@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish gateway-edge-check
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app plan new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish gateway-edge-check
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -44,6 +44,14 @@ new-request: ## Scaffold build-requests/$(NAME).md from factory/APP_SPEC_TEMPLAT
 
 builds: ## List factory output (./builds, gitignored)
 	@ls -la builds 2>/dev/null || echo "builds/: empty (run make app) — output is gitignored per .gitignore:builds/"
+
+# The step `make app` now runs first, runnable on its own. It answers one question —
+# which stack is this spec going to be built in — and answering it costs one gateway
+# turn, while getting it wrong costs the whole agent run. `--dry-run` prints the plan
+# without writing plan.json, which is the way to look before committing to a build.
+plan: ## Plan a SPEC's stack without building it (SPEC=build-requests/x.md, ARGS="--dry-run")
+	@if [ -z "$(SPEC)" ]; then echo "usage: make plan SPEC=build-requests/<name>.md" >&2; exit 2; fi
+	python3 scripts/project_plan.py --spec "$(SPEC)" $(ARGS)
 
 ## ---- Build runner (Studio's "Build it" executor) --------------------------
 

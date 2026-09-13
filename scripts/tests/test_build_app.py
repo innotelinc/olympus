@@ -105,7 +105,7 @@ class ReadsTheCheckoutDotenv(EnvFixture):
         )
         self.assertEqual(
             self.module.model_chain(),
-            ["gemini/gemini-3-flash-preview", "gemini/gemini-2.5-flash"],
+            ["gemini/gemini-3-flash-preview", "gemini/gemini-2.5-flash", "auto/coding"],
         )
 
     def test_the_gateway_comes_from_the_file_too(self) -> None:
@@ -122,7 +122,7 @@ class ReadsTheCheckoutDotenv(EnvFixture):
         )
         self.assertEqual(
             self.module.model_chain(),
-            ["gemini/gemini-3-flash-preview", "gemini/gemini-2.5-flash"],
+            ["gemini/gemini-3-flash-preview", "gemini/gemini-2.5-flash", "auto/coding"],
         )
         # Only OMNIROUTE_* is read: a script node has no business holding the tokens.
         self.assertEqual(sorted(self.module.repo_omniroute()), ["OMNIROUTE_MODEL", "OMNIROUTE_MODEL_FALLBACK"])
@@ -163,9 +163,25 @@ class Precedence(EnvFixture):
 
     def test_a_repeated_model_is_tried_once(self) -> None:
         self.write_env("OMNIROUTE_MODEL=same/model\nOMNIROUTE_MODEL_FALLBACK=same/model\n")
-        self.assertEqual(self.module.model_chain(), ["same/model"])
+        # The repeat is dropped; the composed route is still there behind it, so a
+        # deployment that pinned one model twice is not left with no second attempt.
+        self.assertEqual(self.module.model_chain(), ["same/model", "auto/coding"])
+
+    def test_the_composed_route_is_the_last_attempt_never_the_first(self) -> None:
+        # Measured, not theoretical: two configured models both unavailable — one
+        # timing out upstream, the other in `model_cooldown` with a 23-minute reset —
+        # failed three attempts while a third of the catalogue was answering. The
+        # combo walks the catalogue, so it belongs last: ahead of it the configured
+        # model is the deliberate choice, behind it luck is better than nothing.
+        self.write_env("OMNIROUTE_MODEL=gemini/gemini-3-flash-preview\n")
+        chain = self.module.model_chain()
+        self.assertEqual(chain[0], "gemini/gemini-3-flash-preview")
+        self.assertEqual(chain[-1], "auto/coding")
+        self.assertEqual(chain.count("auto/coding"), 1)
 
     def test_no_dotenv_at_all_falls_back_to_the_code_defaults(self) -> None:
+        # DEFAULT_MODEL *is* the composed route, so a bare install asks it first and
+        # the concrete default second — the order only differs from a pinned one.
         self.assertEqual(
             self.module.model_chain(),
             [self.module.DEFAULT_MODEL, self.module.DEFAULT_FALLBACK_MODEL],

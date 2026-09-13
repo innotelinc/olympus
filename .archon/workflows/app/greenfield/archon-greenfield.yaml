@@ -38,6 +38,13 @@ inputs:
       root — usually build-requests/<name>.md. Empty is a refusal, not a default:
       manufacturing the wrong spec costs a model run and writes an app nobody asked
       for.
+  kind:
+    default: "app"
+    description: >-
+      "app" or "website". It decides how the plan is judged — an application keeps
+      state, a website does not — and therefore what the planner is asked for. A
+      Studio export carries the kind the person chose; a hand-run spec defaults to
+      app.
 
 returns: record
 
@@ -62,6 +69,33 @@ nodes:
         app_dir: { type: string }
       required: [slug, title, spec_path, spec_sha, output_dir, app_dir]
 
+  # The stack, decided once, before the agent starts. One turn against the gateway,
+  # and its output is `plan.json` in the app directory rather than prose in a log:
+  # the builder is told the plan, the packager writes the Dockerfile from it, and the
+  # runtime runs the container on its port. A turn that produces no usable plan fails
+  # here, which is the point — an agent run against a stack nobody chose costs far
+  # more than the turn that would have chosen it.
+  - id: plan
+    script: plan-app
+    runtime: uv
+    depends_on: [load]
+    timeout: 600000
+    with:
+      spec_path: "$load.output.spec_path"
+      app_dir: "$load.output.app_dir"
+      title: "$load.output.title"
+      kind: "$INPUTS.kind"
+    output_format:
+      type: object
+      properties:
+        language: { type: string }
+        port: { type: integer }
+        start: { type: string }
+        files: { type: integer }
+        summary: { type: string }
+        detail: { type: string }
+      required: [language, port, start, files, summary, detail]
+
   # The model call, and the only step that can be neither predicted nor verified by
   # code. Its exit code is RECORDED rather than trusted: decide()s happen in verify.
   #
@@ -72,7 +106,7 @@ nodes:
   - id: build
     script: build-app
     runtime: uv
-    depends_on: [load]
+    depends_on: [plan]
     timeout: 3600000
     with:
       spec_path: "$load.output.spec_path"

@@ -21,6 +21,8 @@ Emits {files, bytes, entry, verification, command, detail}.
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import json
 import os
 import re
@@ -46,12 +48,67 @@ def fail(message: str) -> "None":
     raise SystemExit(1)
 
 
+@functools.lru_cache(maxsize=1)
+def plan_contract():
+    """`scripts/project_plan.py` from the checkout, or None when it is not there.
+
+    Loaded by path because this node runs from a copy of the workflow: the script
+    beside it is the copy and the checkout's is the deployment's. The alternative to
+    these ten lines is a shared module the workflow cannot import — it is copied to
+    `artifacts/runs/<id>/`, away from `scripts/`.
+
+    The app directory is tried first because the app and the spec both live in the
+    real checkout; this file's own directory is the fallback, which is what makes the
+    node testable from the checkout it is checked into.
+    """
+    hints = [os.environ.get("INPUTS_APP_DIR") or "", os.environ.get("INPUTS_SPEC_PATH") or ""]
+    starts: list[Path] = []
+    for hint in hints:
+        if not hint:
+            continue
+        path = Path(hint)
+        starts.append(path if path.is_dir() else path.parent)
+    starts.append(Path(__file__).resolve().parent)
+
+    for start in starts:
+        for parent in (start, *start.parents):
+            candidate = parent / "scripts" / "project_plan.py"
+            if not candidate.is_file():
+                continue
+            spec = importlib.util.spec_from_file_location("project_plan_under_test", candidate)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+    return None
+
+
+def is_workflow_file(app_dir: Path, path: Path) -> bool:
+    """Whether a path in the app directory is the workflow's rather than the app's."""
+    module = plan_contract()
+    relative = str(path.relative_to(app_dir))
+    if module is None:
+        return Path(relative).name == "plan.json"
+    return bool(module.is_control_file(relative))
+
+
 def inventory(app_dir: Path) -> list[tuple[str, int]]:
+    """The app's own files.
+
+    The workflow's records are skipped, and not as a tidy-up: `plan.json` is written
+    into this directory before the agent runs, so counting it would report a
+    directory of nothing as a directory of one file — which is precisely the failure
+    this node exists to catch.
+    """
     found: list[tuple[str, int]] = []
     for path in sorted(app_dir.rglob("*")):
         if not path.is_file():
             continue
         if any(part in SKIP_DIRS for part in path.relative_to(app_dir).parts):
+            continue
+        if is_workflow_file(app_dir, path):
             continue
         found.append((str(path.relative_to(app_dir)), path.stat().st_size))
     return found
