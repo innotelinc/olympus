@@ -10,6 +10,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 const ORIGINAL_CWD = process.cwd();
 const TMP = join(ORIGINAL_CWD, "tests", ".tmp");
+// Removed only by this file, and only the `env` subtree: TMP is the shared parent
+// every suite fixtures under, and vitest runs the files in parallel workers. An
+// afterAll that deletes TMP takes another file's fixtures with it mid-run —
+// measured, that surfaced as `projects.test.ts` seeing a project file vanish and
+// reporting a fresh app where it expected an update.
 const SANDBOX = join(TMP, "env");
 const APP_DIR = join(SANDBOX, "repo", "app");
 
@@ -63,7 +68,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  rmSync(TMP, { recursive: true, force: true });
+  rmSync(SANDBOX, { recursive: true, force: true });
 });
 
 beforeEach(() => {
