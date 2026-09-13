@@ -700,6 +700,51 @@ kbd {
   animation: progress-slide 1.4s ease-in-out infinite;
 }
 
+.build-panel.cancelled {
+  border-color: rgba(255, 196, 107, 0.35);
+}
+
+/* The Cancel control and the history entries: actions that belong inside the
+   panel's text flow, not another bordered button competing with "Build it". */
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.link-button:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.link-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.build-history summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.build-history ul {
+  margin: 6px 0 0;
+  padding: 0 0 0 2px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.build-history li {
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .build-log summary {
   cursor: pointer;
   user-select: none;

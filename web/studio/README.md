@@ -371,12 +371,14 @@ no `python3`. Those live on the host, so the button queues a request and the hos
 runner does the work:
 
 ```
-Studio (uid 1001)                    host runner (systemd)
+Studio (uid 1001)                    host runner (systemd, olympus-builder)
   POST /api/projects/<id>/build        olympus-build-runner.service
     → writes build-requests/<slug>.md    → claims <job>.request.json
     → writes <job>.request.json          → re-validates every field
   GET  .../build[?job=]                  → runs scripts/manufacture.sh
-    ← reads <job>.status.json            → writes <job>.status.json + .log
+    ← reads <job>.status.json + history  → writes <job>.status.json + .log
+  POST .../build/cancel
+    → writes <job>.cancel.json       → sees it on the next poll, stops the tree
 ```
 
 The queue is `.factory/build-queue/` (bind-mounted at `/app/build-queue`,
@@ -394,7 +396,24 @@ refused by name and marked failed rather than acted on.
 | Progress | The runner rewrites the status every 5s with elapsed time and a log tail; Studio polls it every 3s while a build runs |
 | No runner | `POST` answers `503` naming the service rather than queueing a build nobody will claim |
 | `replace` | One flag covers both overwrites — an existing spec and an existing `builds/<slug>`. Without it either is a `409` and the UI asks |
+| History | `GET` returns this app's builds newest-first (a running one pinned to the top), which the panel lists under the log — so a second attempt is comparable to the first instead of replacing it silently |
+| Cancel | `POST .../build/cancel` writes a marker the runner polls for. It answers `202`, not "stopped": the truth is the status file changing, which the panel is already following. Only a running build can be cancelled — anything else is a `409`, because rewriting a finished build's outcome is not a cleanup |
 | Result | `builds/<slug>/` on the host, with `MANIFEST.json` recording the spec's SHA-256 and the model |
+
+Cancelling stops the whole build **tree**, not just the shell the runner spawned:
+the child is started in its own session and the process group is signalled, so the
+Archon run and the Codex agent go with it. A cancel that only killed the shell
+would leave an agent holding the gateway and still writing files into the app
+directory after the panel said it had stopped. A cancelled build whose directory
+holds no `MANIFEST.json` is removed, so the next attempt is not blocked by the
+clobber guard on a half-written app the operator never asked to keep.
+
+The runner no longer runs as root. `scripts/install-build-runner.sh` creates
+`olympus-builder` (group `olympus-build`), gives it `builds/`, a shared writable
+queue (group + an ACL for Studio's uid 1001, which has no host account), an ACL on
+`.env` so it can read the gateway key while the file stays `0600`, and publishes
+`uv` to `/usr/local/bin` — the operator's copy in `~/.local/bin` is unreadable from
+another account. `--as-root` restores the old behaviour.
 
 Both the exporter and the runner read and write the same files, so the two sides
 can be checked against each other independently: `python3 scripts/build-runner.py

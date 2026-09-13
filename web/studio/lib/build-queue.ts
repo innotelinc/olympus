@@ -33,7 +33,12 @@ export const JOB_ID_PATTERN = /^[0-9a-f]{16}$/;
  */
 export const RUNNER_STALE_SECONDS = 60;
 
-export type BuildState = "running" | "succeeded" | "failed";
+/**
+ * `cancelled` is its own state, not a flavour of `failed`: the operator asked for
+ * it, and a panel that reports a deliberate stop as a failure trains people to
+ * ignore failures.
+ */
+export type BuildState = "running" | "succeeded" | "failed" | "cancelled";
 
 export type BuildArtifact = {
   dir: string;
@@ -264,7 +269,9 @@ function toBuildStatus(raw: unknown): BuildStatus | null {
   if (!job || !JOB_ID_PATTERN.test(job)) return null;
 
   const state = asString(record.state);
-  if (state !== "running" && state !== "succeeded" && state !== "failed") return null;
+  if (state !== "running" && state !== "succeeded" && state !== "failed" && state !== "cancelled") {
+    return null;
+  }
 
   const artifact = record.artifact;
 
@@ -308,35 +315,115 @@ export function readBuildStatus(job: string): BuildStatus | null {
  * shows the last result instead of forgetting that one ever ran.
  */
 export function latestBuildStatus(slug: string): BuildStatus | null {
+  // The same ordering the history lists, cut to one. Keeping a second
+  // implementation of "which build is current" here is how the panel and the
+  // history end up disagreeing about it.
+  return listBuildHistory(slug, 1)[0] ?? null;
+}
+
+/* ---- history ------------------------------------------------------------ */
+
+/**
+ * Every status file on disk, newest first.
+ *
+ * Read from the queue rather than from an index of our own: the directory is the
+ * only record, and it is written by the runner even when this container is
+ * restarted mid-build. One bad file is skipped rather than failing the list.
+ */
+function allStatuses(): BuildStatus[] {
   const dir = buildQueueDir();
 
   let names: string[];
   try {
     names = readdirSync(dir);
   } catch {
-    return null;
+    return [];
   }
 
-  let newest: BuildStatus | null = null;
-
+  const statuses: BuildStatus[] = [];
   for (const name of names) {
     if (!name.endsWith(".status.json") || name.startsWith(".")) continue;
-
     const status = toBuildStatus(readJson(join(dir, name)));
-    if (!status || status.slug !== slug) continue;
+    if (status) statuses.push(status);
+  }
+  return statuses;
+}
 
-    const at = status.updatedAt ? Date.parse(status.updatedAt) : Number.NaN;
-    const best = newest?.updatedAt ? Date.parse(newest.updatedAt) : Number.NaN;
-    // A running build always wins: it is the thing the operator is watching.
-    const newer =
-      newest === null ||
-      status.state === "running" ||
-      (newest.state !== "running" && Number.isFinite(at) && (!Number.isFinite(best) || at > best));
+/** When a build last said anything, as a sort key that tolerates missing times. */
+function recency(status: BuildStatus): number {
+  const stamp = status.updatedAt ?? status.finishedAt ?? status.startedAt ?? status.requestedAt;
+  const parsed = stamp ? Date.parse(stamp) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
 
-    if (newer) newest = status;
+/**
+ * This app's builds, newest first — what the panel lists under the button.
+ *
+ * A running build is pinned to the top regardless of timestamps: it is the one
+ * the operator is watching, and queueing and starting can leave its `updatedAt`
+ * slightly older than a build that finished a second later.
+ */
+export function listBuildHistory(slug: string, limit = 10): BuildStatus[] {
+  const mine = allStatuses().filter((status) => status.slug === slug);
+
+  mine.sort((left, right) => {
+    if (left.state === "running" && right.state !== "running") return -1;
+    if (right.state === "running" && left.state !== "running") return 1;
+    return recency(right) - recency(left);
+  });
+
+  return mine.slice(0, Math.max(1, limit));
+}
+
+/* ---- cancelling --------------------------------------------------------- */
+
+/**
+ * Ask the runner to stop a build.
+ *
+ * Studio cannot signal a host process — different PID namespace, and it has no
+ * business having one. So the request is a file the runner polls, and the answer
+ * to "did it work" is the status file changing, which is what the panel already
+ * follows. Only a running build can be cancelled: for anything else this is a
+ * no-op the caller should not be told succeeded.
+ */
+export function requestCancel(job: string): BuildStatus {
+  if (!JOB_ID_PATTERN.test(job)) {
+    throw new BuildQueueError("No such build job.", 404);
   }
 
-  return newest;
+  const status = readBuildStatus(job);
+  if (!status) {
+    throw new BuildQueueError("No such build job.", 404);
+  }
+  if (status.state !== "running") {
+    throw new BuildQueueError(
+      `That build already ${status.state === "cancelled" ? "was cancelled" : status.state}.`,
+      409,
+    );
+  }
+
+  const dir = buildQueueDir();
+  const target = join(dir, `${job}.cancel.json`);
+  const temporary = join(dir, `.${job}.cancel.json.${process.pid}.tmp`);
+  const marker = {
+    v: 1,
+    job,
+    requested_by: "studio",
+    requested_at: new Date().toISOString(),
+  };
+
+  try {
+    writeFileSync(temporary, `${JSON.stringify(marker, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o644,
+    });
+    renameSync(temporary, target);
+  } catch {
+    rmSync(temporary, { force: true });
+    throw new BuildQueueError(notWritable(dir), 503);
+  }
+
+  return status;
 }
 
 /** Re-exported so a route can distinguish "the spec exists" from other failures. */

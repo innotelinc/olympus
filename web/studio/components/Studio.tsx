@@ -55,7 +55,10 @@ function kilobytes(bytes: number): string {
  */
 function buildStateLabel(build: BuildStatus): string {
   if (build.state !== "running") {
-    return build.state === "succeeded" ? "succeeded" : "failed";
+    if (build.state === "succeeded") return "succeeded";
+    // A stop the operator asked for is not a failure, and labelling it one is
+    // how real failures stop being read.
+    return build.state === "cancelled" ? "cancelled" : "failed";
   }
 
   const since = build.startedAt ? Date.parse(build.startedAt) : Number.NaN;
@@ -165,6 +168,8 @@ export default function Studio({ user = null }: { user?: string | null }) {
   // The factory build of this app. There is no socket to the runner — Studio
   // polls the status file it writes, and that file is the entire conversation.
   const [build, setBuild] = useState<BuildStatus | null>(null);
+  const [buildHistory, setBuildHistory] = useState<BuildStatus[]>([]);
+  const [cancelBusy, setCancelBusy] = useState(false);
   const [runner, setRunner] = useState<RunnerState | null>(null);
   const [buildBusy, setBuildBusy] = useState(false);
   const [buildError, setBuildError] = useState<string | null>(null);
@@ -279,9 +284,11 @@ export default function Studio({ user = null }: { user?: string | null }) {
       const response = await request(`/api/projects/${encodeURIComponent(appId)}/build${query}`);
       const payload = (await response.json()) as {
         build?: BuildStatus | null;
+        history?: BuildStatus[];
         runner?: RunnerState;
       };
       setBuild(payload.build ?? null);
+      setBuildHistory(Array.isArray(payload.history) ? payload.history : []);
       setRunner(payload.runner ?? null);
       return payload.build ?? null;
     },
@@ -293,6 +300,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
   useEffect(() => {
     if (!activeAppId) {
       setBuild(null);
+      setBuildHistory([]);
       return;
     }
 
@@ -550,8 +558,7 @@ export default function Studio({ user = null }: { user?: string | null }) {
     } finally {
       setBuildBusy(false);
     }
-  }, [
-    activeAppId,
+  },    [activeAppId,
     activeFiles,
     appTitle,
     fetchBuild,
@@ -561,6 +568,39 @@ export default function Studio({ user = null }: { user?: string | null }) {
     status,
     token,
   ]);
+
+  /**
+   * Ask the runner to stop the build, then wait for the status to say so.
+   *
+   * The 202 this gets back means "the request is on disk", not "stopped" — the
+   * runner notices within a second and rewrites the status, which the existing
+   * poll then picks up. So the button stays busy until the state moves, rather
+   * than reporting success for something that has not happened yet.
+   */
+  const cancelBuild = useCallback(async () => {
+    if (!activeAppId || !build || build.state !== "running" || cancelBusy) return;
+
+    setCancelBusy(true);
+    setBuildError(null);
+    try {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (token) headers["x-studio-token"] = token;
+
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(activeAppId)}/build/cancel`,
+        { method: "POST", headers, body: JSON.stringify({ job: build.job }) },
+      );
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        throw new Error(payload.error ?? `Could not stop the build (${response.status}).`);
+      }
+      await fetchBuild(activeAppId, build.job);
+    } catch (thrown) {
+      setBuildError(thrown instanceof Error ? thrown.message : "Could not stop the build.");
+    } finally {
+      setCancelBusy(false);
+    }
+  }, [activeAppId, build, cancelBusy, fetchBuild, token]);
 
   const openApp = useCallback(
     async (id: string) => {
@@ -1065,6 +1105,17 @@ export default function Studio({ user = null }: { user?: string | null }) {
                 <div className="build-panel-head">
                   <span className="produced-head">Factory build</span>
                   <span className="topbar-spacer" />
+                  {build?.state === "running" ? (
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => void cancelBuild()}
+                      disabled={cancelBusy}
+                      title="Stop this build on the host runner"
+                    >
+                      {cancelBusy ? "Stopping…" : "Cancel"}
+                    </button>
+                  ) : null}
                   <span className="hint">{build ? buildStateLabel(build) : "not started"}</span>
                 </div>
 
@@ -1092,6 +1143,31 @@ export default function Studio({ user = null }: { user?: string | null }) {
 
                 {runner && !runner.live ? (
                   <p className="hint">No build runner is responding — start olympus-build-runner.</p>
+                ) : null}
+
+                {buildHistory.length > 1 ? (
+                  <details className="build-history">
+                    <summary className="hint">Earlier builds ({buildHistory.length - 1})</summary>
+                    <ul>
+                      {buildHistory.slice(1).map((past) => (
+                        <li key={past.job}>
+                          <button
+                            type="button"
+                            className="link-button"
+                            onClick={() => setBuild(past)}
+                            title="Show this build's message and log"
+                          >
+                            {buildStateLabel(past)}
+                          </button>
+                          <span className="hint">
+                            {" "}
+                            {past.finishedAt ?? past.startedAt ?? past.requestedAt ?? ""}
+                            {past.artifact ? ` — ${past.artifact.files ?? 0} file(s)` : ""}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
                 ) : null}
               </div>
             ) : null}
