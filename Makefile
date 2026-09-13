@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish gateway-edge-check
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -206,6 +206,14 @@ gateway-sso-check: ## Confirm the proxy redirects to Authentik instead of servin
 		echo "sso: FAILED — redirect names a different client than GATEWAY_OIDC_CLIENT_ID" >&2; exit 1; \
 	fi; \
 	echo "sso: ok — / redirects to $$base/application/o/authorize/ as client '$$client'"
+
+# The step the two checks above cannot make: whether the PUBLIC name resolves and
+# serves. They probe loopback ports, so they pass while DNS is broken, the
+# certificate has lapsed or the edge is down — which is precisely the report that
+# arrives as "it's not resolving". This walks the chain in order and names the
+# first link that is broken. `monitor-gateway-edge` is the same check on a timer.
+gateway-edge-check: ## Is gateway.olympus.innotel.us reachable, and if not, which link broke?
+	python3 scripts/gateway-edge-check.py $(ARGS)
 
 # ---- Published websites (Studio "Build & publish") ----------------------------
 # A Studio *app* is finished when it is generated; a Studio *website* is finished
