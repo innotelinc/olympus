@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app plan new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir tui docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish gateway-edge-check
+.PHONY: help setup env-sync env-sync-write doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app plan new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir tui docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish gateway-edge-check
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -17,6 +17,23 @@ help: ## Show this help message
 
 setup: ## Preflight, install guard hooks, generate .env secrets
 	bash setup.sh
+	@# Last, so a failed preflight does not leave a half-seeded .env: bring the new
+	@# file level with every key .env.example documents. `setup.sh` does not open
+	@# .env at all, so an upgrade that adds a knob was invisible until somebody
+	@# read the example and noticed — see the header of scripts/env-sync.py.
+	@[ -f .env ] && python3 scripts/env-sync.py --write || true
+
+# An absent key and a key set to the documented default behave identically — until
+# the default changes, and then a deployment that never had the key moves with it
+# while its operator believes nothing changed. `make check` reports; `env-sync-write`
+# appends. Neither ever edits, reorders or removes a line already in `.env`.
+env-sync: ## Report .env keys .env.example documents that .env has never mentioned
+	@if [ ! -f .env ]; then echo "env-sync: no .env — nothing to compare (cp .env.example .env)"; exit 0; fi
+	python3 scripts/env-sync.py $(ARGS)
+
+env-sync-write: ## Append those keys to .env, carrying the example's own comments
+	@if [ ! -f .env ]; then echo "env-sync: no .env — create it first (make setup)" >&2; exit 2; fi
+	python3 scripts/env-sync.py --write $(ARGS)
 
 doctor: ## Audit readiness (factory doctor + trigger status)
 	python3 factory/doctor.py || true
@@ -478,6 +495,10 @@ check: ## Run attribution guard + credential scan + structure checks
 	bash .githooks/commit-msg .git/COMMIT_EDITMSG 2>/dev/null || true
 	python3 -m compileall -q factory harness 2>/dev/null || true
 	python3 scripts/secret-scan.py
+	@# Only where there is a .env — CI and a fresh clone legitimately have none, and
+	@# a missing file is not drift. On a deployment it is the whole point: the check
+	@# is what turns "a knob was added" into a line of output instead of a surprise.
+	@if [ -f .env ]; then python3 scripts/env-sync.py; fi
 
 secret-scan: ## Fail on literal credentials in tracked files
 	python3 scripts/secret-scan.py
