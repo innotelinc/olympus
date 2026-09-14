@@ -213,6 +213,31 @@ class Dockerfile(unittest.TestCase):
         text = self.dockerfile_for(run={"install": "", "build": ""})
         self.assertNotIn("RUN ", text)
 
+    def test_a_node_image_carries_the_compiler_its_install_may_need(self):
+        # Lockfiles are ignored, so the tree comes from the manifest the model wrote,
+        # and that manifest may name something with no prebuilt binary for musl.
+        # node-gyp's own failure is about a missing Python, which reads like a Python
+        # problem and is really a base image with no compiler in it.
+        text = self.dockerfile_for(
+            runtime={"language": "node"},
+            run={
+                "install": "npm install",
+                "build": "npm run build",
+                "start": "node server/index.js",
+            },
+        )
+        self.assertIn("RUN apk add --no-cache python3 make g++", text)
+
+    def test_the_toolchain_lands_before_the_source_so_it_stays_cached(self):
+        # After `COPY . .` every source change would invalidate it, and each build
+        # would pay for the toolchain again.
+        text = self.dockerfile_for(runtime={"language": "node"})
+        self.assertLess(text.index("apk add"), text.index("COPY . ."))
+        self.assertLess(text.index("apk add"), text.index("RUN pip install"))
+
+    def test_a_language_with_no_toolchain_pays_nothing(self):
+        self.assertNotIn("apk add", self.dockerfile_for())
+
     def test_gives_the_project_port_host_and_data_dir(self):
         text = self.dockerfile_for(run={"port": 8100})
         self.assertIn("ENV PORT=8100", text)
@@ -257,6 +282,13 @@ class Dockerignore(unittest.TestCase):
     def test_keeps_its_own_output_out_of_the_context(self):
         for entry in ("Dockerfile", "plan.json", packager.MANIFEST_NAME):
             self.assertIn(entry, packager.DOCKERIGNORE.splitlines())
+
+    def test_keeps_a_lockfile_it_did_not_write_out_of_the_image(self):
+        # This script reads the plan and never writes a lockfile, so one in the
+        # directory is unvouched-for input — and npm trusts it completely. A tree
+        # that does not match the manifest makes the install compile from source
+        # instead of taking the prebuilt binary, which no base image here can do.
+        self.assertIn("package-lock.json", packager.DOCKERIGNORE.splitlines())
 
 
 class DockerfileIsWritten(unittest.TestCase):
