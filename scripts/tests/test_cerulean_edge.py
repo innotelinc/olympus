@@ -219,5 +219,30 @@ class SelectCertificate(unittest.TestCase):
         self.assertEqual(chosen["id"], 2)
 
 
+class UnusableDnsSession(unittest.TestCase):
+    """The 500 that repeats no matter how many times you obey its instruction.
+
+    Measured on this platform: `make gateway-edge` and `make site-publish` both died on
+    `Technitium session expired for /api/zones/records/get — retry`, and retrying was
+    the one thing that could not work — a static token was configured, and Cerulean
+    uses a configured token as-is with no re-login on `invalid-token`.
+    """
+
+    def test_the_retry_instruction_is_replaced_with_what_actually_fixes_it(self) -> None:
+        hint = edge.unusable_dns_session("Technitium session expired for /api/zones/records/get — retry")
+        self.assertIsNotNone(hint)
+        self.assertIn("will not fix it", hint)
+        self.assertIn("TECHNITIUM_TOKEN", hint)
+
+    def test_it_also_catches_the_error_in_a_structured_payload(self) -> None:
+        self.assertIsNotNone(edge.unusable_dns_session({"error": {"message": "Technitium session expired"}}))
+
+    def test_any_other_failure_is_left_to_the_script_that_raised_it(self) -> None:
+        # A fabricated diagnosis is worse than none: this must not swallow a 404 from a
+        # zone that is not registered, or a Cerulean that is simply down.
+        for payload in ("Zone innotel.us is not registered in Cerulean", {"error": "fetch failed"}, ""):
+            self.assertIsNone(edge.unusable_dns_session(payload), payload)
+
+
 if __name__ == "__main__":
     unittest.main()
