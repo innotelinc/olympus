@@ -85,6 +85,26 @@ BASE_IMAGES: dict[str, str] = {
     "static": "nginx:1.29-alpine",
 }
 
+# What a language's image needs in order to *compile* a dependency, as apk
+# packages. Lockfiles are ignored above, so the tree comes from the manifest the
+# model wrote, and a manifest may name something with no prebuilt binary for musl —
+# `better-sqlite3` built from source, `sharp`, `bcrypt`. None of the base images
+# carries a compiler, so without this such a project is an image that cannot be
+# built; node-gyp's own message is about a missing Python, which reads like a Python
+# problem and is really a missing toolchain.
+#
+# The cost is real and paid on every image of that language: the toolchain stays in
+# the final layer, which is also what keeps the C++ runtime a compiled module links
+# against. That is the trade this makes deliberately — a slower build over a project
+# the platform cannot deliver.
+#
+# Other languages are absent because nothing has needed them yet, not because they
+# cannot: a python plan with a C extension wants `build-base`, and that is a line
+# here.
+BUILD_TOOLS: dict[str, tuple[str, ...]] = {
+    "node": ("python3", "make", "g++"),
+}
+
 # What a plan may call a language and still mean one of the above. A planner
 # writing "nodejs" or "TypeScript" is naming the same base image, and refusing it
 # would be pedantry with a failed build attached.
@@ -123,6 +143,17 @@ LANGUAGE_ALIASES: dict[str, str] = {
 # Copied into every image's `.dockerignore`. `node_modules` and friends are the
 # host's business, not the image's: a copied-in `node_modules` would shadow what
 # `install` resolves, and the image would carry whatever the last host install left.
+#
+# `package-lock.json` is that same hazard one level up, and it is here for the same
+# reason. This script reads the plan and nothing else, so it never writes a lockfile
+# and cannot vouch for one that is sitting in the directory — while `npm install`
+# trusts a lockfile completely. On 2026-09-14 one was 149 entries where npm resolves
+# 200 for that same `package.json`: npm installed the partial tree, `better-sqlite3`
+# fell through to `node-gyp rebuild` instead of using the prebuilt binary it ships,
+# and the image could not be built at all. What made that hard to see is that it had
+# *worked* — as a cached layer, until the context changed. Resolving the tree from
+# the manifest is the behaviour the plan describes, and the only one this script can
+# make a claim about.
 DOCKERIGNORE = """Dockerfile
 .dockerignore
 plan.json
@@ -133,6 +164,7 @@ project.manifest.json
 .gitignore
 data
 node_modules
+package-lock.json
 __pycache__
 *.pyc
 .venv
@@ -429,9 +461,20 @@ def dockerfile_for(plan: dict) -> str:
         f"ENV PORT={port} \\",
         "    HOST=0.0.0.0 \\",
         "    DATA_DIR=/data",
-        "",
-        "COPY . .",
     ]
+
+    # Ahead of the source on purpose: a change to the project must not invalidate
+    # this layer and pay for the toolchain again on every build.
+    tools = BUILD_TOOLS.get(language, ())
+    if tools:
+        lines += [
+            "",
+            "# `install` resolves its tree from the manifest, which may name something",
+            "# that has to be built here rather than downloaded prebuilt.",
+            f"RUN apk add --no-cache {' '.join(tools)}",
+        ]
+
+    lines += ["", "COPY . ."]
 
     if plan["install"]:
         lines += ["", "# From the plan, verbatim. A failure here is a packaging failure with the", "# package manager's own message.", f"RUN {plan['install']}"]
