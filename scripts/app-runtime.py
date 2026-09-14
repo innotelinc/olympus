@@ -613,7 +613,20 @@ def up(runtime: Runtime, args: argparse.Namespace) -> int:
     runtime.write(slug, record)
 
     print(json.dumps(record, indent=2))
-    note(f"{slug} is running — {runtime.url(slug)} ({reload_note})")
+    # The vhost written above is what makes the name answer on olympus-sites, which
+    # is this host. Registering the name at the *edge* is a different step with a
+    # different owner — `studio-sites.py --publish`, run by `make app-publish` — and
+    # `--up` is run on its own too, by hand and as the middle of that same target.
+    # So the note cannot say "published" or "not published": both are wrong in one
+    # of the two cases. What it can say is what it did, and name the command that
+    # answers the other question — because the report that follows a stale URL is
+    # "it's not resolving", and the honest thing is not to have implied it would.
+    note(
+        f"{slug} is running on 127.0.0.1:{port} ({reload_note}). Its name "
+        f"{runtime.hostname(slug)} answers on olympus-sites; whether the edge "
+        f"publishes it is a separate step — "
+        f"`make site-check HOST={runtime.hostname(slug)}` reports that."
+    )
     return 0
 
 

@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app plan new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish gateway-edge-check
+.PHONY: help setup doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app plan new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir tui docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish gateway-edge-check
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -75,7 +75,7 @@ build-runner-check: ## Check the build runner's environment without building any
 		python3 scripts/build-runner.py --check; \
 	fi
 
-prune: ## Report old builds + finished queue files (ARGS="--yes" to delete, "--older-than 0" for all)
+prune: ## Report old builds + finished queue files (ARGS="--yes" to delete, "--older-than 0" for all, "--queue-only" to spare builds)
 	python3 scripts/prune-builds.py $(ARGS)
 
 ## ---- Build model (the one thing that decides whether a build writes anything) --
@@ -90,6 +90,9 @@ build-model-alert: ## Run the check and alert (Telegram) when the chain cannot b
 
 build-runner-list: ## Show the build queue and where each job got to
 	python3 scripts/build-runner.py --list
+
+tui: ## Build from the terminal UI (ARGS="--list"|"--once 'a weight tracker'")
+	python3 scripts/olympus-tui.py $(ARGS)
 
 test-runner: ## Run the script unit tests (runner, prune, model check, restore)
 	python3 -m unittest discover -s scripts/tests -t scripts/tests -v
