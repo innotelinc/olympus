@@ -133,15 +133,35 @@ ps: ## List supporting service status
 docker-build: ## Build the Olympus image (ghcr.io/innotelinc/olympus:local)
 	docker build -t ghcr.io/innotelinc/olympus:local .
 
-docker-up: ## Start the Olympus container (detached, builds → volume)
-	docker compose up --build -d
+# --force-recreate is what keeps the "builds → volume" promise honest. Compose
+# recreates a container only when its config or image changed, and a rebuild that was
+# a full cache hit produces a byte-identical image — so `up --build` alone answers
+# `Running` and runs the factory as it was, however long ago the image was built. The
+# first line brings the factory up unconditionally; the second converges everything
+# else without touching it, so omniroute and the SSO pair keep their sessions.
+# (docker-studio-up force-recreates Studio itself, for the same reason.)
+#
+# The guard refuses the file set that cannot work here: on a host where olympus runs
+# host-networked, this target's plain compose file would recreate it on the bridge,
+# where the loopback-published gateway is unreachable — the same break
+# compose.host-gateway.yml exists to prevent, applied to the factory. Switching
+# deliberately is `make docker-down` then this again.
+docker-up: ## Start the stack (detached); the factory container always comes up fresh
+	@if [ "$$(docker inspect olympus --format '{{.HostConfig.NetworkMode}}' 2>/dev/null)" = host ]; then \
+		echo "olympus is running host-networked — this host deploys through compose.host-gateway.yml." >&2; \
+		echo "Run \`make docker-up-host\`, or \`make docker-down\` first if you mean to switch." >&2; \
+		exit 1; \
+	fi
+	docker compose up -d --build --force-recreate --no-deps olympus
+	docker compose up -d --build
 
 # The gateway this stack talks to is published on 127.0.0.1 only, and a bridge
 # container cannot reach a loopback-published port (verified: host.docker.internal,
 # the host-gateway IP and the LAN address all refuse). Use this target when the
 # gateway runs on this host; see the header of compose.host-gateway.yml.
 docker-up-host: ## Start with host networking (gateway published on loopback here)
-	docker compose -f docker-compose.yml -f compose.host-gateway.yml up -d --build
+	@docker compose -f docker-compose.yml -f compose.host-gateway.yml up -d --build --force-recreate --no-deps olympus
+	@docker compose -f docker-compose.yml -f compose.host-gateway.yml up -d --build
 
 docker-down: ## Stop the Olympus container (keeps builds volume)
 	docker compose down
