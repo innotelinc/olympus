@@ -65,6 +65,7 @@ from cerulean_api import (  # noqa: E402 - the path insert above is what makes t
     select_certificate,
     select_record,
     setting,
+    unusable_dns_session,
     zone_relative,
 )
 
@@ -98,6 +99,7 @@ __all__ = [
     "select_certificate",
     "select_record",
     "setting",
+    "unusable_dns_session",
     "zone_relative",
 ]
 

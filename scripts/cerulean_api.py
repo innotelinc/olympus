@@ -317,6 +317,34 @@ class Api:
         return payload
 
 
+# Cerulean's 500 when it cannot authenticate to Technitium. It says "retry", and this
+# string is the reason to believe it does not mean it — see `unusable_dns_session`.
+TECHNITIUM_SESSION_ERROR = "Technitium session expired"
+
+TECHNITIUM_SESSION_HINT = (
+    "Cerulean's DNS session is unusable, and re-running this will not fix it. Its code "
+    "uses a *configured* static token as-is and has no re-login when Technitium answers "
+    "`invalid-token`, so every DNS read fails permanently while that token is set. "
+    "Unset TECHNITIUM_TOKEN in the platform checkout's .env and recreate its app "
+    "container (its TECHNITIUM_USER/TECHNITIUM_PASSWORD path logs in and refreshes the "
+    "session every 25 minutes). Measured: with the token unset, records read 200."
+)
+
+
+def unusable_dns_session(payload: object) -> str | None:
+    """Is this 500 the one that a retry cannot clear? Pure, so it can be asserted.
+
+    Worth special-casing because Cerulean's own message ends in "— retry", which is
+    exactly wrong here: retrying is what an operator does first, and it fails every
+    time. The cost of the wrong instruction is the afternoon it takes to work out that
+    the platform is not flaky, it is misconfigured.
+    """
+    text = payload if isinstance(payload, str) else json.dumps(payload, default=str)
+    if TECHNITIUM_SESSION_ERROR in text:
+        return TECHNITIUM_SESSION_HINT
+    return None
+
+
 def find_zone(api: Api, zone: str) -> dict:
     status, domains = api.call("/api/domains")
     if status != 200 or not isinstance(domains, list):
@@ -345,6 +373,9 @@ def ensure_record(
     """
     status, payload = api.call(f"/api/domains/{zone_id}/records")
     if status != 200:
+        hint = unusable_dns_session(payload)
+        if hint:
+            sys.exit(f"Could not read zone records (HTTP {status}): {hint}")
         sys.exit(f"Could not read zone records (HTTP {status}): {payload}")
     records = payload.get("records", payload) if isinstance(payload, dict) else payload
     if not isinstance(records, list):
