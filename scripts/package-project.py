@@ -98,11 +98,50 @@ BASE_IMAGES: dict[str, str] = {
 # against. That is the trade this makes deliberately — a slower build over a project
 # the platform cannot deliver.
 #
-# Other languages are absent because nothing has needed them yet, not because they
-# cannot: a python plan with a C extension wants `build-base`, and that is a line
-# here.
+# Each entry is the *half that is missing*. Every base image above is the official
+# one and ships its own interpreter's headers — `Python.h` under
+# /usr/local/include/python3.13, `ruby.h` from RbConfig, `phpize` in
+# /usr/local/bin — so a distro `python3-dev` would be the *other* interpreter's
+# headers, and `php-dev` is not a package that exists. What none of them carries is a
+# C toolchain, and that is all these add. Verified per image: `apk add` succeeds and
+# the headers are present in python:3.13-alpine, ruby:3.4-alpine and
+# php:8.4-cli-alpine, and build-base resolves on golang:1.24-alpine for cgo.
+#
+# php names `$PHPIZE_DEPS` — the list that image exports for exactly this — rather
+# than a copy of its contents, which drifts with the PHP release.
+#
+# `static` is not here and does not need to be: nginx serves files, so a plan with no
+# install step has nothing that could be compiled.
 BUILD_TOOLS: dict[str, tuple[str, ...]] = {
     "node": ("python3", "make", "g++"),
+    "python": ("build-base",),
+    "go": ("build-base",),
+    "php": ("$PHPIZE_DEPS",),
+    "ruby": ("build-base",),
+}
+
+# Language -> (what the runtime stage copies, where it puts it). A language listed
+# here is built in two stages, so the toolchain above lives in the build stage and the
+# published image is a fresh copy of the base plus what the build produced. A language
+# absent from it is built in one stage, toolchain and all.
+#
+# The line is drawn by **where `install` puts its output**, and it is not a
+# preference. Splitting only works when the install lands inside the project: node's
+# `npm install` writes `node_modules` into the workdir, so the workdir *is* the
+# result. `pip install` writes to site-packages and `bundle install` into the ruby
+# installation, both outside the workdir — a runtime stage copied from the build stage
+# would be missing everything the install produced, and the app would start and then
+# fail on its first route. Those stay single-stage, where the toolchain is the price
+# of the install landing somewhere the plan never names.
+#
+# The other half of the trade, and the reason this is not extended casually: a
+# dependency *compiled* from source links against a runtime library the toolchain
+# brought in. Node is safe because the base image already links libstdc++ itself.
+# Before adding a language here, check that its base image carries what a compiled
+# dependency would link against — otherwise the build succeeds and the container dies
+# on first use of that module.
+RUNTIME_FROM_BUILD: dict[str, tuple[str, str]] = {
+    "node": ("/app", "/app"),
 }
 
 # What a plan may call a language and still mean one of the above. A planner
@@ -451,21 +490,36 @@ def dockerfile_for(plan: dict) -> str:
             + "\n"
         )
 
-    lines = header + [
-        f"FROM {base}",
-        "WORKDIR /app",
-        "",
-        "# Given to the project rather than assumed by it. PORT and HOST are what make a",
-        "# server reachable from outside its container; DATA_DIR is where anything worth",
-        "# keeping survives the next rebuild (it is the one mounted volume).",
+    # Only where something is installed. A plan with no install resolves no tree, so
+    # there is nothing that could need compiling, and a toolchain would be weight the
+    # image never uses.
+    tools = BUILD_TOOLS.get(language, ()) if plan["install"] else ()
+
+    # Staging exists to keep the toolchain out of the published image, so a language
+    # with no toolchain to hide stays in one stage rather than paying for a copy of its
+    # own workdir.
+    staged = bool(tools) and language in RUNTIME_FROM_BUILD
+
+    # Written into both stages when the build is split: `ENV` does not carry across a
+    # `FROM`, and a runtime stage without it would run the app on a port nothing
+    # published and write its database inside the image.
+    environment = [
         f"ENV PORT={port} \\",
         "    HOST=0.0.0.0 \\",
         "    DATA_DIR=/data",
     ]
 
+    lines = header + [
+        f"FROM {base} AS build" if staged else f"FROM {base}",
+        "WORKDIR /app",
+        "",
+        "# Given to the project rather than assumed by it. PORT and HOST are what make a",
+        "# server reachable from outside its container; DATA_DIR is where anything worth",
+        "# keeping survives the next rebuild (it is the one mounted volume).",
+    ] + environment
+
     # Ahead of the source on purpose: a change to the project must not invalidate
     # this layer and pay for the toolchain again on every build.
-    tools = BUILD_TOOLS.get(language, ())
     if tools:
         lines += [
             "",
@@ -481,6 +535,21 @@ def dockerfile_for(plan: dict) -> str:
 
     if plan["build"]:
         lines += ["", f"RUN {plan['build']}"]
+
+    if staged:
+        source, destination = RUNTIME_FROM_BUILD[language]
+        lines += [
+            "",
+            "# The published image: a fresh copy of the base plus what the build produced,",
+            "# so the toolchain stays in the stage that needed it and never reaches a",
+            "# running container. Everything above is build-time only.",
+            f"FROM {base}",
+            "WORKDIR /app",
+            "",
+            "# Written again, not inherited: `ENV` does not carry across a `FROM`.",
+        ] + environment + [
+            f"COPY --from=build {source} {destination}",
+        ]
 
     lines += [
         "",

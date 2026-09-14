@@ -213,30 +213,81 @@ class Dockerfile(unittest.TestCase):
         text = self.dockerfile_for(run={"install": "", "build": ""})
         self.assertNotIn("RUN ", text)
 
-    def test_a_node_image_carries_the_compiler_its_install_may_need(self):
-        # Lockfiles are ignored, so the tree comes from the manifest the model wrote,
-        # and that manifest may name something with no prebuilt binary for musl.
-        # node-gyp's own failure is about a missing Python, which reads like a Python
-        # problem and is really a base image with no compiler in it.
-        text = self.dockerfile_for(
-            runtime={"language": "node"},
-            run={
-                "install": "npm install",
-                "build": "npm run build",
-                "start": "node server/index.js",
-            },
-        )
-        self.assertIn("RUN apk add --no-cache python3 make g++", text)
+    def test_every_language_that_installs_something_can_compile_it(self):
+        # Lockfiles are ignored, so each tree comes from the manifest the model wrote,
+        # and a manifest may name something with no prebuilt binary for musl: a node
+        # module, a C extension, a cgo import, a native gem. The base images are the
+        # official ones — they carry their interpreter's own headers and no compiler,
+        # which is the half these add. Verified against each image.
+        for language, packages in (
+            ("node", "python3 make g++"),
+            ("python", "build-base"),
+            ("go", "build-base"),
+            ("php", "$PHPIZE_DEPS"),
+            ("ruby", "build-base"),
+        ):
+            with self.subTest(language=language):
+                text = self.dockerfile_for(runtime={"language": language})
+                self.assertIn(f"RUN apk add --no-cache {packages}", text)
 
     def test_the_toolchain_lands_before_the_source_so_it_stays_cached(self):
         # After `COPY . .` every source change would invalidate it, and each build
         # would pay for the toolchain again.
-        text = self.dockerfile_for(runtime={"language": "node"})
+        text = self.dockerfile_for(
+            runtime={"language": "node"},
+            run={"install": "npm install", "start": "node server/index.js"},
+        )
         self.assertLess(text.index("apk add"), text.index("COPY . ."))
-        self.assertLess(text.index("apk add"), text.index("RUN pip install"))
+        self.assertLess(text.index("apk add"), text.index("RUN npm install"))
 
-    def test_a_language_with_no_toolchain_pays_nothing(self):
-        self.assertNotIn("apk add", self.dockerfile_for())
+    def test_a_static_site_has_nothing_to_compile_so_gets_no_toolchain(self):
+        text = self.dockerfile_for(
+            runtime={"language": "static"},
+            run={"install": "", "build": "", "start": "nginx -g 'daemon off;'"},
+        )
+        self.assertNotIn("apk add", text)
+
+    def split(self, text):
+        """The text before the runtime stage, and the runtime stage itself."""
+        build_stage, _, runtime_stage = text.partition("\nFROM node:24-alpine\n")
+        self.assertNotEqual(runtime_stage, "", "this build was not split into two stages")
+        return build_stage, runtime_stage
+
+    def test_a_node_build_splits_so_the_toolchain_never_reaches_the_runtime(self):
+        # `npm install` writes `node_modules` into the workdir, so the workdir is the
+        # result and the runtime stage can be a fresh base image plus a copy of it.
+        text = self.dockerfile_for(
+            runtime={"language": "node"},
+            run={"install": "npm install", "start": "node server/index.js"},
+        )
+        self.assertEqual(text.count("FROM "), 2)
+
+        build_stage, runtime_stage = self.split(text)
+        self.assertIn("apk add", build_stage)
+        self.assertNotIn("apk add", runtime_stage)
+        self.assertIn("COPY --from=build /app /app", runtime_stage)
+
+    def test_a_language_whose_install_lands_outside_the_project_is_not_split(self):
+        # `pip install` writes to site-packages, not into the workdir, so a runtime
+        # stage copied from the build stage would be missing everything the install
+        # produced — the app would start and fail on its first route. One stage, and
+        # the toolchain is the price of that.
+        text = self.dockerfile_for()
+        self.assertEqual(text.count("FROM "), 1)
+        self.assertIn("apk add", text)
+
+    def test_the_runtime_stage_names_the_port_and_the_start_command_again(self):
+        # `ENV` does not carry across a `FROM`. Losing it would run the app on the
+        # port the image defaults to, which nothing publishes.
+        text = self.dockerfile_for(
+            runtime={"language": "node"},
+            run={"install": "npm install", "start": "node server/index.js", "port": 3200},
+        )
+        _, runtime_stage = self.split(text)
+        self.assertIn("ENV PORT=3200", runtime_stage)
+        self.assertIn("EXPOSE 3200", runtime_stage)
+        self.assertIn('CMD ["node", "server/index.js"]', runtime_stage)
+        self.assertIn("HEALTHCHECK", runtime_stage)
 
     def test_gives_the_project_port_host_and_data_dir(self):
         text = self.dockerfile_for(run={"port": 8100})

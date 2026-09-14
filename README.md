@@ -199,12 +199,12 @@ and the files it will contain, and writes `plan.json` into the app directory. Th
 things read that file and must agree on it: the agent is told the plan and builds to it,
 `scripts/package-project.py` writes the Dockerfile from it, and `scripts/app-runtime.py`
 runs the container on its port. The image that Dockerfile builds is the base image for
-the plan's language plus, for node, a compiler — the tree is resolved from the project's
-own manifest, never from a `package-lock.json`, because this script does not write one
-and `npm install` trusts one completely; a manifest may name something with no prebuilt
-binary for musl, and without a compiler that is an image that cannot be built rather than
-a slow one. A planning turn that produces no usable plan stops the
-run, because the alternative is minutes of agent time against a stack nobody chose —
+the plan's language plus a C toolchain, added only where the plan installs something —
+the tree is resolved from the project's own manifest, never from a `package-lock.json`,
+because this script does not write one and `npm install` trusts one completely; a
+manifest may name something with no prebuilt binary for musl, and without a compiler
+that is an image that cannot be built rather than a slow one. A planning turn that
+produces no usable plan stops the run, because the alternative is minutes of agent time against a stack nobody chose —
 which is what used to happen: the prompt said "match the spec's tech stack" while the
 packager demanded a fixed React + Node/SQLite scaffold, so a spec that asked for anything
 else was built to neither and failed at packaging. By hand:
