@@ -126,7 +126,27 @@ docker compose up -d studio
 make docker-studio-up
 ```
 
-### 4. Delivering a build: a name, a container, or a zip
+### 4. The terminal UI — the same builder, in a shell
+
+The builder has two front ends and only one of them had a UI. This is the other: one
+window that queues a build and streams the status, the steps and the log that were
+previously spread across `make app`, `make build-runner-list` and `tail`.
+
+```bash
+make tui                                                  # interactive
+make tui ARGS="--list"                                    # queued, running, finished
+make tui ARGS="--once 'a weight tracker with a weekly chart'"
+```
+
+It is a front end to the *same* builder, not a second one. The instruction becomes a
+spec in `build-requests/`, and the runner builds it down the identical path `make app`
+and the browser's Build It use — this adds a view, and no second implementation of a
+plan or a generation prompt, which is the drift `scripts/project_plan.py` exists to
+prevent. It does not plan, it does not generate: it queues and it watches. Inside it,
+`/preview <slug>` and `/publish <slug>` queue a delivery for an app already in
+`builds/<slug>/`, carrying that app's source the way the browser does, and follow it.
+
+### 5. Delivering a build: a name, a container, or a zip
 
 Studio's two kinds leave by different doors, and the difference is whether the
 thing has state.
@@ -318,6 +338,7 @@ source checkout of the factory — not in this distribution repo.
 | Document | What it covers |
 | --- | --- |
 | [web/studio/README.md](web/studio/README.md) | Studio — the vibe-coding web UI: how to run it, configuration, output contract, security posture |
+| `scripts/olympus-tui.py` | The builder's terminal front end (`make tui`) — what it reads, the keys, and why it queues rather than planning or generating |
 | [docs/stack.md](docs/stack.md) | This platform's role in the [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) (FactoryOps), including SecretOps via Cerulean Vault (KV v2) and the `vault://` reference convention |
 | [docs/gateway-sso.md](docs/gateway-sso.md) | Putting the OmniRoute dashboard behind Cerulean Authentik — why the gateway cannot do it natively, and the proxy that does |
 | [docs/site-publishing.md](docs/site-publishing.md) | Studio's two kinds of build — an **app** (React + API + SQLite, one container per app) and a **website** (Vite + React, static) — the `app-package`/`app-up`/`app-publish` and `site-package`/`sites-up`/`site-publish` pipelines, how a name reaches a container, and the ONYX (storage/NAS/app-hosting) integration points |
