@@ -475,6 +475,12 @@ def ensure_proxy_host(
     `repoint` exists because a published site's backend moves — a rebuilt app gets
     a new port — while the gateway's name must never be repointed silently. The
     site publisher opts in; the gateway path does not.
+
+    NOTE ON `advanced_config`: this path cannot carry it. Cerulean's NPM passthrough
+    accepts the field and drops it — measured: a PUT through /api/npm/hosts returned
+    200 and updated `modified_on`, and NPM still reported `advanced_config: ""`. A
+    rule that has to land on the edge is written by scripts/npm_api.py, which speaks
+    to NPM directly; see `make gateway-edge` and closed_paths_config there.
     """
     hosts = list_proxy_hosts(api)
     existing = find_proxy_host(hosts, fqdn)

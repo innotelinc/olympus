@@ -68,6 +68,13 @@ from cerulean_api import (  # noqa: E402 - the path insert above is what makes t
     zone_relative,
 )
 
+# The deny rule is written by NPM's own API, not through Cerulean: Cerulean's NPM
+# passthrough accepts `advanced_config` and drops it (measured — a 200 that updated
+# `modified_on`, with the field still empty on read-back from both sides).
+# scripts/npm_api.py carries the measurement and the full-body rule that makes the
+# PUT safe.
+from npm_api import NpmApi, closed_paths_config  # noqa: E402 - same path insert
+
 # Kept as module-level names because they were before the split and callers
 # (including scripts/tests/test_cerulean_edge.py) reach for them here.
 __all__ = [
@@ -76,6 +83,7 @@ __all__ = [
     "DEFAULT_RENEW_DAYS",
     "TEMPLATE_PLACEHOLDERS",
     "certificate_covers",
+    "closed_paths_config",
     "ensure_certificate",
     "ensure_proxy_host",
     "ensure_record",
@@ -86,6 +94,7 @@ __all__ = [
     "load_env_file",
     "parse_expiry",
     "record_value",
+    "refused_paths",
     "select_certificate",
     "select_record",
     "setting",
@@ -96,6 +105,35 @@ __all__ = [
 # private here and are asserted by the tests.
 _relative = zone_relative
 _looks_like_host = looks_like_host
+
+
+def deny_paths(env_path: Path, fqdn: str, paths: list[str], insecure: bool, dry_run: bool) -> str:
+    """Refuse `paths` on the public name, by writing NPM's own host config.
+
+    `None` from `closed_paths_config` means every path asked for was "/" — nothing to
+    write, and saying so is better than an empty PUT.
+    """
+    snippet = closed_paths_config(paths)
+    if not snippet:
+        return "nothing to refuse — every path given was \"/\" (that is `sites-down`)"
+
+    env = load_env_file(env_path)
+    base = env.get("NPM_BASE_URL", "")
+    identity = env.get("NPM_EMAIL", "")
+    secret = env.get("NPM_PASSWORD", "")
+    if not all((base, identity, secret)):
+        sys.exit(
+            "--deny-path needs NPM_BASE_URL, NPM_EMAIL and NPM_PASSWORD in "
+            f"{env_path}: the rule is written straight to the edge, because Cerulean's "
+            "NPM passthrough drops advanced_config (measured; see scripts/npm_api.py)."
+        )
+
+    api = NpmApi(base, identity, secret, insecure)
+    api.login()
+    host = api.proxy_host(fqdn)
+    if host is None:
+        sys.exit(f"NPM has no proxy host for {fqdn}, so there is nothing to apply the rule to.")
+    return api.set_advanced_config(host, snippet, dry_run)
 
 
 def main() -> int:
@@ -110,6 +148,13 @@ def main() -> int:
     parser.add_argument("--renew-days", type=int, default=DEFAULT_RENEW_DAYS, help="reuse a certificate only if it lasts this long")
     parser.add_argument("--cert-wait", type=int, default=DEFAULT_CERT_WAIT_SECONDS, help="seconds to wait for issuance")
     parser.add_argument("--insecure", action="store_true", help="skip TLS verification on the Cerulean API")
+    parser.add_argument(
+        "--deny-path",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="refuse PATH on this public name at the edge (repeatable). See closed_paths_config",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--env-file", default="")
     args = parser.parse_args()
@@ -171,6 +216,12 @@ def main() -> int:
     print(f"\n2. Certificate\n   {report}")
 
     print(f"\n3. Edge\n   {ensure_proxy_host(api, fqdn, forward_host, forward_port, cert_id, args.dry_run)}")
+
+    # Step 4, separately and through NPM, because step 3 cannot carry it — see the
+    # import comment above. Only when asked: passing nothing leaves the host's config
+    # exactly as it is, which is what a site publish wants.
+    if args.deny_path:
+        print(f"\n4. Path refusal\n   {deny_paths(env_path, fqdn, args.deny_path, args.insecure, args.dry_run)}")
 
     if args.dry_run:
         print("\ndry run — nothing was written")

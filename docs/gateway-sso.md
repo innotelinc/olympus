@@ -149,9 +149,20 @@ sorts callers by what they are:
 
 | Path | Who gets in | Why |
 | --- | --- | --- |
-| `/v1/*` | anyone with a valid `Authorization: Bearer $OMNIROUTE_API_KEY` | inference is already key-authenticated. An interactive OIDC login in front of it would not add a check, it would break every client: Codex and the CLIs send a key, not a session cookie |
+| `/v1/*` | anyone who can reach `192.168.1.10:20129` — **no key is checked** (see below) | inference clients send `Authorization: Bearer …`, not a session cookie, so an interactive OIDC login here would break every one of them rather than add a check. The door is the LAN address, and **the public name refuses this path at the edge** |
 | `/healthz` | anyone | liveness, 200 with no body and no secrets |
 | everything else, including `/dashboard` and `/api/providers` | an Authentik session in `cerulean-platform` | this is the surface that reads and writes provider credentials |
+
+> **`/v1` is not key-authenticated on this gateway — measured.** No key, a bogus key and
+> the real `OMNIROUTE_API_KEY` all answer `200`, and an unauthenticated
+> `POST /v1/chat/completions` returns a completion. `make gateway-auth-mode` sets
+> `requireLogin=false` (its own docstring: the loopback binding is then the entire
+> control) and this OmniRoute build validates nothing on `/v1`. That was harmless while
+> the gateway was loopback-only; combined with the exemption above it meant the public
+> name published the provider credentials behind it. The public name now refuses `/v1`
+> at the edge — `make gateway-edge --deny-path /v1`, asserted by
+> `make gateway-edge-check` — and the LAN address above is how a client on another
+> machine reaches inference. Treat the key as a label, not a gate.
 
 `--skip-auth-route` is what draws that line. `/api/auth/login` is deliberately
 **not** on it: that is the dashboard's own password login, and exempting it would
@@ -163,15 +174,16 @@ So "reachable on the LAN" and "the dashboard is not exposed" are both true, and
 neither is achieved by changing the gateway's binding:
 
 ```bash
-# from any machine on the LAN, inference with the key from .env
+# from any machine on the LAN — the address, not the name
 curl -H "Authorization: Bearer $OMNIROUTE_API_KEY" http://192.168.1.10:20129/v1/models
-
-# or by the published name (DNS + TLS via Cerulean)
-OMNIROUTE_BASE_URL=https://gateway.olympus.innotel.us/v1
+OMNIROUTE_BASE_URL=http://192.168.1.10:20129/v1
 ```
 
-A client on another machine points `OMNIROUTE_BASE_URL` at either of those and
-uses the same key; nothing else about its setup changes.
+**Not the published name.** `https://gateway.olympus.innotel.us/v1/*` answers `403` by
+edge rule: that name exists to reach the dashboard, and `/v1` there handed the internet
+an unauthenticated inference API. A client on another machine points
+`OMNIROUTE_BASE_URL` at the LAN address; nothing else about its setup changes. It can
+send the key — the key is not what is being checked.
 
 ## What was verified, and what was not
 
@@ -186,8 +198,10 @@ Verified against the live deployment:
 | Authentik accepts the client | `/authorize` answers `302` to the login flow — not `invalid_client` / unregistered `redirect_uri` |
 | `make gateway-sso-check` | ok — live on `127.0.0.1:20129`, `/` redirects to Authentik as client `omniroute` |
 | Proxy on the LAN | `/ping` → `200` from `192.168.1.10:20129` as well as loopback |
-| LAN inference | `http://192.168.1.10:20129/v1/models` → `200` with the API key, `401` without it |
-| LAN inference by name | `https://gateway.olympus.innotel.us/v1/models` → `200` with the key, `401` without |
+| LAN inference | `http://192.168.1.10:20129/v1/models` → `200`, with or without the API key — the key is not validated (below) |
+| Public inference | `https://gateway.olympus.innotel.us/v1/models` and `/v1/chat/completions` → `403`, refused at the edge; `/v1` (bare) → `403` too |
+| The edge rule was actually written | NPM host #198 `advanced_config` reads back the two `location` lines — read back, because Cerulean's NPM passthrough accepts `advanced_config` and drops it (200, `modified_on` updated, field still empty) |
+| The key is not a gate | `POST /v1/chat/completions` with no `Authorization` at all → `200` and a completion, on the LAN path |
 | LAN dashboard | `/dashboard`, `/login`, `/api/providers`, `/` all → `302` to Authentik from `192.168.1.10:20129` |
 | Gateway stays private | `http://192.168.1.10:20128/healthz` → no connection |
 | One OmniRoute only | one container, one listener on `20128`; the `olympus` container no longer publishes that port and no longer starts a bundled gateway |

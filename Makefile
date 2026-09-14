@@ -227,9 +227,23 @@ gateway-auth-mode: ## Make Cerulean Authentik the only gate at the gateway (ARGS
 # the NPM proxy host that forwards to the proxy rather than to the gateway.
 # Idempotent, and it refuses to repoint a name that already answers somewhere
 # else. Needs CERULEAN_* in .env; see docs/gateway-sso.md.
+#
+# --deny-path /v1 is not optional decoration. This name exists for the dashboard,
+# and the proxy behind it deliberately exempts `/v1` because inference clients send
+# a bearer key rather than a session cookie. Measured on this deployment, that key
+# was never being checked (no key, a bogus key and the real key all answered 200,
+# and an unauthenticated POST /v1/chat/completions on the public name returned a
+# completion), because `make gateway-auth-mode` leaves the gateway with no gate of
+# its own — its docstring says the loopback binding is then the entire control. The
+# exemption plus no key check meant the public name handed out the provider
+# credentials behind it. `/v1` stays open on the LAN, which is what the proxy's
+# 0.0.0.0 listener and docs/gateway-sso.md's "another machine" path are for; the
+# public name stops carrying it. It is written straight to NPM by
+# scripts/npm_api.py, because Cerulean's NPM passthrough accepts this field and
+# drops it (measured); scripts/gateway-edge-check.py asserts both halves.
 gateway-edge: ## Publish the gateway's public name through Cerulean + the NPM edge (ARGS="--dry-run")
 	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi
-	python3 scripts/cerulean-edge.py $(ARGS)
+	python3 scripts/cerulean-edge.py --deny-path /v1 $(ARGS)
 
 # Asserts the two things that distinguish "wired up" from "running": the proxy
 # answers liveness, and an unauthenticated request is handed to Authentik with
