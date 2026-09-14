@@ -259,6 +259,41 @@ class ImageTaggingTests(unittest.TestCase):
         self.assertEqual(pkg.image_tag("weight-tracker"), "olympus-app-weight-tracker:latest")
 
 
+class LockfileTests(Fixture):
+    """`npm ci` only runs against a lockfile that belongs to this project.
+
+    npm trusts a lockfile completely: it refuses when the lock and the manifest
+    disagree, and when they agree it installs the locked tree whether or not that tree
+    is complete. So a lockfile the scaffold did not write is either a stop or a quiet
+    partial install in the image, and the packager has to be able to tell.
+    """
+
+    def write_lock(self, root: dict) -> None:
+        (self.app / "package-lock.json").write_text(
+            json.dumps({"lockfileVersion": 3, "packages": {"": root}}), encoding="utf-8"
+        )
+
+    def test_a_lockfile_npm_built_from_this_manifest_is_ours(self) -> None:
+        ours = json.loads(pkg.PACKAGE_JSON)
+        self.write_lock({field: ours.get(field) for field in pkg.ROOT_PACKAGE_FIELDS})
+        self.assertTrue(pkg.lockfile_is_ours(self.app))
+
+    def test_a_lockfile_for_a_different_dependency_set_is_not_ours(self) -> None:
+        ours = json.loads(pkg.PACKAGE_JSON)
+        root = {field: ours.get(field) for field in pkg.ROOT_PACKAGE_FIELDS}
+        root["dependencies"] = {"better-sqlite3": "13.0.3"}
+        self.write_lock(root)
+        self.assertFalse(pkg.lockfile_is_ours(self.app))
+
+    def test_a_missing_or_unreadable_lockfile_is_not_ours(self) -> None:
+        self.assertFalse(pkg.lockfile_is_ours(self.app))
+
+        for contents in ("{not json", "[]", '{"packages": {}}'):
+            with self.subTest(contents=contents):
+                (self.app / "package-lock.json").write_text(contents, encoding="utf-8")
+                self.assertFalse(pkg.lockfile_is_ours(self.app))
+
+
 class OutputTests(unittest.TestCase):
     """The scaffold has to be valid text for the tools that read it."""
 
@@ -272,6 +307,16 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(pkg.DOCKERFILE.count("FROM "), 2)
         self.assertIn("RUN npm ci", pkg.DOCKERFILE)
         self.assertIn("HEALTHCHECK", pkg.DOCKERFILE)
+
+    def test_only_the_build_stage_carries_a_toolchain(self) -> None:
+        # `npm ci` installs the locked tree whether or not it is complete, so a
+        # dependency with no prebuilt binary for musl has to compile — and the base
+        # image has no compiler. The runtime stage is a fresh image, so the published
+        # app keeps none of it; that is the whole reason the build is two stages.
+        _, _, after_header = pkg.DOCKERFILE.partition("\nFROM ")
+        build_stage, _, runtime_stage = after_header.partition("\nFROM ")
+        self.assertIn("apk add", build_stage)
+        self.assertNotIn("apk add", runtime_stage)
 
 
 if __name__ == "__main__":
