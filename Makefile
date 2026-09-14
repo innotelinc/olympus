@@ -390,8 +390,14 @@ docker-studio: ## Build the Studio image (ghcr.io/innotelinc/olympus-studio:loca
 # says so. That is how this deployment broke once. Studio belongs in the same
 # host-networked group as `olympus` and the SSO proxy whenever the gateway is
 # published on loopback; see the header of compose.host-gateway.yml.
+#
+# --force-recreate is what makes the "restart" half of the promise true. Compose
+# recreates a container only when its config or image changed, and a rebuild that
+# was a full cache hit produces a byte-identical image — so `up -d --build` alone
+# answers `Running` and the process, sessions included, is exactly as it was. A
+# deploy command that sometimes deploys is worse than one that always does.
 docker-studio-up: ## Rebuild + restart Studio with host networking (the gateway is loopback-published)
-	docker compose -f docker-compose.yml -f compose.host-gateway.yml up -d --build studio
+	docker compose -f docker-compose.yml -f compose.host-gateway.yml up -d --build --force-recreate studio
 	@echo "--- reachability (Studio -> gateway) ---"; \
 	docker exec olympus-studio node -e 'fetch(process.env.OMNIROUTE_BASE_URL.replace(/\/v1$$/,"")+"/healthz",{signal:AbortSignal.timeout(8000)}).then(r=>{console.log("gateway",r.status);process.exit(r.ok?0:1)}).catch(e=>{console.error("gateway unreachable:",e.cause?.code||e.name);process.exit(1)})'
 
