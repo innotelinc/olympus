@@ -5,7 +5,6 @@ import {
   readConfig,
 } from "@/lib/omniroute";
 import { PlanError, planMessages, parsePlan } from "@/lib/plan";
-import { parseKind } from "@/lib/projects";
 import { authorizeRequest, identityKey } from "@/lib/auth";
 import { checkRateLimit } from "@/lib/ratelimit";
 
@@ -99,7 +98,10 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  const kind = parseKind(body.kind);
+  // `body.kind` is deliberately ignored. The planner decides what this is and says
+  // so in the plan; a client that still sends one is sending an answer from a
+  // question that is no longer asked, and honouring it is how the plan and its kind
+  // come to disagree.
   const priorFiles = readPriorFiles(body.files);
 
   const requestedModel = typeof body.model === "string" ? body.model.trim().slice(0, 200) : "";
@@ -112,7 +114,7 @@ export async function POST(request: Request): Promise<Response> {
   try {
     reply = await completeChat(config, {
       model: chosen.model,
-      messages: planMessages(prompt, kind, priorFiles),
+      messages: planMessages(prompt, priorFiles),
       signal: request.signal,
       // A plan is a small object. The cap keeps a chatty model from spending a
       // generation's worth of tokens on it, and is generous enough that a long
@@ -130,7 +132,7 @@ export async function POST(request: Request): Promise<Response> {
 
   let plan;
   try {
-    plan = parsePlan(reply, kind);
+    plan = parsePlan(reply);
   } catch (error) {
     // A malformed plan is a real failure with a real next step for the user
     // ("try rephrasing"), so the message is the planner's own, not a generic 500.

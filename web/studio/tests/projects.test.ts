@@ -327,15 +327,37 @@ describe("the plan a project is built to", () => {
     expect(readProject(NAMESPACE, project.id)?.plan).toBeNull();
   });
 
-  it("cannot change what kind of thing the project is", () => {
+  it("takes its kind from the plan, which is what the project was built to", () => {
+    // The plan is the planner's answer to "what is this" — it read the request. A
+    // `kind` alongside it is a leftover from a client that used to choose, so the
+    // plan wins rather than the two disagreeing in opposite directions.
     const { project } = saveProject(NAMESPACE, {
       title: "Site",
-      kind: "website",
+      kind: "app",
       files: html("x"),
-      plan: { ...PLAN, kind: "app" },
+      plan: { ...PLAN, kind: "website" },
     });
 
     expect(project.kind).toBe("website");
     expect(project.plan?.kind).toBe("website");
+  });
+
+  it("keeps the kind it already had when a revision arrives without a plan", () => {
+    // Projects saved before the planner existed have no plan, and a revision of one
+    // must not relabel it "app" by default.
+    const { project } = saveProject(NAMESPACE, {
+      title: "Old site",
+      kind: "website",
+      files: html("x"),
+    });
+
+    const { project: revised } = saveProject(NAMESPACE, {
+      id: project.id,
+      title: "Old site",
+      files: html("y"),
+    });
+
+    expect(revised.kind).toBe("website");
+    expect(revised.plan).toBeNull();
   });
 });

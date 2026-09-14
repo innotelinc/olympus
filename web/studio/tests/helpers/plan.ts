@@ -8,16 +8,14 @@ import { parsePlanObject, type BuildPlan } from "@/lib/plan";
  * something else — auth, rate limiting, streaming, header handling — still have to
  * get past that gate, so they send this one.
  */
-export const TEST_PLAN: BuildPlan = parsePlanObject(
-  {
-    name: "Test App",
-    summary: "A plan the route tests use to reach the generation turn.",
-    runtime: { language: "node", frameworks: ["react"], database: "sqlite" },
-    run: { install: "npm install", build: "npm run build", start: "npm start", port: 3000 },
-    files: [{ path: "package.json", purpose: "Dependencies and scripts" }],
-  },
-  "app",
-);
+export const TEST_PLAN: BuildPlan = parsePlanObject({
+  name: "Test App",
+  kind: "app",
+  summary: "A plan the route tests use to reach the generation turn.",
+  runtime: { language: "node", frameworks: ["react"], database: "sqlite" },
+  run: { install: "npm install", build: "npm run build", start: "npm start", port: 3000 },
+  files: [{ path: "package.json", purpose: "Dependencies and scripts" }],
+});
 
 /**
  * A generate-route body with a plan merged in.

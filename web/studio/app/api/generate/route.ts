@@ -97,16 +97,18 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const priorFiles = readPriorFiles(body.files);
-  // What is being built decides the plan's framing. An unknown or absent value is
-  // an app, which is what every caller before the split meant.
-  const kind = parseKind(body.kind);
 
   // The plan is required, and it is re-validated rather than trusted: it has been
   // to the browser and back. Refusing a missing plan keeps one contract instead of
   // two — a request without one would fall back to a stack the user never saw.
+  //
+  // The kind comes from the plan, not from the request: the planner decided what
+  // this is when it read the request, and the plan is the only thing that went to
+  // the browser and back. A `body.kind` from an older client is ignored rather than
+  // allowed to relabel a plan it does not match.
   let plan;
   try {
-    plan = parsePlanObject(body.plan, kind);
+    plan = parsePlanObject(body.plan);
   } catch (error) {
     return fail(
       error instanceof PlanError

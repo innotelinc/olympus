@@ -24,32 +24,6 @@ const EXAMPLES = [
   "A habit tracker with one row per habit and a tick for each day of the week.",
 ];
 
-/**
- * What each kind actually produces, said as the difference rather than as a name.
- *
- * The two are not variations of one thing. An app keeps state: it has a database and
- * an API, so what someone enters today is there tomorrow. A website is static —
- * there is nowhere for an entry to be written down, and a form on one is decoration.
- * An operator picking for the first time has no way to know that from the labels
- * alone, and picking wrong costs a whole generation.
- */
-const KIND_HELP: Record<ProjectKind, string> = {
-  app: "An application runs on a server and keeps state: what someone enters today is there tomorrow, from another device. It gets its own container and its own name.",
-  website: "A website is static content served over HTTP — pages, styling, images. There is nowhere for an entry to be written down, so a form on one is decoration.",
-};
-
-/**
- * How each kind is described in the picker.
- *
- * These used to name a stack ("React + Vite"), which stopped being true the moment
- * the stack became something the planner proposes from the request. What is left is
- * the difference that matters before a word has been typed: does it keep state.
- */
-const KIND_LABEL: Record<ProjectKind, string> = {
-  app: "server + data",
-  website: "static site",
-};
-
 const STORAGE_KEY = "studio.token";
 // `localStorage`, unlike the token: which model builds your apps is a preference
 // that should outlive a tab, and it is not a secret.
@@ -220,6 +194,22 @@ const PHASE_LABEL: Record<BuildPhase, string> = {
   finalizing: "Finishing files",
 };
 
+/**
+ * One line under each step, saying what waiting there actually means.
+ *
+ * The labels alone are three words each, and the two that look alike — the model is
+ * thinking, then it is writing — are the difference between a request that is
+ * working and one that is being thought about for a long time. Saying what is
+ * happening, and what would appear if it were happening, is what makes a slow step
+ * legible as slow rather than stuck.
+ */
+const PHASE_DETAIL: Record<BuildPhase, string> = {
+  connecting: "The request is on its way to the gateway.",
+  thinking: "The stack is being decided. Nothing is written yet, so an empty tree here is normal.",
+  writing: "Files are arriving one at a time, in full — this is the part that takes the longest.",
+  finalizing: "The last file is being closed and the stream is ending.",
+};
+
 const PHASE_ORDER: BuildPhase[] = ["connecting", "thinking", "writing", "finalizing"];
 
 export default function Studio({
@@ -239,9 +229,11 @@ export default function Studio({
   // thing on this screen that is worth looking at, and the build output on the right
   // says where they got to.
   const [tab, setTab] = useState<Tab>("code");
-  // What is being built. It decides the system prompt AND the delivery path, so it
-  // is part of the build, not a display option — it is sent with every turn and
-  // saved with the project.
+  // What this project turns out to be — a running service, or files served
+  // statically. Not a setting and not sent anywhere: the planner reads the request
+  // and answers, it arrives with the plan, and a project opened from the library
+  // brings its own. Held in state because the delivery wording reads it, and for
+  // the first turn it is not knowable yet.
   const [kind, setKind] = useState<ProjectKind>("app");
   const [turns, setTurns] = useState(0);
   const [token, setToken] = useState("");
@@ -332,13 +324,9 @@ export default function Studio({
   const tokenRef = useRef("");
   const activeAppRef = useRef<string | null>(null);
   const appTitleRef = useRef("");
-  // A mirror of `kind` for the streaming core, which reads its inputs from refs so
-  // a queued turn starts with what the previous one used rather than what the
-  // render closure captured.
-  const kindRef = useRef<ProjectKind>("app");
-  // Mirror of the model choice for the streaming core, for the same reason as
-  // kindRef: a queued turn must build with what the user picked, not with what the
-  // render closure happened to capture when the queue was filled.
+  // A mirror of the model choice for the streaming core, which reads its inputs
+  // from refs: a queued turn must build with what the user picked, not with what
+  // the render closure happened to capture when the queue was filled.
   const modelRef = useRef("");
   // The confirmed plan, and the instruction it was written for. The pair matters:
   // a plan answers one instruction, so if the prompt has been edited since it was
@@ -382,9 +370,6 @@ export default function Studio({
   useEffect(() => {
     appTitleRef.current = appTitle;
   }, [appTitle]);
-  useEffect(() => {
-    kindRef.current = kind;
-  }, [kind]);
   useEffect(() => {
     modelRef.current = model;
   }, [model]);
@@ -943,7 +928,7 @@ export default function Studio({
       setLibraryNote(
         `Downloaded ${name}.` +
           (kind === "website" && !build?.site
-            ? " This build has not been packaged yet, so the archive holds the source — run “Build & publish” to get one with dist/ inside."
+            ? " This build has not been packaged yet, so the archive holds the source — run “Build It” to get one with the built output inside."
             : ""),
       );
     } catch (thrown) {
@@ -1171,11 +1156,11 @@ export default function Studio({
         setPlan(null);
         setPlanPrompt("");
         setPlanModel("");
-        // The kind comes from the saved record, so reopening a website does not
-        // quietly turn the next instruction into an app revision.
-        const opened = payload.project.kind === "website" ? "website" : "app";
-        setKind(opened);
-        kindRef.current = opened;
+        // The kind comes from the saved record — which took it from this project's
+        // own plan — so reopening a project does not relabel what it is. An unread
+        // one is not a third kind; there are two, and "app" is what the server
+        // reports for anything stored before this field existed.
+        setKind(payload.project.kind === "website" ? "website" : "app");
         setActiveAppId(payload.project.id);
         setRaw("");
         setTurns(1);
@@ -1218,7 +1203,6 @@ export default function Studio({
     setActiveAppId(null);
     setAppTitle("");
     setKind("app");
-    kindRef.current = "app";
     setFiles([]);
     setRaw("");
     setTurns(0);
@@ -1276,7 +1260,6 @@ export default function Studio({
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             prompt: text,
-            kind: kindRef.current,
             files: filesRef.current,
             ...(modelRef.current ? { model: modelRef.current } : {}),
           }),
@@ -1291,6 +1274,10 @@ export default function Studio({
         setPlan(payload.plan);
         setPlanPrompt(text);
         setPlanModel(typeof payload.model === "string" ? payload.model : "");
+        // The planner's answer includes what it decided this is, and the delivery
+        // wording keys on it. Taken when the plan arrives rather than when it is
+        // confirmed, so the panel describes the plan on screen.
+        setKind(payload.plan.kind);
       } catch (thrown) {
         if (controller.signal.aborted) return;
         if (thrown instanceof Error && /sign in/i.test(thrown.message)) setShowSettings(true);
@@ -1327,6 +1314,7 @@ export default function Studio({
     // not cleared with the confirmation that consumed it.
     projectPlanRef.current = plan;
     setProjectPlan(plan);
+    setKind(plan.kind);
 
     busyRef.current = true;
     const controller = new AbortController();
@@ -1353,7 +1341,6 @@ export default function Studio({
           headers,
           body: JSON.stringify({
             prompt: turnPrompt,
-            kind: kindRef.current,
             files: priorFiles,
             // The confirmed plan travels with the build. The route re-reads every
             // field of it, so a plan cannot be weakened by the trip through the page.
@@ -1655,32 +1642,18 @@ export default function Studio({
 
       <div className="workspace">
         <section className="composer">
-          {/* Choosing the kind is choosing the product, not a setting: it changes
-              what gets planned, what can be previewed, and what delivery means.
-              Locked while a build is running and while a saved app is open —
-              switching either mid-flight would leave a project whose contents
-              contradict its own kind. */}
-          <div className="kind-picker" role="radiogroup" aria-label="What to build">
-            {(["app", "website"] as const).map((option) => (
-              <button
-                key={option}
-                type="button"
-                role="radio"
-                aria-checked={kind === option}
-                className={`kind-option${kind === option ? " current" : ""}`}
-                disabled={busy || libraryBusy}
-                onClick={() => {
-                  setKind(option);
-                  kindRef.current = option;
-                  if (option === "website") setTab("code");
-                }}
-              >
-                {option === "website" ? "Website" : "App"}
-                <em>{KIND_LABEL[option]}</em>
-              </button>
-            ))}
-          </div>
-          <span className="hint kind-hint">{KIND_HELP[kind]}</span>
+          {/* No kind to pick. This used to ask "app or website", which was a guess
+              dressed as a choice: the person had to name the delivery shape before
+              they had described the thing, and the planner then had to build to the
+              answer they guessed at — a résumé page planned as a server, or a
+              tracker planned as static files, with the plan contradicting its own
+              kind. The turn that reads the request decides now, and the plan on
+              screen says what it decided before anything is written. */}
+          <span className="hint kind-hint">
+            Say what you want built — a site, a tool, a service, an app. What it is
+            made of and how it runs is worked out from your description, and you
+            confirm it before a file is written.
+          </span>
 
           <div className="field">
             <label htmlFor="prompt">What should it build?</label>
@@ -2117,8 +2090,7 @@ export default function Studio({
                   says it was built into something servable. */}
               {build?.site ? (
                 <p className="hint">
-                  packaged: {build.site.distFiles ?? 0}{" "}
-                  {kind === "app" ? "client" : "dist"} file(s),{" "}
+                  packaged: {build.site.distFiles ?? 0} file(s),{" "}
                   {kilobytes(build.site.distBytes ?? 0)} — {build.site.entry ?? "unknown"}
                   {build.site.zip ? ` · ${build.site.zip}` : ""}
                 </p>
@@ -2136,7 +2108,7 @@ export default function Studio({
                 </p>
               ) : build?.state === "succeeded" ? (
                 <p className="hint">
-                  {kind === "app" ? "Packaged" : "Packaged and staged"}. Put it on a name with{" "}
+                  Packaged. Put it on a name with{" "}
                   <em>Publish It</em>
                   {siteSuffix ? <> — it would answer at {slugPreview(build.slug, siteSuffix)}</> : null}.
                 </p>
@@ -2387,19 +2359,23 @@ export default function Studio({
                 </span>
               </span>
 
-              {/* Every step is a fact about the stream, not a timer. */}
-              <ol className="steps">
+              {/* Every step is a fact about the stream, not a timer. The marks are
+                  drawn as a column with connectors so the outline reads as one
+                  sequence rather than four unrelated lines. */}
+              <ol className="steps" aria-label="Build steps">
                 {PHASE_ORDER.map((step, index) => (
                   <li
                     key={step}
                     className={`step ${
                       index < phaseIndex ? "done" : index === phaseIndex ? "active" : "todo"
                     }`}
+                    aria-current={index === phaseIndex ? "step" : undefined}
                   >
-                    <span className="step-mark">
-                      {index < phaseIndex ? "✓" : index === phaseIndex ? "•" : "·"}
+                    <span className="step-mark">{index < phaseIndex ? "✓" : index + 1}</span>
+                    <span className="step-body">
+                      <span className="step-name">{PHASE_LABEL[step]}</span>
+                      <span className="step-detail">{PHASE_DETAIL[step]}</span>
                     </span>
-                    {PHASE_LABEL[step]}
                   </li>
                 ))}
               </ol>

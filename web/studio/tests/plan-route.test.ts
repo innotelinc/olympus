@@ -152,7 +152,20 @@ describe("planning", () => {
     expect(body.model).toBe("auto/coding");
   });
 
-  it("passes the kind through to the prompt", async () => {
+  it("asks the planner to decide what this is, rather than being told", async () => {
+    const mock = stubGateway(completionResponse(GOOD_PLAN));
+    await post({ prompt: "a shop" });
+
+    const completion = mock.mock.calls.find(([url]) => String(url).includes("/chat/completions"));
+    const body = JSON.parse(String(completion?.[1]?.body)) as {
+      messages: { role: string; content: string }[];
+    };
+    expect(body.messages[0].content).toMatch(/YOU ALSO DECIDE WHAT THIS IS/);
+  });
+
+  it("ignores a kind a client still sends, so it cannot relabel the plan", async () => {
+    // The picker is gone, but a tab left open from before it is not — and honouring
+    // a stale answer is how a plan comes back disagreeing with its own kind.
     const mock = stubGateway(completionResponse(GOOD_PLAN));
     await post({ prompt: "a shop", kind: "website" });
 
@@ -160,7 +173,7 @@ describe("planning", () => {
     const body = JSON.parse(String(completion?.[1]?.body)) as {
       messages: { role: string; content: string }[];
     };
-    expect(body.messages[0].content).toMatch(/WEBSITE/);
+    expect(body.messages[0].content).not.toMatch(/planning a (WEBSITE|FULL-STACK APPLICATION)/);
   });
 
   it("sends an existing project as context, and asks for an addition", async () => {
