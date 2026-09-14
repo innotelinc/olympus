@@ -17,7 +17,9 @@ parts whose failures are silent:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -502,6 +504,82 @@ class TheEdgeRefusingAVhostDoesNotKillTheApp(Fixture):
     def test_a_reload_that_works_says_so(self) -> None:
         self.patch(docker=self.docker_answering(check=0, reload_code=0))
         self.assertEqual(runtime_module.reload_sites(False), "reloaded olympus-sites")
+
+
+class TheUpMessageDoesNotClaimAPublish(Fixture):
+    """`--up` wires a name into olympus-sites; publishing it is a separate step.
+
+    Measured: the note read "<slug> is running — https://<name>", which is the shape
+    the *other* two readers of that record also take (`--list`, Studio), so an app
+    that answers only on this host was reported as published. The follow-up to that
+    is "it's not resolving" and a hunt through DNS, certificates and the edge — for
+    a name nobody had registered. `--up` is also the middle of `app-publish`, so it
+    cannot simply say "not published" either; it says what it did, and names the
+    command that answers the rest.
+    """
+
+    SLUG = "todo"
+
+    def setUp(self) -> None:
+        super().setUp()
+        app_dir = self.root / "builds" / self.SLUG
+        app_dir.mkdir(parents=True)
+        (app_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        (app_dir / "project.manifest.json").write_text("{}\n", encoding="utf-8")
+        (app_dir / runtime_module.PLAN_NAME).write_text(
+            json.dumps(
+                {"name": "Todo", "run": {"start": "node x", "port": 3000, "healthcheck": "/"}}
+            ),
+            encoding="utf-8",
+        )
+        self.args = argparse.Namespace(
+            up=self.SLUG,
+            image=None,
+            container=None,
+            build=False,
+            dry_run=False,
+            preview=False,
+            wait=1,
+            env_file=None,
+            root=str(self.root),
+        )
+
+    def run_up(self) -> str:
+        """Run `up` with docker and the edge stubbed, and return what it told the user."""
+        for name, value in (
+            ("repo_root", lambda: self.root),
+            ("image_exists", lambda image: True),
+            ("already_packaged", lambda app_dir: True),
+            ("container_state", lambda name: "absent"),
+            ("health", lambda *a, **k: True),
+            ("docker", lambda *args: subprocess.CompletedProcess(args, 0, stdout="")),
+            ("reload_sites", lambda dry_run: "reloaded olympus-sites"),
+        ):
+            self.addCleanup(setattr, runtime_module, name, getattr(runtime_module, name))
+            setattr(runtime_module, name, value)
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(runtime_module.up(self.runtime, self.args), 0)
+        return err.getvalue()
+
+    def test_it_reports_it_running_rather_than_published(self) -> None:
+        message = self.run_up()
+        record = json.loads(
+            (self.root / "runtime" / f"{self.SLUG}.json").read_text(encoding="utf-8")
+        )
+        self.assertIn(f"is running on 127.0.0.1:{record['port']}", message)
+        self.assertNotIn(
+            "is running — https://",
+            message,
+            "the note must not present a published URL for a name only wired locally",
+        )
+
+    def test_it_names_the_command_that_answers_whether_the_edge_has_the_name(self) -> None:
+        self.assertIn(
+            "make site-check HOST=todo.studio.example.test",
+            self.run_up(),
+        )
 
 
 if __name__ == "__main__":

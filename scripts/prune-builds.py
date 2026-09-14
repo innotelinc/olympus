@@ -13,6 +13,16 @@ behind after it finishes, and nothing ever removed them.
     scripts/prune-builds.py --yes                # delete what it reported
     scripts/prune-builds.py --older-than 0 --yes # everything, age ignored
     scripts/prune-builds.py --specs --yes        # also drop consumed specs
+    scripts/prune-builds.py --queue-only --older-than 0 --yes   # just the queue
+
+`--queue-only` exists because the two halves age differently. A queue entry is
+finished the moment its job ended, so "everything I have already seen fail" is a
+sane request within the hour. A build directory is the *source* of an app that may
+be running right now — `builds/<slug>` is what a rebuild and a re-package read,
+and the container keeps serving from its image after the tree is gone, so deleting
+one is not visibly undone until the next build. The default age filter hides that;
+`--older-than 0` would not. This flag makes the safe half of a full sweep
+reachable without the other half.
 
 Deleting is opt-in. A build the runner is working on is never selected — that
 comes from the runner's own heartbeat, so a build started by hand has no
@@ -166,7 +176,8 @@ def human(path: Path, repo: Path) -> str:
         return str(path)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """`argv` is for tests; the CLI passes nothing and argparse reads `sys.argv`."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--repo", default=str(Path(__file__).resolve().parent.parent), help="repository root"
@@ -179,26 +190,39 @@ def main() -> int:
     )
     parser.add_argument("--specs", action="store_true", help="also consider build-requests/*.md")
     parser.add_argument(
+        "--queue-only",
+        action="store_true",
+        help="never consider build directories, however old (use with --older-than 0)",
+    )
+    parser.add_argument(
         "--include-tracked",
         action="store_true",
         help="with --specs: also remove specs tracked by git (working-tree change)",
     )
     parser.add_argument("--yes", action="store_true", help="actually delete (default: report)")
     parser.add_argument("--json", action="store_true", help="machine-readable report")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     repo = Path(args.repo).expanduser().resolve()
     builds_dir = repo / "builds"
     queue = Path(os.environ.get("BUILD_QUEUE_DIR") or repo / ".factory" / "build-queue")
 
     protected = busy_slugs(queue)
-    builds = [entry for entry in select_builds(builds_dir, args.older_than) if entry.name not in protected]
+    # Not merely "skip the ones that look busy": with `--queue-only` no build
+    # directory is a candidate at all, so the answer does not depend on a heartbeat
+    # that a build started by hand does not write.
+    builds = (
+        []
+        if args.queue_only
+        else [entry for entry in select_builds(builds_dir, args.older_than) if entry.name not in protected]
+    )
     artefacts = select_queue_artefacts(queue, args.older_than)
     specs = select_specs(repo, args.older_than, include_tracked=args.include_tracked) if args.specs else []
 
     report = {
         "repo": str(repo),
         "older_than_days": args.older_than,
+        "queue_only": args.queue_only,
         "protected": sorted(protected),
         "builds": [human(entry, repo) for entry in builds],
         "queue": [human(entry, repo) for entry in artefacts],

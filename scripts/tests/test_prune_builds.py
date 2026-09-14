@@ -10,7 +10,9 @@ Run: python3 -m unittest discover -s scripts/tests -v
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -185,6 +187,55 @@ class SelectSpecs(PruneFixture):
         self.age(readme, 30)
 
         self.assertEqual(prune.select_specs(self.repo, 0, include_tracked=True), [])
+
+
+class QueueOnly(PruneFixture):
+    """`--queue-only` must not reach build directories, at any age.
+
+    The two halves age differently: a finished queue entry is litter within the
+    hour, while `builds/<slug>` is the source a rebuild and a re-package read — and
+    the container keeps serving from its image after the tree is gone, so losing it
+    is not visible until the next build. The default seven-day filter hides that;
+    `--older-than 0` does not. So the flag that makes a full sweep of the queue safe
+    has to be the flag that makes it *only* the queue, rather than relying on a
+    heartbeat that a hand-started build never writes.
+    """
+
+    def seed(self) -> None:
+        (self.builds / "live-app").mkdir()
+        (self.builds / "live-app" / "index.html").write_text("x", encoding="utf-8")
+        self.age(self.builds / "live-app", 30)
+        self.age(self.queue / "abc123.status.json", 30)
+        self.age(self.queue / "abc123.log", 30)
+
+    def run_prune(self, *extra: str) -> int:
+        self.addCleanup(os.environ.pop, "BUILD_QUEUE_DIR", None)
+        os.environ["BUILD_QUEUE_DIR"] = str(self.queue)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return prune.main(
+                ["--repo", str(self.repo), "--older-than", "0", "--yes", *extra]
+            )
+
+    def test_a_build_directory_survives_an_all_ages_sweep(self) -> None:
+        self.seed()
+        self.assertEqual(self.run_prune("--queue-only"), 0)
+        self.assertTrue(
+            (self.builds / "live-app").is_dir(),
+            "the source tree of an app that may be running is not queue litter",
+        )
+
+    def test_the_queue_it_is_pointed_at_is_cleared(self) -> None:
+        self.seed()
+        self.run_prune("--queue-only")
+        self.assertEqual([path.name for path in self.queue.iterdir()], [])
+
+    def test_a_pending_request_still_survives(self) -> None:
+        # The guard is not the flag: work waiting to be claimed is work, whatever
+        # the age filter says.
+        self.seed()
+        self.age(self.queue / "waiting.request.json", 30)
+        self.run_prune("--queue-only")
+        self.assertEqual([path.name for path in self.queue.iterdir()], ["waiting.request.json"])
 
 
 if __name__ == "__main__":
