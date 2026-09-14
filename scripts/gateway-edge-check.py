@@ -397,6 +397,64 @@ def edge_verdict(status: int, location: str, expect_sso: bool) -> tuple[bool, st
     return False, "", f"expected the name to serve, got HTTP {status}"
 
 
+def v1_verdict(public_status: int, lan_status: int) -> tuple[bool, str, str | None]:
+    """Whether `/v1` is where it is supposed to be. Pure, so it can be asserted.
+
+    THE POLICY, IN TWO REQUESTS. `/v1` is the inference API. It cannot sit behind an
+    interactive login (every client sends a bearer key, not a cookie) and the gateway
+    itself validates nothing on this deployment — measured: no key, a bogus key and
+    the real key all answered 200, and an unauthenticated POST on the public name
+    returned a completion. So the *public* name must refuse it and the *LAN* door —
+    the proxy's own 0.0.0.0 listener, which is the documented path for another
+    machine — must keep carrying it.
+
+    Both halves are asserted, because either one alone is a different deployment than
+    the one that was asked for: a 403 everywhere breaks the API clients, and a 200 on
+    the public name hands the internet the provider credentials behind the gateway.
+    """
+    if public_status != 403:
+        return (
+            False,
+            "",
+            f"https://<host>/v1/models answered {public_status}, not 403 — the public name is "
+            "still carrying the inference API. `make gateway-edge` sets the edge rule that "
+            "closes it (closed_paths_config in scripts/cerulean_api.py).",
+        )
+    if lan_status == 403:
+        return (
+            False,
+            "",
+            "the LAN door refuses /v1 as well — the edge rule has been applied somewhere that "
+            "also serves 127.0.0.1:20129, which breaks every API client.",
+        )
+    return True, f"closed on the public name (403), open on the LAN door ({lan_status})", None
+
+
+def check_v1(host: str, port: int, timeout: float = 15.0) -> dict:
+    """Is `/v1` closed at the edge and still carried on the LAN door?"""
+    payload: dict = {"link": "v1"}
+    opener = urllib.request.build_opener(NoRedirect())
+
+    for label, url in (("public", f"https://{host}/v1/models"), ("lan", f"http://127.0.0.1:{port}/v1/models")):
+        try:
+            with opener.open(url, timeout=timeout) as response:  # noqa: S310 - both URLs are built here
+                payload[label] = response.status
+        except urllib.error.HTTPError as error:
+            payload[label] = error.code
+        except (urllib.error.URLError, OSError) as error:
+            reason = getattr(error, "reason", error)
+            payload.update({"ok": False, "error": f"no answer from {url}: {reason}"})
+            return payload
+
+    ok, note, failure = v1_verdict(payload["public"], payload["lan"])
+    payload["ok"] = ok
+    if ok:
+        payload["note"] = note
+    else:
+        payload["error"] = failure
+    return payload
+
+
 def check_edge(host: str, expect_sso: bool, timeout: float = 15.0) -> dict:
     """One request at the public name, and what came back."""
     request = urllib.request.Request(f"https://{host}/", method="GET")
@@ -634,6 +692,11 @@ def diagnose(links: dict[str, dict], host: str) -> str:
             f"— the edge is: {edge.get('error')}"
         )
 
+    # Before the proxy, because a wrong answer here is not a broken link: every step
+    # above succeeded and the deployment is still not the one that was asked for.
+    if links.get("v1") is not None and not links["v1"].get("ok"):
+        return f"{host} is reachable and gated, but `/v1` is not where it should be: {links['v1'].get('error')}"
+
     if not proxy["ok"]:
         return (
             f"{host} answers from the edge but the SSO proxy behind it does not: "
@@ -673,7 +736,7 @@ def report(links: dict[str, dict], host: str) -> None:
     if dns.get("warning"):
         print(f"     warning:  {dns['warning']}")
 
-    for key, label in (("tls", "tls"), ("edge", "edge"), ("proxy", "proxy"), ("session", "session")):
+    for key, label in (("tls", "tls"), ("edge", "edge"), ("v1", "v1"), ("proxy", "proxy"), ("session", "session")):
         payload = links.get(key)
         if payload is None:
             continue
@@ -682,6 +745,8 @@ def report(links: dict[str, dict], host: str) -> None:
             detail = f"{payload.get('issuer')} · expires {payload.get('expires')} ({payload.get('days_left')}d)"
         elif key == "edge" and payload.get("ok"):
             detail = f"HTTP {payload.get('status')} · {payload.get('server')} · {payload.get('note') or 'serving'}"
+        elif key == "v1" and payload.get("ok"):
+            detail = f"public HTTP {payload.get('public')} · lan HTTP {payload.get('lan')} · {payload.get('note')}"
         elif key == "proxy" and payload.get("ok"):
             detail = f"HTTP {payload.get('status')} · {payload.get('body')}"
         elif key == "session" and payload.get("ok"):
@@ -728,9 +793,12 @@ def main(argv: list[str] | None = None) -> int:
         "proxy": check_proxy(port),
     }
     # A published site has no proxy and no session store; asking about them there
-    # would report a page's name as broken for not having a login.
+    # would report a page's name as broken for not having a login. `/v1` is asked
+    # about for the same reason — it is the gateway's route, and a site's name does
+    # not serve it either.
     if not args.no_sso:
         links["session"] = check_session(env)
+        links["v1"] = check_v1(host, port)
 
     verdict = diagnose(links, host)
     code = exit_code(links)

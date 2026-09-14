@@ -88,11 +88,29 @@ services:
       # way in from another machine is through here — which means one door, and it
       # has to be the right one for each kind of caller:
       #
-      #   /v1/*      inference. Already authenticated by `Authorization: Bearer
-      #              $OMNIROUTE_API_KEY`, which is what a key is for. Putting an
-      #              interactive OIDC login in front of it would not add a check,
-      #              it would break every client — Codex, the CLIs, a browser
-      #              fetch — because they send a key, not a session cookie.
+      #   /v1/*      inference, and FOR LAN CLIENTS ONLY. Putting an interactive
+      #              OIDC login in front of an API would not add a check, it would
+      #              break every client — Codex, the CLIs, a browser fetch — because
+      #              they send a key, not a session cookie. So it is exempted here,
+      #              and this listener's LAN address is the door for it.
+      #
+      #              NOT THE PUBLIC NAME, and that distinction is load-bearing. The
+      #              comment above used to say the bearer key authenticated this
+      #              route. Measured on this deployment, nothing authenticates it:
+      #              `make gateway-auth-mode` leaves the gateway with no gate of its
+      #              own (requireLogin=false — see its docstring: the loopback
+      #              binding is then the entire control) and this OmniRoute build
+      #              answers 200 to /v1 with no key, a bogus key and the real one, and
+      #              returns a completion to an unauthenticated POST. With this
+      #              exemption, publishing the name therefore published the provider
+      #              credentials behind it.
+      #
+      #              `make gateway-edge --deny-path /v1` closes it at the edge, where
+      #              the public name and the LAN door can be told apart (they are the
+      #              same listener, so nothing here can). `make gateway-edge-check`
+      #              asserts both halves. Do not remove this line to "close /v1":
+      #              that would break the LAN clients and change nothing about the
+      #              public name's exposure — the rule that matters is at the edge.
       #   /healthz   liveness. Answers 200 with no body and no secrets.
       #   everything else, INCLUDING the dashboard, still requires the Authentik
       #   session and the group. The dashboard is the thing worth protecting here:

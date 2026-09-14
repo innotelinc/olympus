@@ -184,6 +184,45 @@ class EdgeVerdictTests(unittest.TestCase):
         self.assertFalse(check.edge_verdict(404, "", False)[0])
 
 
+class V1VerdictTests(unittest.TestCase):
+    """The other decision with a security consequence — and its mirror image.
+
+    `/v1` cannot sit behind an interactive login (clients send a bearer key, not a
+    cookie), and on this deployment the gateway validates no key at all. So the
+    public name must refuse it and the LAN door must keep carrying it. Both halves
+    are asserted, because either one alone is a different deployment than the one
+    that was asked for.
+    """
+
+    def test_closed_at_the_edge_and_open_on_the_lan_is_the_expected_state(self) -> None:
+        ok, note, failure = check.v1_verdict(403, 200)
+        self.assertTrue(ok)
+        self.assertIsNone(failure)
+        self.assertIn("public name", note)
+
+    def test_a_public_200_is_the_exposure_this_check_exists_for(self) -> None:
+        # Measured before this was fixed: no key, a bogus key and the real key all
+        # answered 200 on the public name, and a POST returned a completion.
+        ok, _, failure = check.v1_verdict(200, 200)
+        self.assertFalse(ok)
+        self.assertIn("200", failure)
+        self.assertIn("inference", failure)
+
+    def test_a_redirect_on_the_public_name_is_not_a_pass(self) -> None:
+        # A 302 to the IdP would also be a way for the API to be unusable, and the
+        # verdict has to say 403 was expected rather than count it as closed.
+        ok, _, failure = check.v1_verdict(302, 200)
+        self.assertFalse(ok)
+        self.assertIn("302", failure)
+
+    def test_the_lan_door_being_closed_is_its_own_failure(self) -> None:
+        # The mirror image: a rule applied where it also covers 127.0.0.1:20129
+        # breaks every API client, and is not a stricter version of the right answer.
+        ok, _, failure = check.v1_verdict(403, 403)
+        self.assertFalse(ok)
+        self.assertIn("breaks every API client", failure)
+
+
 class ExitCodeTests(unittest.TestCase):
     def links(self, **states: bool) -> dict:
         return {name: {"ok": ok} for name, ok in states.items()}
