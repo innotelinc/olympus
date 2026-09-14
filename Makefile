@@ -238,9 +238,7 @@ gateway-auth-mode: ## Make Cerulean Authentik the only gate at the gateway (ARGS
 # exemption plus no key check meant the public name handed out the provider
 # credentials behind it. `/v1` stays open on the LAN, which is what the proxy's
 # 0.0.0.0 listener and docs/gateway-sso.md's "another machine" path are for; the
-# public name stops carrying it. It is written straight to NPM by
-# scripts/npm_api.py, because Cerulean's NPM passthrough accepts this field and
-# drops it (measured); scripts/gateway-edge-check.py asserts both halves.
+# public name stops carrying it. See closed_paths_config in scripts/cerulean_api.py.
 gateway-edge: ## Publish the gateway's public name through Cerulean + the NPM edge (ARGS="--dry-run")
 	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi
 	python3 scripts/cerulean-edge.py --deny-path /v1 $(ARGS)
@@ -364,15 +362,14 @@ app-publish: ## Package, run and publish an app on <slug>.<SITE_HOST_SUFFIX> (SL
 # edge, from this host's staged tree, and the entry point is the built site
 # rather than the edge's error page. A name that 502s or 404s passes "the record
 # exists" and fails this, which is the difference worth checking.
-site-check: ## Confirm a published site answers with its own page (HOST=<name>)
+#
+# It follows redirects now, because a name behind the identity provider answers
+# 307/302 by design and used to be reported FAILED — two of the six names this is
+# pointed at. The verdict says which gate answered instead; a name that redirects
+# somewhere that is not the configured issuer still fails. scripts/site-check.py.
+site-check: ## Confirm a published name answers (HOST=<name>)
 	@if [ -z "$(HOST)" ]; then echo "usage: make site-check HOST=<name>" >&2; exit 2; fi
-	@if [ -z "$(HOST)" ]; then echo "usage: make site-check HOST=<name>" >&2; exit 2; fi; \
-	code=$$(curl -s -o /tmp/site-check.html -w '%{http_code}' -m 15 "https://$(HOST)/" || true); \
-	if [ "$$code" != "200" ]; then echo "site: FAILED — HTTP $$code from https://$(HOST)/" >&2; exit 1; fi; \
-	if ! grep -qi '<div id="root"\|<script\|<html' /tmp/site-check.html; then \
-		echo "site: FAILED — https://$(HOST)/ answered 200 but not with a page" >&2; exit 1; \
-	fi; \
-	echo "site: ok — https://$(HOST)/ serves a built page"
+	python3 scripts/site-check.py "$(HOST)" $(ARGS)
 
 docker-shell: ## Shell into the running Olympus container
 	docker compose exec olympus bash

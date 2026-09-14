@@ -193,6 +193,13 @@ make site-check HOST=todo-list.studio.olympus.innotel.us
 make site-unpublish SLUG=todo-list
 ```
 
+`make site-check HOST=<name>` follows redirects, because a name behind the identity
+provider (`studio.olympus.innotel.us`, `gateway.olympus.innotel.us`) answers `307`/`302`
+by design: it reports *auth-gated — redirects to <the IdP>* rather than `FAILED`, and
+still fails a name that redirects anywhere else, answers `200` with something that is
+not a page, or does not answer at all. `python3 scripts/site-check.py --json` for the
+raw hop.
+
 `make site-unpublish` deletes the NPM proxy host, which is the only thing that makes
 a name answer. The record stays — the wildcard already covers it — and the staged
 files stay on disk, so re-publishing is instant. What a client gets afterwards is
