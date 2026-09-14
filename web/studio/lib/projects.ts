@@ -1,4 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
+
+// A value import that is *not* re-exported here: `parseProject` reads the kind, and
+// the local name has to resolve inside this module as well as out of it.
+import { parseKind, type ProjectKind } from "./kinds";
 import {
   existsSync,
   mkdirSync,
@@ -38,32 +42,11 @@ export type StoredFile = {
   contents: string;
 };
 
-/**
- * What is being built. Two kinds, because they are two different products with
- * two different delivery paths — not one product with an option.
- *
- * `app` is a full-stack application: a React client, an HTTP API and a SQLite
- * database, because a weight-loss tracker or a recipe box has state, and state
- * needs a server to write it down. The model writes the data model
- * (`server/schema.sql`) and the interface (`src/App.tsx`); the packager writes the
- * server and the image around them. It is finished when it has been *packaged* and
- * is running as its own container, and its delivery is a zip or a published name.
- *
- * `website` is a Vite + React + TypeScript project with no server and no data: it
- * is finished when it has been packaged (`dist/`) on the runner, and its delivery
- * is a zip or a published site served as static files.
- *
- * Keeping the kind on the project is what lets every later step (which prompt,
- * what a build has to produce, what the preview shows, what the publisher runs,
- * what "export to factory" writes) decide correctly without re-detecting it.
- */
-export type ProjectKind = "app" | "website";
-
-export const PROJECT_KINDS: readonly ProjectKind[] = ["app", "website"];
-
-export function parseKind(value: unknown): ProjectKind {
-  return value === "website" ? "website" : "app";
-}
+// Re-exported rather than defined here: this file reads and writes files, and the
+// kind is a vocabulary the browser needs too. Defining it here is how the client
+// bundle came to depend on `node:fs` — see the header of ./kinds.ts.
+export { PROJECT_KINDS, parseKind } from "./kinds";
+export type { ProjectKind } from "./kinds";
 
 export type Project = {
   id: string;
@@ -247,10 +230,10 @@ export function parseStoredFiles(value: unknown): StoredFile[] {
  * consequence is a project built by the older packagers — not a library entry the
  * user cannot open.
  */
-function readPlan(value: unknown, kind: ProjectKind): BuildPlan | null {
+function readPlan(value: unknown): BuildPlan | null {
   if (value === undefined || value === null) return null;
   try {
-    return parsePlanObject(value, kind);
+    return parsePlanObject(value);
   } catch {
     return null;
   }
@@ -276,21 +259,23 @@ function parseProject(value: unknown): Project | null {
   const updatedAt =
     typeof record.updatedAt === "string" ? record.updatedAt : new Date(0).toISOString();
 
+  // Re-read rather than trusted, and null when it is absent or unusable: a plan
+  // stored by an older version, or edited by hand, must not be able to send an
+  // arbitrary command to the runner. The route re-validates on the way out anyway.
+  const plan = readPlan(record.plan);
+
   return {
     id: record.id.trim(),
     title: parseTitle(record.title) || "Untitled app",
-    // Absent on every project stored before the split, which is precisely why it
-    // defaults rather than being required: an old record must keep working, and
-    // "app" is what it was.
-    kind: parseKind(record.kind),
+    // The plan's kind when there is one, because that is the decision the project
+    // was actually built to. Otherwise whatever the record says — which for a
+    // project saved before the planner existed is the kind the user pressed, and is
+    // still the best thing known about it. Parsed once rather than twice so the two
+    // fields cannot disagree.
+    kind: plan?.kind ?? parseKind(record.kind),
     prompt: typeof record.prompt === "string" ? record.prompt : "",
     files,
-    // Re-read rather than trusted, and null when it is absent or unusable: a plan
-    // stored by an older version, or edited by hand, must not be able to send an
-    // arbitrary command to the runner. The route re-validates on the way out anyway.
-    // It is parsed against the project's own kind, so a plan cannot change what kind
-    // of thing this is.
-    plan: readPlan(record.plan, parseKind(record.kind)),
+    plan,
     createdAt: typeof record.createdAt === "string" ? record.createdAt : updatedAt,
     updatedAt,
   };
@@ -385,20 +370,22 @@ export function saveProject(namespace: string, input: Record<string, unknown>): 
     );
   }
 
+  // A revision without a plan keeps the one it has: the files on screen were built
+  // to it, and replacing the plan with nothing would make the project unbuildable.
+  const plan = readPlan(input.plan) ?? existing?.plan ?? null;
+
   const timestamp = new Date().toISOString();
   const project: Project = {
     id: existing?.id ?? newProjectId(),
     title: parseTitle(input.title) || existing?.title || "Untitled app",
-    // A revision keeps the kind it was created with unless told otherwise: the
-    // files on screen were written against that contract, and silently switching
-    // it would leave a project whose body contradicts its label.
-    kind: input.kind === undefined ? (existing?.kind ?? "app") : parseKind(input.kind),
+    // The plan's kind, because the plan is what the project is built to and the
+    // planner is what read the request. Without a plan — a project from before the
+    // planner, revised without one — the kind it already had is kept, so an old
+    // record keeps working instead of being relabelled on open.
+    kind: plan?.kind ?? existing?.kind ?? parseKind(input.kind),
     prompt: prompt || existing?.prompt || "",
     files,
-    // A revision without a plan keeps the one it has, for the same reason a revision
-    // keeps its kind: the files on screen were built to it, and replacing the plan
-    // with nothing would make the project unbuildable.
-    plan: readPlan(input.plan, input.kind === undefined ? (existing?.kind ?? "app") : parseKind(input.kind)) ?? existing?.plan ?? null,
+    plan,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
   };

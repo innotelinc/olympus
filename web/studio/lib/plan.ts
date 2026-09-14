@@ -27,7 +27,10 @@
  *     20128 (the gateway) or 16379 (the session store) and mean it.
  */
 
-import { parseKind, type ProjectKind } from "./projects";
+// From ./kinds, not ./projects: this module is reached by the browser (the page
+// component imports `missingPlannedFiles`), and `projects.ts` owns `node:fs`. A
+// kind is two words; it has no business pulling a filesystem into a client bundle.
+import { parseKind, type ProjectKind } from "./kinds";
 
 /** Longest a command may be. Generous, but a plan is not a shell script. */
 const MAX_COMMAND_CHARS = 500;
@@ -82,7 +85,15 @@ export type PlanFile = {
 export type BuildPlan = {
   name: string;
   slug: string;
-  /** Derived from the request, never from the model — see the module comment. */
+  /**
+   * What the planner decided this is — `app` or `website`.
+   *
+   * Not chosen by the user: Studio used to ask, and the answer was a guess the
+   * planner then had to build to. The turn that reads the request is the one that
+   * can tell a résumé page from a tracker, so it answers, and everything
+   * downstream (the delivery path, the packager, the export spec) reads this
+   * rather than asking again.
+   */
   kind: ProjectKind;
   summary: string;
   runtime: PlanRuntime;
@@ -182,11 +193,9 @@ function asPath(value: unknown): string {
  * follows is validated field by field, and a plan missing something the runner
  * needs is refused with a sentence naming the missing piece.
  *
- * `kind` is passed in rather than read from the payload: the user chose it in the
- * UI, and letting a model reply change what "app" means would make the button
- * the user pressed decorative.
+ * `kind` is read from the payload — see `parsePlanObject`.
  */
-export function parsePlan(text: string, kind: ProjectKind): BuildPlan {
+export function parsePlan(text: string): BuildPlan {
   const raw = extractJsonObject(text);
   if (!raw) {
     throw new PlanError("The planner did not return a JSON plan. Try rephrasing the request.");
@@ -199,7 +208,7 @@ export function parsePlan(text: string, kind: ProjectKind): BuildPlan {
     throw new PlanError("The planner returned JSON that could not be parsed. Try again.");
   }
 
-  return parsePlanObject(payload, kind);
+  return parsePlanObject(payload);
 }
 
 /**
@@ -210,9 +219,15 @@ export function parsePlan(text: string, kind: ProjectKind): BuildPlan {
  * exactly why the fields are re-read here rather than trusted — the same readers
  * as `parsePlan`, so a plan cannot be weakened by the trip through the page.
  */
-export function parsePlanObject(payload: unknown, kind: ProjectKind): BuildPlan {
+export function parsePlanObject(payload: unknown): BuildPlan {
   const root = asRecord(payload);
   if (!root) throw new PlanError("The plan is not an object.");
+
+  // The planner's own answer, read through `parseKind` rather than trusted: the
+  // three consumers of this field (the tools a build runs, the wording of the
+  // delivery buttons, and the export spec) each handle two kinds, so anything else
+  // has to collapse to one of them here rather than being interpreted three ways.
+  const kind = parseKind(root.kind);
 
   const name = asText(root.name, MAX_NAME_CHARS) || (kind === "website" ? "New website" : "New app");
   const run = asRecord(root.run) ?? {};
@@ -345,7 +360,11 @@ export function extractJsonObject(text: string): string | null {
  */
 export const PLAN_SYSTEM_PROMPT = `You are Studio, the build agent inside Olympus. Before anything is written, you plan what you are about to build so the person can confirm it. You reply with JSON, and nothing else.
 
-A website is static content served over HTTP: pages, styling, images, maybe a little client-side scripting. An application is software that runs on a server and keeps state — the person's data is there when they come back, on another device.
+YOU ALSO DECIDE WHAT THIS IS, and you say so in \`kind\`. Nobody is choosing it for you, and it is not a setting: it is what the delivery path keys on.
+- "website" is static content served over HTTP: pages, styling, images, maybe a little client-side scripting. No server, no state.
+- "app" is software that runs on a server and keeps state — what the person enters is there when they come back, on another device.
+
+Read the request and answer from it. A portfolio, a landing page, a résumé, a menu, documentation or a one-off document is a website. A tracker, a booking system, an inbox, a budget, or anything with accounts is an app. When it could genuinely be either, choose the one that serves the request without inventing a server and a database nobody asked for — and if the request is a single page of information, that is a website.
 
 Choose the stack from the request, not from habit. If the person asks for a specific language, framework or database, use it. If they do not, pick what is genuinely best for the job and say why in the summary — a small static site does not need a database, and a tracker that forgets everything is not a tracker.
 
@@ -358,6 +377,7 @@ HOW IT WILL BE RUN. Your plan is executed on a build host in a container built f
 Reply with exactly this JSON shape and no other keys:
 {
   "name": "Weight Tracker",
+  "kind": "app",
   "summary": "One or two sentences: what it does and the stack you chose, in the language of the person who asked.",
   "runtime": {
     "language": "node",
@@ -383,26 +403,28 @@ Rules:
 - \`files\` is every file you intend to write, with a short purpose each. It is what the person reads to judge the plan, so list real paths, not directories.
 - \`notes\` is where a genuine caveat goes. Do not use it for a summary of the summary, and do not pad it.
 - "static" means there is no toolchain and no process to start — plain HTML, CSS and JavaScript that nginx serves. Leave \`install\` and \`build\` empty and make \`start\` exactly \`nginx -g 'daemon off;'\`. A React or Vite site is "node", because something has to bundle it.
-- A website must not have a database unless the request needs one.
+- \`kind\` is exactly "app" or "website", decided from the request. It has to match the plan you wrote: a "website" has no database and its \`start\` is nginx serving static files, and an "app" has a server that stays in the foreground and keeps state. A plan whose \`kind\` contradicts its own \`runtime\` and \`run\` is the one thing here that cannot be confirmed.
 - No markdown fences, no prose before or after the JSON. The object is the whole reply.`;
 
-/** The planning turn: the request, and the kind the user picked. */
+/**
+ * The planning turn: the request, and whatever is already on screen.
+ *
+ * No kind is passed in. This turn used to be told "you are planning a WEBSITE"
+ * because the user had pressed a button, and the field that decided the delivery
+ * path was therefore an opinion the planner had to work backwards to — a
+ * request for a résumé site planned as an app, or a tracker planned as a
+ * website, with the plan and its own kind disagreeing. The planner is the one
+ * reader of the request, so the classification is its call.
+ */
 export function planMessages(
   prompt: string,
-  kind: ProjectKind,
   priorFiles: { path: string; contents: string }[] = [],
 ): Array<{ role: "system" | "user"; content: string }> {
   const messages: Array<{ role: "system" | "user"; content: string }> = [
-    {
-      role: "system",
-      content:
-        PLAN_SYSTEM_PROMPT +
-        `\n\nThis turn you are planning a ${kind === "website" ? "WEBSITE" : "FULL-STACK APPLICATION"}.`,
-    },
+    { role: "system", content: PLAN_SYSTEM_PROMPT },
   ];
 
   if (priorFiles.length > 0) {
-    const label = kind === "website" ? "site" : "application";
     const rendered = priorFiles
       .map((file) => `<file path="${file.path}">\n${file.contents}\n</file>`)
       .join("\n\n");
@@ -410,11 +432,12 @@ export function planMessages(
     messages.push({
       role: "user",
       content:
-        `The ${label} already exists in this state:\n\n${rendered}\n\n` +
+        `The project already exists in this state:\n\n${rendered}\n\n` +
         `The next instruction develops it further. Plan an addition to what is there — keep the ` +
         `stack unless the instruction asks you to change it, keep every feature that works, and ` +
         `list only the files this change touches or rewrites, noting in your summary that the rest ` +
-        `is unchanged.`,
+        `is unchanged. Keep \`kind\` as it is unless what the instruction asks for changes what the ` +
+        `project is.`,
     });
   }
 

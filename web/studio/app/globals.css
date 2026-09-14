@@ -430,29 +430,84 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
-/* The build's steps: each one is read off the stream, never a timer. */
+/* The build's steps: each one is read off the stream, never a timer.
+
+   Drawn as an outlined column rather than a list of words, because the question a
+   person watching a build asks is "how many of these are there, and which one am I
+   on" — and an undelimited list of four lines answers neither. The marks are the
+   spine: numbered circles joined by a connector, so the same shape reads as a
+   sequence whether you are reading the text or not. */
 .steps {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 0;
   margin: 0;
-  padding: 0;
+  padding: 8px 12px;
   list-style: none;
   font-size: 12.5px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
 }
 
 .step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  align-items: start;
+  gap: 10px;
+  padding: 5px 0;
   color: var(--muted);
 }
 
+/* The connector, behind the mark and stopping before the next one. A row that is
+   done draws it solid; the one after the current step draws it faint, so the part
+   of the sequence already behind you stays visible. */
+.step:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 26px;
+  bottom: -1px;
+  width: 1px;
+  background: var(--line);
+}
+
+.step.done:not(:last-child)::before {
+  background: var(--ok);
+  opacity: 0.5;
+}
+
 .step-mark {
-  width: 12px;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  height: 21px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.step-name {
+  font-weight: 500;
+}
+
+.step-detail {
+  font-size: 11.5px;
+  color: var(--muted);
+  opacity: 0.75;
+  line-height: 1.45;
 }
 
 .step.done {
@@ -461,6 +516,11 @@ kbd {
 
 .step.done .step-mark {
   color: var(--ok);
+  border-color: var(--ok);
+}
+
+.step.done .step-name {
+  text-decoration: none;
 }
 
 .step.active {
@@ -468,12 +528,22 @@ kbd {
 }
 
 .step.active .step-mark {
-  color: var(--accent);
-  animation: pulse 1.2s ease-in-out infinite;
+  color: #0b1220;
+  background: var(--accent);
+  border-color: var(--accent);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.step.active .step-detail {
+  opacity: 1;
 }
 
 .step.todo {
-  opacity: 0.55;
+  opacity: 0.6;
+}
+
+.step.todo .step-detail {
+  opacity: 0.5;
 }
 
 .file-chip {
