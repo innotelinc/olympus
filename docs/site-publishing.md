@@ -251,15 +251,25 @@ the next reload, because the config on disk is valid.
 ### `Technitium session expired` is not a retry, whatever it says
 
 Every publish reads the zone's records first, through Cerulean, which talks to Technitium.
-When Technitium answers `invalid-token`, Cerulean's own message ends in *"— retry"*, and
-retrying is the one thing that cannot work: a **configured** static token is used as-is
-with no re-login, so every DNS read fails until the token is unset. Publishing then fails
-identically every time — measured for ~5 hours on this deployment, until the static
-`TECHNITIUM_TOKEN` was commented out of the platform checkout's `.env` and its app
-container recreated, after which records read `200` and `make gateway-edge` completed.
+When Technitium answers `invalid-token`, Cerulean's message ends in *"— retry"*, and that
+instruction used to be the one thing that could not work: a **configured** static token
+was used as-is with no re-login, so every DNS read failed until somebody unset it. On
+2026-09-13 that was **five hours** of identical failures — measured, from
+`2026-09-13T20:46Z` until the token was replaced — and every publish in that window died
+on it.
 
-`cerulean_api.unusable_dns_session` detects that answer and says this instead of
-repeating the instruction, so the failure does not cost an afternoon twice.
+Two changes came out of that, because either alone leaves the hole open:
+
+* `cerulean_api.unusable_dns_session` detects that particular 500 and replaces "retry"
+  with what actually clears it, so a repeat costs minutes rather than an afternoon.
+* In the platform's own checkout, `server/src/services/technitium.ts` falls back to the
+  `TECHNITIUM_USER`/`TECHNITIUM_PASSWORD` login when a configured token is rejected, and
+  warns once about the token. A dead token becomes one extra round trip per call instead
+  of an outage — verified against the live Technitium with a deliberately dead token,
+  which read all six zones.
+
+So this 500 now means *both* credentials were refused, which is why the message names
+both.
 
 ## Configuration
 

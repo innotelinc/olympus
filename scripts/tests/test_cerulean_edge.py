@@ -232,7 +232,11 @@ class UnusableDnsSession(unittest.TestCase):
         hint = edge.unusable_dns_session("Technitium session expired for /api/zones/records/get — retry")
         self.assertIsNotNone(hint)
         self.assertIn("will not fix it", hint)
-        self.assertIn("TECHNITIUM_TOKEN", hint)
+        # Both credentials, because the platform's app now falls back from the token to
+        # the login: this 500 is what arrives when neither of them worked, and naming
+        # only the token would send the operator to the half that was already tried.
+        self.assertIn("TECHNITIUM_USER/TECHNITIUM_PASSWORD", hint)
+        self.assertIn("recreate its app container", hint)
 
     def test_it_also_catches_the_error_in_a_structured_payload(self) -> None:
         self.assertIsNotNone(edge.unusable_dns_session({"error": {"message": "Technitium session expired"}}))

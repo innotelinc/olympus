@@ -322,12 +322,13 @@ class Api:
 TECHNITIUM_SESSION_ERROR = "Technitium session expired"
 
 TECHNITIUM_SESSION_HINT = (
-    "Cerulean's DNS session is unusable, and re-running this will not fix it. Its code "
-    "uses a *configured* static token as-is and has no re-login when Technitium answers "
-    "`invalid-token`, so every DNS read fails permanently while that token is set. "
-    "Unset TECHNITIUM_TOKEN in the platform checkout's .env and recreate its app "
-    "container (its TECHNITIUM_USER/TECHNITIUM_PASSWORD path logs in and refreshes the "
-    "session every 25 minutes). Measured: with the token unset, records read 200."
+    "Cerulean cannot authenticate to Technitium, and re-running this will not fix it. "
+    "A *configured* static token is tried first and a session login "
+    "(TECHNITIUM_USER/TECHNITIUM_PASSWORD) is the fallback, so reaching this 500 means "
+    "both were refused: fix one of them in the platform checkout's .env and recreate "
+    "its app container. Measured 2026-09-13, before that fallback existed: a token "
+    "Technitium had stopped accepting made every DNS read fail with this message and "
+    "'— retry' for five hours."
 )
 
 
