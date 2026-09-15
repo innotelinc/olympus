@@ -7,7 +7,7 @@ proxy that authenticates against Cerulean Authentik and admits only members of
 **https://gateway.olympus.innotel.us** with a Let's Encrypt certificate:
 
 ```
-browser ──https──▶ NPM edge (192.168.1.71)
+browser ──https──▶ NPM edge (192.168.1.46)
                        │  gateway.olympus.innotel.us  (CNAME → innotel.us → 73.68.203.71)
                        ▼  http://192.168.1.10:20129
                  gateway-sso (oauth2-proxy) ──▶ Authentik OIDC + group check
@@ -315,7 +315,7 @@ sentence in a browser:
 
 ```
 DNS        gateway.olympus.innotel.us  CNAME  innotel.us  → A  73.68.203.71
-edge       NPM (192.168.1.71) :443     →  http://192.168.1.10:20129
+edge       NPM (192.168.1.46) :443     →  http://192.168.1.10:20129
 proxy      oauth2-proxy                →  Authentik, for everything but /ping
 session    oauth2-proxy                →  redis at 127.0.0.1:16379
 gateway    omniroute, loopback only     →  127.0.0.1:20128
@@ -392,7 +392,7 @@ network layer:
 
 ```bash
 # on the host running the proxy, allowing only the edge
-iptables -I INPUT -p tcp --dport 20129 ! -s 192.168.1.71 -j DROP
+iptables -I INPUT -p tcp --dport 20129 ! -s 192.168.1.46 -j DROP
 ```
 
 That is deliberately not applied here: this host has no firewall in force

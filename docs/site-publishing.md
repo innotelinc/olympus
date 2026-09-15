@@ -176,6 +176,41 @@ Data lives in `/var/lib/olympus/apps/data/<slug>/app.sqlite` on the host, not in
 container, so a rebuild keeps it. `make app-down` keeps it too — only `app-remove`
 deletes it, and that is the one command here that cannot be undone.
 
+### The plan's data target: a container's own database, or Convex
+
+Everything above describes the default target, `container`: the app keeps its own
+database, on disk, in its own container. The planner may instead answer `convex`,
+which means the state is served by the self-hosted Convex that **Atlas** runs — the
+schema and the functions deploy there, and the client talks to it over HTTP and a
+WebSocket.
+
+It is **not** a third kind and not a second builder. A Convex-targeted project is
+still built, packaged, run and published exactly as above — the plan's language,
+commands, port and healthcheck are unchanged, and the container hosts the client.
+What changes is where the data is, and there are three consequences:
+
+* **Packaging needs the deployment's address.** `scripts/package-project.py` reads
+  `CONVEX_URL` from the build environment and writes it into the image under the
+  three names clients look for — `CONVEX_URL`, `VITE_CONVEX_URL` and
+  `NEXT_PUBLIC_CONVEX_URL` — because Vite and Next inline these at bundle time, so
+  handing it to the container at boot would be too late for a bundled client. A
+  Convex-targeted plan with no URL is **refused** rather than packaged, because the
+  alternative is a container that serves a client whose every read comes back blank.
+* **The address is public, the credential is not.** The deployment URL is what the
+  browser talks to, so baking it is the point. The one credential a build may use is
+  `CONVEX_DEPLOY_KEY`, and only a key scoped to that one deployment: packaging passes
+  it as a docker `--build-arg` (so it is never an `ENV` and never lands in the
+  published image) and the Dockerfile declares it as an `ARG`. Docker records build
+  arguments in the image metadata, which is why the platform admin key —
+  `CONVEX_SELF_HOSTED_ADMIN_KEY` on Atlas — is never read here.
+* **A static site cannot target it.** `static` is nginx serving files: there is no
+  runtime that could deploy a function, so a plan that pairs the two is refused with
+  the reason rather than built into a site whose schema never landed.
+
+`build-runner.py` carries both `CONVEX_URL` and `CONVEX_DEPLOY_KEY` through to a
+build by **exact name** — a `CONVEX_` prefix would also carry the backend's admin
+key, which packaging is written never to read.
+
 ### One wildcard, then instant
 
 Publishing a name used to mean a DNS record and its own Let's Encrypt order: a
@@ -284,6 +319,8 @@ both.
 | `SITE_EDGE_FORWARD_HOST` | *(empty)* | This host's LAN address. Empty makes publishing refuse, rather than put a name on the edge that answers nothing |
 | `SITE_CERT_RENEW_DAYS` | `30` | A certificate is reused only if it lasts this long |
 | `STUDIO_BUILDS_DIR` | `/app/builds` | Read-only mount Studio serves `site.zip` from |
+| `CONVEX_URL` | *(empty)* | The self-hosted Convex deployment (Atlas) a Convex-targeted plan's client is pointed at. Empty means no plan may target Convex; packaging refuses one rather than shipping a client that reaches nothing |
+| `CONVEX_DEPLOY_KEY` | *(empty)* | Optional, and only for a plan whose own build step deploys the functions. Must be scoped to that one deployment — it is passed as a build argument, so Docker records it in the image metadata |
 
 The staged tree is **outside the checkout** on purpose: served content is runtime
 state, and a served tree inside the repo is one `git add -A` away from being

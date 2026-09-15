@@ -3,9 +3,12 @@ import {
   FactorySpecError,
   buildFactorySpec,
   factoryRequestsDir,
+  specSlug,
   writeFactorySpec,
 } from "@/lib/factory-spec";
-import { namespaceFor, readProject } from "@/lib/projects";
+import { readProject } from "@/lib/projects";
+import { libraryNamespace } from "@/lib/identities";
+import { auditBuild } from "@/lib/tenancy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,7 +40,7 @@ export async function GET(request: Request, context: Context): Promise<Response>
   if (!gate.ok) return gate.response;
 
   const { id } = await context.params;
-  const project = readProject(namespaceFor(gate.session?.sub), id);
+  const project = readProject(await libraryNamespace(gate), id);
   if (!project) return fail("No such saved app.", 404);
 
   const spec = buildFactorySpec(project);
@@ -56,7 +59,7 @@ export async function POST(request: Request, context: Context): Promise<Response
   if (!gate.ok) return gate.response;
 
   const { id } = await context.params;
-  const project = readProject(namespaceFor(gate.session?.sub), id);
+  const project = readProject(await libraryNamespace(gate), id);
   if (!project) return fail("No such saved app.", 404);
 
   // An optional JSON body: `{ "overwrite": true }` replaces an existing spec.
@@ -74,6 +77,14 @@ export async function POST(request: Request, context: Context): Promise<Response
 
   try {
     const result = writeFactorySpec(project, { overwrite });
+    // Exporting to the factory is one of the three actions worth an audit row
+    // (build, publish, export): it is what puts a spec in front of the factory
+    // and, from there, in front of a name. Best-effort, so a tenancy hiccup can
+    // never fail a write that already happened.
+    await auditBuild(gate, "build.export", {
+      targetId: project.id,
+      meta: { slug: specSlug(project.title), spec: result.filename, replaced: result.replaced },
+    });
     return Response.json(
       {
         ...result,

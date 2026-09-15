@@ -96,6 +96,7 @@ describe("parsePlan", () => {
     expect(plan.name).toBe("Weight Tracker");
     expect(plan.slug).toBe("weight-tracker");
     expect(plan.kind).toBe("app");
+    expect(plan.target).toBe("container");
     expect(plan.runtime.language).toBe("node");
     expect(plan.runtime.frameworks).toEqual(["react", "express"]);
     expect(plan.runtime.database).toBe("sqlite");
@@ -127,6 +128,25 @@ describe("parsePlan", () => {
     expect(parsePlan(validPlan({ kind: "desktop app" })).kind).toBe("app");
     expect(parsePlan(validPlan({ kind: null })).kind).toBe("app");
     expect(parsePlan(validPlan({ kind: 42 })).kind).toBe("app");
+  });
+
+  it("reads the target, and collapses what it does not have to the container", () => {
+    // `container` is what a plan meant before this field existed, so every value
+    // that is not the one target it does have has to become it here rather than
+    // being interpreted by the packager and the runtime separately.
+    expect(parsePlan(validPlan({ target: "convex" })).target).toBe("convex");
+    expect(parsePlan(validPlan({ target: "container" })).target).toBe("container");
+    expect(parsePlan(validPlan({ target: "postgres" })).target).toBe("container");
+    expect(parsePlan(validPlan({ target: null })).target).toBe("container");
+    expect(parsePlan(validPlan({ target: 3 })).target).toBe("container");
+  });
+
+  it("keeps a website on the container, whatever the planner said about a target", () => {
+    // Static files have nowhere to keep a query, so this pair is a contradiction and
+    // the packager refuses it. Resolving it at the boundary is what keeps a
+    // vocabulary mistake from becoming a build that fails after generation.
+    expect(parsePlan(validPlan({ kind: "website", target: "convex" })).target).toBe("container");
+    expect(parsePlan(validPlan({ kind: "app", target: "convex" })).target).toBe("convex");
   });
 
   it("refuses a plan with no start command", () => {
@@ -244,6 +264,13 @@ describe("planMessages", () => {
     expect(system).toMatch(/"website" is static content/);
     expect(system).toMatch(/"app" is software that runs on a server/);
     expect(system).toContain("\"kind\": \"app\"");
+    expect(system).toContain("\"target\": \"container\"");
+  });
+
+  it("tells the planner that the target is a decision, and how rarely to make it", () => {
+    const system = planMessages("a tracker")[0].content;
+    expect(system).toMatch(/\`target\` is what serves the state/);
+    expect(system).toMatch(/A "website" is always "container"/);
   });
 
   it("does not tell the planner what the user wants it to be", () => {
@@ -381,5 +408,23 @@ describe("generationMessages", () => {
   it("describes a website as one, with no server", () => {
     const site = parsePlan(validPlan({ runtime: { language: "static" }, kind: "website" }));
     expect(systemOf(generationMessages("a shop", [], site))).toMatch(/WEBSITE/);
+  });
+
+  it("points a Convex-targeted build at Convex, not at a database of its own", () => {
+    const convex = parsePlan(
+      validPlan({ target: "convex", runtime: { language: "node", database: "convex" } }),
+    );
+    const system = systemOf(generationMessages("a chat app", [], convex));
+
+    expect(system).toMatch(/Data target: Convex/);
+    expect(system).toMatch(/Persistence and compute are Convex's/);
+    expect(system).toContain("CONVEX_URL");
+    // A hardcoded URL or a key in the project is how a Convex app stops being
+    // deployable anywhere else, so the contract names both as forbidden.
+    expect(system).toMatch(/Never hardcode a deployment URL/);
+    expect(system).toMatch(/never write a deploy key/);
+    // The file-backed rule is for the other target; leaving it in would contradict
+    // the sentence above it.
+    expect(system).not.toMatch(/Persistence is sqlite/);
   });
 });

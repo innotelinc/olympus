@@ -12,6 +12,8 @@ around it:
 
     install, build, start   the commands the plan named, run in order
     runtime.language        chooses the base image
+    target                  where the state lives: `convex` points the client at the
+                            deployment and still builds a container for the client
     run.port                the port the app listens on inside its container
     run.healthcheck         the path that answers once it is up
 
@@ -69,6 +71,25 @@ MIN_PORT = 1024
 MAX_PORT = 49151
 
 MAX_COMMAND_CHARS = 500
+
+# The deployment URL a Convex-targeted project's client reads. Convex's own tooling
+# uses `CONVEX_URL`; a Vite client only sees `VITE_`-prefixed variables and a Next
+# client only sees `NEXT_PUBLIC_`-prefixed ones, and both inline them at bundle
+# time — which is why the same value is written under all three names rather than
+# being handed to the container at run time, where a bundled client could not see it.
+#
+# It is an address, not a credential, and baking it is the point: the browser has to
+# reach that deployment, so it is public wherever it is written.
+CONVEX_URL_KEYS: tuple[str, ...] = ("CONVEX_URL", "VITE_CONVEX_URL", "NEXT_PUBLIC_CONVEX_URL")
+
+# The one credential a Convex build may use, and the reason the Dockerfile declares
+# it as an `ARG` and never an `ENV`: an `ENV` would carry it into the published
+# image, and a running container has nothing to deploy. It is passed as a
+# `--build-arg` only when the build environment has it, and Docker records build
+# arguments in the image's metadata — so a key scoped to this one deployment
+# (`npx convex deploy-key create`) is the only kind that may be used here. The
+# platform's admin key is never read, and never passed.
+CONVEX_DEPLOY_KEY = "CONVEX_DEPLOY_KEY"
 
 # The base image per language. Pinned, and alpine-based: these images exist, they
 # are small, and every one of them carries the busybox `wget` the healthcheck uses.
@@ -376,8 +397,37 @@ def plan_for_build(directory: Path) -> dict:
         healthcheck = "/"
     healthcheck = healthcheck.split("?")[0] or "/"
 
+    target = "convex" if plan.get("target") == "convex" else "container"
+    convex_url = ""
+
+    if target == "convex":
+        if language == "static":
+            # `static` is nginx serving files, and files cannot deploy functions.
+            # Refusing here is the difference between a clear sentence and a site that
+            # serves but whose every read fails at a deployment that never received a
+            # schema.
+            fail(
+                "this plan targets Convex but its language is 'static', and a static "
+                "site has nothing to deploy to it. Pick the language its client needs "
+                "(node, python, go, php, ruby), or drop the Convex target.",
+                2,
+            )
+
+        convex_url = (os.environ.get("CONVEX_URL") or "").strip()
+        if not convex_url:
+            fail(
+                "this plan targets Convex, but CONVEX_URL is not set in the build "
+                "environment, so the client would have no deployment to reach. Set "
+                "CONVEX_URL (the self-hosted Convex Atlas runs) and build again; set "
+                f"{CONVEX_DEPLOY_KEY} as well if the plan's build deploys the "
+                "functions.",
+                2,
+            )
+
     return {
         "language": language,
+        "target": target,
+        "convex_url": convex_url,
         "install": install,
         "build": build,
         "start": start,
@@ -458,6 +508,17 @@ def dockerfile_for(plan: dict) -> str:
         f"# start:    {plan['start']}",
     ]
 
+    if plan["target"] == "convex":
+        # Read before anything else in the file, because it changes where a failure
+        # means to be looked for: this container serves a client, and its data is
+        # somewhere else.
+        header += [
+            "#",
+            "# target:   convex — the state (schema and functions) is served by the",
+            "#           self-hosted Convex at the deployment below, not by this image",
+            f"#           deployment: {plan['convex_url']}",
+        ]
+
     if language == "static":
         # nginx is the server, so the port and the healthcheck are configured rather
         # than passed to an application that does not exist.
@@ -506,8 +567,19 @@ def dockerfile_for(plan: dict) -> str:
     environment = [
         f"ENV PORT={port} \\",
         "    HOST=0.0.0.0 \\",
-        "    DATA_DIR=/data",
+        "    DATA_DIR=/data" + (" \\" if plan["target"] == "convex" else ""),
     ]
+
+    if plan["target"] == "convex":
+        # The deployment, under every name a client might look for it under. Written
+        # into the build stage *and* the runtime stage when the build is split, for the
+        # same reason PORT is: `ENV` does not carry across a `FROM`, and a client that
+        # cannot see this is a client that renders an empty page.
+        environment += [
+            f"    CONVEX_URL={plan['convex_url']} \\",
+            f"    VITE_CONVEX_URL={plan['convex_url']} \\",
+            f"    NEXT_PUBLIC_CONVEX_URL={plan['convex_url']}",
+        ]
 
     lines = header + [
         f"FROM {base} AS build" if staged else f"FROM {base}",
@@ -529,6 +601,21 @@ def dockerfile_for(plan: dict) -> str:
         ]
 
     lines += ["", "COPY . ."]
+
+    if plan["target"] == "convex":
+        # For the plan's own build step, which is where `npx convex deploy` runs. This
+        # is the one credential this script may pass, and the shape it is passed in is
+        # deliberate: an `ARG` is available to the `RUN` below and never becomes part of
+        # the running container, because nothing that runs needs to deploy anything.
+        lines += [
+            "",
+            "# A Convex deploy key, scoped to this deployment, for the plan's build step.",
+            "# Declared as an `ARG`, never an `ENV`: an `ENV` would carry it into the",
+            "# published image. Docker does record build arguments in the image metadata,",
+            "# so this may only ever be a key scoped to this one deployment — the platform's",
+            "# admin key is not read by packaging and must not be used here.",
+            f"ARG {CONVEX_DEPLOY_KEY}",
+        ]
 
     if plan["install"]:
         lines += ["", "# From the plan, verbatim. A failure here is a packaging failure with the", "# package manager's own message.", f"RUN {plan['install']}"]
@@ -583,9 +670,27 @@ def write_dockerfile(directory: Path, plan: dict) -> Path:
 # --- the image ---------------------------------------------------------------
 
 
-def build_image(directory: Path, slug: str) -> int:
+def convex_build_args(plan: dict) -> list[str]:
+    """The deploy key, as a build argument, only when there is one to pass.
+
+    Absent is a normal state: a plan that does not deploy its functions from the
+    image build needs no key at all, and a checkout that has never deployed one has
+    none to give. Passing nothing is better than passing an empty string, which
+    Docker would record as a value the build then fails to use.
+    """
+    if plan.get("target") != "convex":
+        return []
+
+    key = (os.environ.get(CONVEX_DEPLOY_KEY) or "").strip()
+    if not key:
+        return []
+
+    return ["--build-arg", f"{CONVEX_DEPLOY_KEY}={key}"]
+
+
+def build_image(directory: Path, slug: str, plan: dict) -> int:
     docker = which_docker()
-    command = [docker, "build", "--tag", image_tag(slug), "."]
+    command = [docker, "build", "--tag", image_tag(slug), *convex_build_args(plan), "."]
     note(f"$ {' '.join(command)}  (in {directory})")
     return subprocess.call(command, cwd=str(directory))  # noqa: S603 - fixed argv
 
@@ -625,6 +730,10 @@ def write_manifest(directory: Path, slug: str, plan: dict, rows: list[dict], zip
     manifest = {
         "v": 1,
         "kind": plan["kind"],
+        # Named so the runtime and an operator reading the build do not have to infer
+        # where the app's state lives from the files — a Convex-targeted app's data is
+        # not in the container at all.
+        "target": plan["target"],
         "slug": slug,
         "language": plan["language"],
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -673,7 +782,8 @@ def main(argv: list[str] | None = None) -> int:
     plan = plan_for_build(directory)
 
     note(
-        f"packaging {args.slug} as {plan['language']}: "
+        f"packaging {args.slug} as {plan['language']}"
+        f"{' on Convex' if plan['target'] == 'convex' else ''}: "
         f"{plan['install'] or '(no install)'} / {plan['build'] or '(no build)'} / {plan['start']}"
     )
 
@@ -685,7 +795,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not args.no_build:
-        code = build_image(directory, args.slug)
+        code = build_image(directory, args.slug, plan)
         if code != 0:
             # The output is already on the caller's stdout, and the runner has it in
             # the job log. This is the line that makes the failure findable.

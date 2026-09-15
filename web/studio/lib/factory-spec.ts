@@ -142,6 +142,14 @@ function detectStack(files: StoredFile[], kind: ProjectKind, plan: BuildPlan | n
     stack.push(
       `Runs with \`${plan.run.start}\` on port ${plan.run.port}, health checked at \`${plan.run.healthcheck}\``,
     );
+    // Named because it changes where the factory has to look when something is
+    // empty: a Convex-targeted app whose reads return nothing has a deployment
+    // problem, not a container problem, and the spec is what the factory reads.
+    if (plan.target === "convex") {
+      stack.push(
+        "Data and functions on Convex (self-hosted in Atlas) — the deployment URL reaches the build as `CONVEX_URL`, and the container hosts the client only",
+      );
+    }
   } else if (kind === "website") {
     stack.push("Vite + React 19 + TypeScript (packaged to static `dist/`)");
   } else {
@@ -353,6 +361,18 @@ export function buildFactorySpec(project: Project): FactorySpec {
       "of their own rather than the one this project was planned in.",
       "",
     );
+    if (plan.target === "convex") {
+      lines.push(
+        "**Data target: Convex.** The schema and the functions deploy to the self-hosted",
+        "Convex that Atlas runs; `scripts/package-project.py` reads `CONVEX_URL` from the",
+        "build environment and points the client at it (`CONVEX_URL`, `VITE_CONVEX_URL`,",
+        "`NEXT_PUBLIC_CONVEX_URL`), so packaging refuses the build rather than producing a",
+        "client that cannot reach a deployment. Deploying the functions themselves needs a",
+        "deployment-scoped key in the build environment as `CONVEX_DEPLOY_KEY` — never the",
+        "platform admin key, and never written into the project.",
+        "",
+      );
+    }
   } else if (kind === "app") {
     // An app is not finished by generating it either, and what it needs is different
     // in kind: a client build is not an app, it is half of one. The other half is the

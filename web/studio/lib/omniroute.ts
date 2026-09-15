@@ -18,6 +18,19 @@ export type PriorFile = {
   contents: string;
 };
 
+/**
+ * What a turn cost, when the gateway says so.
+ *
+ * Both shapes are read because the gateway can be configured for Chat
+ * Completions (`prompt_/completion_tokens`) or the Responses API
+ * (`input_/output_tokens`), and a turn that reported zero tokens because it was
+ * counted under the other name would look like free usage in the ledger.
+ */
+export type TokenUsage = {
+  tokensIn: number;
+  tokensOut: number;
+};
+
 const DEFAULT_BASE_URL = "http://127.0.0.1:20128/v1";
 const DEFAULT_CHAT_PATH = "/chat/completions";
 const DEFAULT_MODEL = "auto/coding";
@@ -292,6 +305,15 @@ export async function completeChat(
     signal?: AbortSignal;
     temperature?: number;
     maxTokens?: number;
+    /**
+     * Called with the gateway's own token counts when it reports them.
+     *
+     * Optional and side-effect-only so the return type stays "the text": the
+     * caller that pays for the turn (the plan route, reporting usage) and the
+     * caller that only wants the answer are the same caller, and neither has to
+     * branch on whether accounting is configured.
+     */
+    onUsage?: (usage: TokenUsage) => void;
   },
 ): Promise<string> {
   const url = chatCompletionsUrl(config);
@@ -344,6 +366,9 @@ export async function completeChat(
   }
 
   const record = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : {};
+  const usage = extractUsage(payload);
+  if (usage && options.onUsage) options.onUsage(usage);
+
   const choices = Array.isArray(record.choices) ? record.choices : [];
   const first = (choices[0] ?? {}) as Record<string, unknown>;
   const message = (first.message ?? {}) as Record<string, unknown>;
@@ -390,28 +415,68 @@ function extractDelta(payload: unknown): string {
   return "";
 }
 
-function deltaFromSseLine(line: string): string {
+/**
+ * The token counts a gateway payload reports, if it reports any.
+ *
+ * A streaming gateway is not required to send them, and one that does sends them
+ * on the tail of the stream — so this is read from whatever chunk carries it and
+ * a stream without it simply reports no usage rather than inventing a number.
+ * (Distro's web app accounts for streaming turns the same way.)
+ */
+function extractUsage(payload: unknown): TokenUsage | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const usage = (payload as Record<string, unknown>).usage;
+  if (typeof usage !== "object" || usage === null) return null;
+
+  const record = usage as Record<string, unknown>;
+  const read = (key: string): number | null => {
+    const value = record[key];
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  };
+
+  const tokensIn = read("prompt_tokens") ?? read("input_tokens");
+  const tokensOut = read("completion_tokens") ?? read("output_tokens");
+  if (tokensIn === null && tokensOut === null) return null;
+
+  return { tokensIn: tokensIn ?? 0, tokensOut: tokensOut ?? 0 };
+}
+
+function parseSseLine(line: string): { delta: string; usage: TokenUsage | null } {
   const trimmed = line.trim();
-  if (!trimmed.startsWith("data:")) return "";
+  if (!trimmed.startsWith("data:")) return { delta: "", usage: null };
 
   const payload = trimmed.slice(5).trim();
-  if (!payload || payload === "[DONE]") return "";
+  if (!payload || payload === "[DONE]") return { delta: "", usage: null };
 
   try {
-    return extractDelta(JSON.parse(payload));
+    const parsed: unknown = JSON.parse(payload);
+    return { delta: extractDelta(parsed), usage: extractUsage(parsed) };
   } catch {
-    return "";
+    return { delta: "", usage: null };
   }
 }
 
 /**
  * Convert an SSE byte stream into a plain-text stream of generated source, so
  * the browser can accumulate and parse code blocks as they arrive.
+ *
+ * `onUsage` is how a streamed turn gets accounted for: the gateway's tail is the
+ * only place a token count can come from when the response is a stream, and the
+ * caller needs it after the answer, not before it.
  */
-export function sseToTextStream(source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+export function sseToTextStream(
+  source: ReadableStream<Uint8Array>,
+  options: { onUsage?: (usage: TokenUsage) => void } = {},
+): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
+
+  const consume = (line: string, controller: TransformStreamDefaultController<Uint8Array>): void => {
+    const { delta, usage } = parseSseLine(line);
+    if (usage && options.onUsage) options.onUsage(usage);
+    if (delta) controller.enqueue(encoder.encode(delta));
+  };
 
   return source.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
@@ -421,15 +486,32 @@ export function sseToTextStream(source: ReadableStream<Uint8Array>): ReadableStr
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
 
-        for (const line of lines) {
-          const delta = deltaFromSseLine(line);
-          if (delta) controller.enqueue(encoder.encode(delta));
-        }
+        for (const line of lines) consume(line, controller);
       },
       flush(controller) {
         buffer += decoder.decode();
-        const delta = deltaFromSseLine(buffer);
-        if (delta) controller.enqueue(encoder.encode(delta));
+        consume(buffer, controller);
+      },
+    }),
+  );
+}
+
+/**
+ * Run `onDone` when the stream finishes.
+ *
+ * A streamed turn is reported after it ends, and the route has already returned
+ * by then — so the accounting hangs off the stream's own completion rather than
+ * off the handler. The callback runs once, on normal completion; a response the
+ * client abandons never reaches `flush`.
+ */
+export function withStreamEnd(
+  source: ReadableStream<Uint8Array>,
+  onDone: () => void,
+): ReadableStream<Uint8Array> {
+  return source.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      flush() {
+        onDone();
       },
     }),
   );

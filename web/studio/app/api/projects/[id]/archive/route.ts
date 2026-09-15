@@ -4,7 +4,8 @@ import { authorizeRequest } from "@/lib/auth";
 import { createZip, type ArchiveEntry } from "@/lib/archive";
 import { specSlug } from "@/lib/factory-spec";
 import { loadRepoEnv } from "@/lib/env";
-import { namespaceFor, readProject, type Project } from "@/lib/projects";
+import { readProject, type Project } from "@/lib/projects";
+import { libraryNamespace } from "@/lib/identities";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -117,7 +118,7 @@ export async function GET(request: Request, context: Context): Promise<Response>
   if (!gate.ok) return gate.response;
 
   const { id } = await context.params;
-  const project = readProject(namespaceFor(gate.session?.sub), id);
+  const project = readProject(await libraryNamespace(gate), id);
   if (!project) return fail("No such saved app.", 404);
 
   const slug = specSlug(project.title);

@@ -6,6 +6,13 @@
 
 Olympus is a repository-local AI software factory. It turns accepted GitHub issues into validated pull requests through automated triage, planning, implementation, independent validation, safety gates, and controlled merging — observable at autonomy level 0 before any unattended operation. This page declares its role in the [Innotel Platform Stack](https://github.com/innotelinc/innotel-platform-stack) — the canonical single-responsibility architecture. The stack is defined in exactly one place; this page links this product to it and states what it owns, consumes, provides, and explicitly does not own.
 
+> **Convergence:** see the [**build-plane convergence plan**](https://github.com/innotelinc/innotel-platform-stack/blob/main/docs/convergence-onyx-olympus-distro-atlas.md)
+> — Olympus is the target home for the shared builder: Studio is the one web UI,
+> `scripts/olympus-tui.py` the one terminal UI, and the plan → runner → package →
+> runtime path the one engine. It also retires its `gateway` profile for the one
+> shared OmniRoute (§4.4) and absorbs Distro's control plane as the builder's
+> tenancy layer (§5).
+
 ## Owns
 
 - Repository automation — issue, branch, PR, workflow, and autonomy state machine; accepted issue → watched Archon workflow → open PR
@@ -45,7 +52,7 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 | `scripts/bootstrap.sh` + `scripts/omniroute-vault.sh` | bash + curl + OmniRoute CLI | One-command clone-to-ready and Vault-backed gateway launcher |
 | Telegram interface | Hermes 3 via OpenRouter Free through OmniRoute | Interactive bot that parses intent into Archon DAG runs |
 | Coding brain | Codex (`auto/coding`) via OmniRoute Responses API (`wire_api = "responses"`) | Repository code modifications dispatched by the factory consumer + harness E2E (`omniroute launch-codex -p auto-coding`) |
-| `web/studio/` | Next.js (App Router) + Authentik OIDC | Browser vibe-coding surface — prompt in, app out, gateway key held server-side; saved apps are scoped per identity (OIDC subject) on the stack's own volume. Two kinds: an **app** is full-stack (React + Node API + SQLite), a **website** is static React |
+| `web/studio/` | Next.js (App Router) + Authentik OIDC + Distro's control plane for tenancy | Browser vibe-coding surface — prompt in, app out, gateway key held server-side; saved apps are scoped per identity on the stack's own volume. Two kinds: an **app** is full-stack (React + Node API + SQLite), a **website** is static React. With `CONTROL_PLANE_INTERNAL_URL` + `CONTROL_INTERNAL_TOKEN` set, each turn is spent on the signed-in user's **own** gateway key with a quota check before it and usage recorded after it, and the library is keyed on the control-plane user id (an existing subject-keyed library is adopted in place); with them empty Studio spends the shared key, single-operator |
 | Build runner (`scripts/build-runner.py`) | Python + systemd (`olympus-build-runner.service`); account probed at install | Executes `make app` for builds Studio queues. Studio's image carries no toolchain, so the queue file is the whole interface — and the runner treats it as untrusted input. Every build is then packaged, because `make app` ends with source: `scripts/package-app.py` for an app, `scripts/package-website.py` for a website |
 | App packaging (`scripts/package-app.py`) | Python + npm + Vite | Writes the project a generated app is dropped into — Vite config, `package.json`, the **generated** `server/main.ts` and the `Dockerfile` — then builds the client. The model writes only `src/App.tsx` and `server/schema.sql`; the server derives its REST API from those tables, so the model never writes the request path |
 | App runtime (`scripts/app-runtime.py`) | Python + docker | One container, one loopback port and one SQLite file per app, under `OLYMPUS_APPS_ROOT`. Also writes the app's nginx vhost and reloads `olympus-sites`, which is how a name reaches a container without the edge learning a port |
@@ -76,15 +83,16 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 > hatch here: this build calls bubblewrap the default and Landlock the legacy path,
 > and it refuses the fallback for the `workspace-write` profile.
 
-> **The gateway is part of this stack now.** It runs from `docker-compose.yml`
-> (profile `gateway`, `make gateway-up`) on the published `diegosouzapw/omniroute`
-> image, with its state in the `omniroute-data` volume and published on
-> `127.0.0.1:20128` only — the host-side build runner and the SSO proxy reach it on
-> loopback; nothing else can. It previously ran as a container belonging to
-> another project whose compose file no longer existed anywhere on the host, so
-> nothing could recreate it: stopping that container would have taken the whole
-> model plane with it, and no command in this repository could have brought it
-> back. Two consequences of the move are worth knowing before you touch it.
+> **The gateway is a shared platform service, not part of this stack.** The
+> platform's single OmniRoute runs in Group 2 (`2-voice/`, mesh `10.10.2.1`,
+> Consul service `omniroute`) on the published `diegosouzapw/omniroute` image,
+> with its state in that group's `omniroute-data` volume. This stack used to keep
+> a copy of its own — the `omniroute` service behind `profiles: ['gateway']`,
+> started by `make gateway-up` — and it was removed once the shared gateway held
+> the provider connections; see
+> `ips/docs/convergence-onyx-olympus-distro-atlas.md` §4.4. What the local copy
+> taught this deployment is worth keeping, because it is equally true of the
+> shared one. Two consequences are worth knowing before you touch it.
 >
 > * **`server.env` in that volume is the key to everything else in it.** It holds
 >   `STORAGE_ENCRYPTION_KEY` (and `API_KEY_SECRET`), which is what decrypts the
@@ -92,16 +100,22 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 >   with that file intact keeps working — verified by comparing all ten connections
 >   by id after the move; a volume rebuilt without it comes back with credentials
 >   that are not *missing* but unreadable. `make gateway-vault-backup` puts both
->   halves in Cerulean Vault under this stack's own path, and
+>   halves in Cerulean Vault under the gateway host's own path —
+>   `make gateway-vault-backup` / `-check` are run on that host, because the
+>   script asks Docker for the gateway container's mount — and
 >   `make gateway-vault-check` exits non-zero when that copy has drifted from the
 >   live gateway, so it is worth a timer. The restore was exercised against a copy
 >   of the live database: the key read back from Vault decrypted all ten
 >   connections, which is the property the backup exists to have.
 > * **Whoever talks to the gateway inherits the topology problem.** `OMNIROUTE_BASE_URL`
->   is one value in one `.env`, and host-side scripts need it to be the loopback URL,
->   so a container cannot be handed a different one. On a host where the gateway is
->   published on loopback, every service that talks to it runs with
->   `compose.host-gateway.yml` — Studio included (`make docker-studio-up`). A Studio
+>   is one value in one `.env`, and host-side scripts read that same value, so a
+>   container cannot be handed a different one. Across the mesh it is
+>   `http://10.10.2.1:20128/v1` (OmniRoute serves API and dashboard on that one
+>   port; the `:20129` door is this stack's own Authentik SSO proxy); on a host
+>   where the gateway is published on
+>   *that* host's loopback, it is `http://127.0.0.1:20128/v1` and every service
+>   that talks to it runs with `compose.host-gateway.yml` — Studio included
+>   (`make docker-studio-up`). A Studio
 >   rebuilt without that override resolves `127.0.0.1:20128` to *itself*, answers
 >   `ECONNREFUSED` to its own requests, and stays `healthy` the whole time, because
 >   its healthcheck only asks whether Studio answers.
@@ -199,7 +213,7 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 ## Integration with other platforms
 
 - **Atlas (CodeOps)** — Olympus is the factory that Atlases the ecosystem's code lives in; Atlas owns the canonical git remote + CI for platform code, while Olympus owns the factory loop inside a given repo.
-- **Distro (BuilderOps)** — Distro builds apps in the browser; Atlas ships them; both sit behind OmniRoute + Authentik + Magnate. Olympus is the repo-bound automation that validates those outputs.
+- **Distro (BuilderOps)** — the tenancy service for the builder: accounts, per-user gateway keys, quota gating and usage/audit. Its bolt.diy web front door retired in the build-plane convergence, so **Studio (this repo) is the one web UI** and it consumes Distro's control plane; a packaged project lands on an Atlas Gitea remote instead of being built in a browser. Studio, Distro and Atlas all sit behind OmniRoute + Authentik + Magnate. Olympus below that is the repo-bound automation that validates those outputs.
 - **ONYX (Online Storage System)** — **on hold, deliberately.** Olympus does not own storage, and a published Studio website is files that want to live on the NAS, so the integration points are real; they are not being pursued now and nothing in this repo calls ONYX. `docs/site-publishing.md` keeps the research under an explicit on-hold heading rather than as a plan in progress. Publishing today is local: staged files on this host, served by `olympus-sites`, named through Cerulean + NPM.
 
 ## Secrets (Cerulean Vault)

@@ -93,6 +93,12 @@ LOG_TAIL_CHARS = 4000
 # the outer layer.
 ENV_ALLOW_PREFIXES = ("OMNIROUTE_", "ARCHON_")
 ENV_ALLOW_EXACT = (
+    # A Convex-targeted build needs its deployment's address, and — only when the
+    # plan's own build step deploys the functions — a key scoped to that one
+    # deployment. Both by exact name, never by prefix: `CONVEX_` would also carry
+    # the self-hosted backend's admin key, which packaging is written never to read.
+    "CONVEX_URL",
+    "CONVEX_DEPLOY_KEY",
     "PATH",
     "HOME",
     "LANG",

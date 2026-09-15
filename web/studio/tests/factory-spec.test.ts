@@ -284,6 +284,7 @@ describe("planned specs", () => {
     name: "Macro Log",
     slug: "macro-log",
     kind: "app" as const,
+    target: "container" as const,
     summary: "Log meals and see the day's totals.",
     runtime: { language: "python", frameworks: ["flask"], database: "sqlite" },
     run: {
@@ -347,6 +348,29 @@ describe("planned specs", () => {
     // The command form, not the name: the prohibition on running it is the point of
     // the section and has to be allowed to name it.
     expect(markdown).not.toContain("python3 scripts/package-website.py");
+  });
+
+  it("names Convex as the data target when the plan chose it", () => {
+    // The factory reads this spec to decide where to look when the app is empty.
+    // A Convex-targeted build that looks like a container one sends whoever picks
+    // it up into the container's logs for a problem that is a deployment.
+    const { markdown } = buildFactorySpec(
+      planned({ plan: { ...PLAN, target: "convex" } }),
+    );
+
+    expect(markdown).toContain("Data target: Convex");
+    expect(markdown).toContain("Data and functions on Convex");
+    expect(markdown).toContain("`CONVEX_URL`");
+    // The key, not the URL: pointing the client at a deployment is packaging's job,
+    // and deploying the functions is the one part that needs a credential.
+    expect(markdown).toContain("CONVEX_DEPLOY_KEY");
+    expect(markdown).toContain("never the");
+  });
+
+  it("says nothing about Convex for a plan that did not choose it", () => {
+    const { markdown } = buildFactorySpec(planned());
+    expect(markdown).not.toContain("Data target: Convex");
+    expect(markdown).not.toContain("CONVEX_URL");
   });
 
   it("tells the agent not to package, because packaging is the next step", () => {

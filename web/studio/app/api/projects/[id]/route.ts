@@ -1,5 +1,6 @@
 import { authorizeRequest } from "@/lib/auth";
-import { deleteProject, namespaceFor, readProject } from "@/lib/projects";
+import { deleteProject, readProject } from "@/lib/projects";
+import { libraryNamespace } from "@/lib/identities";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,7 +20,7 @@ export async function GET(request: Request, context: Context): Promise<Response>
   if (!gate.ok) return gate.response;
 
   const { id } = await context.params;
-  const project = readProject(namespaceFor(gate.session?.sub), id);
+  const project = readProject(await libraryNamespace(gate), id);
   if (!project) return fail("No such saved app.", 404);
 
   return Response.json({ project }, { headers: NO_STORE });
@@ -30,7 +31,7 @@ export async function DELETE(request: Request, context: Context): Promise<Respon
   if (!gate.ok) return gate.response;
 
   const { id } = await context.params;
-  const namespace = namespaceFor(gate.session?.sub);
+  const namespace = await libraryNamespace(gate);
 
   // A missing id is reported as 404 rather than silently succeeding: the client
   // is showing a list that just changed underneath it.

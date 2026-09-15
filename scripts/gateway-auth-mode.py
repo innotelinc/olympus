@@ -70,7 +70,11 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_URL = "http://127.0.0.1:20128"
-GATEWAY_CONTAINER = "olympus-omniroute"
+# The platform's single gateway runs in Group 2 now (`2-voice/`), so this script
+# belongs on that host — it flips settings INSIDE the gateway container, which
+# means a Docker that can see it. Override with --container when the deployment
+# names it differently.
+GATEWAY_CONTAINER = "g2-omniroute"
 
 # The settings this script owns. A PATCH here is a merge, so sending a key we have
 # no opinion about is how a routing setting gets reset by a script that was only

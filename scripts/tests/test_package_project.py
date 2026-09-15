@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 
@@ -393,6 +395,118 @@ class Archive(unittest.TestCase):
                 self.assertIn("app.py", archive.namelist())
 
 
+class ConvexTarget(unittest.TestCase):
+    """A plan whose state lives on Convex rather than inside its own container.
+
+    Two things make the target real instead of a word in a plan: the client is
+    pointed at the deployment under every name a framework reads, and the one
+    credential a build may use arrives as a build argument rather than an `ENV`.
+    """
+
+    def plan_for(
+        self, directory: Path, env: dict[str, str] | None = None, **overrides
+    ) -> dict:
+        write_plan(directory, target="convex", **overrides)
+        with patch.dict(
+            os.environ,
+            env if env is not None else {"CONVEX_URL": "https://convex.example"},
+            clear=False,
+        ):
+            return packager.plan_for_build(directory)
+
+    def test_defaults_to_the_container_every_project_was_before(self):
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            write_plan(directory)
+            plan = packager.plan_for_build(directory)
+            self.assertEqual(plan["target"], "container")
+            self.assertEqual(plan["convex_url"], "")
+
+    def test_reads_the_target_and_the_deployment_it_points_at(self):
+        with TemporaryDirectory() as raw:
+            plan = self.plan_for(Path(raw))
+            self.assertEqual(plan["target"], "convex")
+            self.assertEqual(plan["convex_url"], "https://convex.example")
+
+    def test_refuses_a_convex_plan_with_no_deployment_to_point_at(self):
+        # The failure this prevents is quiet: a container that serves a client whose
+        # deployment URL is empty, so every read comes back blank.
+        with TemporaryDirectory() as raw:
+            with self.assertRaises(SystemExit) as caught:
+                self.plan_for(Path(raw), env={"CONVEX_URL": "   "})
+            self.assertEqual(caught.exception.code, 2)
+
+    def test_refuses_a_static_site_targeting_convex(self):
+        # nginx serving files has nothing that can deploy a function, and a site whose
+        # schema never landed is worse than a refusal that says so.
+        with TemporaryDirectory() as raw:
+            with self.assertRaises(SystemExit) as caught:
+                self.plan_for(
+                    Path(raw),
+                    runtime={"language": "static"},
+                    run={"install": "", "build": ""},
+                )
+            self.assertEqual(caught.exception.code, 2)
+
+    def test_points_the_client_at_the_deployment_under_every_name(self):
+        # A Vite client only sees `VITE_`, a Next client only sees `NEXT_PUBLIC_`, and
+        # Convex's own tooling sees neither — so all three are written, and the value
+        # is the operator's, never a hardcoded one.
+        with TemporaryDirectory() as raw:
+            text = packager.dockerfile_for(self.plan_for(Path(raw)))
+            for key in packager.CONVEX_URL_KEYS:
+                self.assertIn(f"{key}=https://convex.example", text)
+            self.assertEqual(text.count("NEXT_PUBLIC_CONVEX_URL=https://convex.example"), 1)
+
+    def test_the_deployment_is_written_into_both_stages_when_the_build_is_split(self):
+        with TemporaryDirectory() as raw:
+            plan = self.plan_for(
+                Path(raw),
+                runtime={"language": "node", "database": "convex"},
+                run={"install": "npm ci", "build": "npx convex deploy && npm run build", "start": "node server.js"},
+            )
+            text = packager.dockerfile_for(plan)
+
+            self.assertEqual(text.count("FROM node:24-alpine"), 2)
+            # `ENV` does not carry across a `FROM`, and the runtime stage is the one
+            # that serves the client.
+            self.assertEqual(text.count("NEXT_PUBLIC_CONVEX_URL=https://convex.example"), 2)
+
+    def test_the_deploy_key_is_a_build_argument_and_never_an_env(self):
+        with TemporaryDirectory() as raw:
+            text = packager.dockerfile_for(self.plan_for(Path(raw)))
+            self.assertIn(f"ARG {packager.CONVEX_DEPLOY_KEY}", text)
+            self.assertNotIn(f"ENV {packager.CONVEX_DEPLOY_KEY}", text)
+
+    def test_a_container_plan_gets_none_of_it(self):
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            write_plan(directory)
+            text = packager.dockerfile_for(packager.plan_for_build(directory))
+            self.assertNotIn("CONVEX", text)
+
+    def test_the_deploy_key_reaches_docker_only_when_there_is_one(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(packager.convex_build_args({"target": "convex"}), [])
+            self.assertEqual(packager.convex_build_args({"target": "container"}), [])
+
+        with patch.dict(os.environ, {packager.CONVEX_DEPLOY_KEY: "prod:scoped"}, clear=True):
+            self.assertEqual(
+                packager.convex_build_args({"target": "convex"}),
+                ["--build-arg", f"{packager.CONVEX_DEPLOY_KEY}=prod:scoped"],
+            )
+            # A container plan never gets the key, however loudly it is exported.
+            self.assertEqual(packager.convex_build_args({"target": "container"}), [])
+
+    def test_the_manifest_names_the_target(self):
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            plan = self.plan_for(directory)
+            packager.write_manifest(directory, "weight-tracker", plan, [], None)
+            manifest = json.loads((directory / packager.MANIFEST_NAME).read_text())
+            self.assertEqual(manifest["target"], "convex")
+
+
 class Manifest(unittest.TestCase):
     def test_reports_what_the_runtime_needs(self):
         with TemporaryDirectory() as raw:
@@ -410,6 +524,7 @@ class Manifest(unittest.TestCase):
             self.assertEqual(manifest["healthcheck"], "/healthz")
             self.assertEqual(manifest["image"], "olympus-app-weight-tracker:latest")
             self.assertEqual(manifest["kind"], "app")
+            self.assertEqual(manifest["target"], "container")
 
 
 class Cli(unittest.TestCase):

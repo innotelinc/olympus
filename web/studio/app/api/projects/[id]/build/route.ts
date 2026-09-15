@@ -11,7 +11,9 @@ import {
   readRunnerState,
 } from "@/lib/build-queue";
 import { specSlug } from "@/lib/factory-spec";
-import { namespaceFor, readProject } from "@/lib/projects";
+import { readProject } from "@/lib/projects";
+import { libraryNamespace } from "@/lib/identities";
+import { auditBuild } from "@/lib/tenancy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,7 +48,7 @@ export async function GET(request: Request, context: Context): Promise<Response>
   if (!gate.ok) return gate.response;
 
   const { id } = await context.params;
-  const project = readProject(namespaceFor(gate.session?.sub), id);
+  const project = readProject(await libraryNamespace(gate), id);
   if (!project) return fail("No such saved app.", 404);
 
   const slug = specSlug(project.title);
@@ -79,7 +81,7 @@ export async function POST(request: Request, context: Context): Promise<Response
   if (!gate.ok) return gate.response;
 
   const { id } = await context.params;
-  const project = readProject(namespaceFor(gate.session?.sub), id);
+  const project = readProject(await libraryNamespace(gate), id);
   if (!project) return fail("No such saved app.", 404);
 
   if (project.files.length === 0) {
@@ -124,6 +126,21 @@ export async function POST(request: Request, context: Context): Promise<Response
         : action === "preview"
           ? queuePreview(project)
           : queueBuild(project, { replace, publish });
+
+    // Build and publish touch a public name or the factory, so they get an audit
+    // row (export is the third, in the export route). A preview is a local run
+    // and is not one of them. Best-effort: the queue write already happened.
+    if (action === "build" || action === "publish") {
+      await auditBuild(gate, action === "publish" ? "build.publish" : "build.start", {
+        targetId: project.id,
+        meta: {
+          slug: queued.slug,
+          job: queued.job,
+          kind: queued.kind,
+          replaced: queued.replaced,
+        },
+      });
+    }
 
     // Which packager a preview runs. The planner's is the one that writes the
     // Dockerfile from the plan; a project saved before the planner has its own.

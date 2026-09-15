@@ -176,42 +176,42 @@ docker-ps: ## List Olympus container status
 docker-ps-host: ## List the host-networked stack's status
 	docker compose -f docker-compose.yml -f compose.host-gateway.yml ps
 
-# The dashboard SSO proxy. Deliberately not folded into `docker-up`: it needs the
-# GATEWAY_* credentials from `make gateway-oidc`, and without them oauth2-proxy
-# would start and then refuse every login, which is the failure mode that looks
-# like a working deployment. See compose.gateway-sso.yml and docs/gateway-sso.md.
-# The gateway now lives in THIS repo's compose (profile `gateway`), published on
-# loopback so the host-side build runner and the SSO proxy can reach it and
-# nothing on the LAN can. It used to be a container from another project; moving
-# it here is what gives it a config that can be recreated. `OMNIROUTE_BASE_URL`
-# stays the loopback URL for that reason — host scripts read the same .env.
-gateway-up: ## Start the in-repo gateway (profile: gateway) and wait for it
-	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi
-	docker compose --profile gateway up -d omniroute
-	@port=$$(sed -n 's/^OMNIROUTE_PORT=//p' .env 2>/dev/null | tail -1 | tr -d "'\" " ); port=$${port:-20128}; \
-	for i in $$(seq 1 30); do \
-		code=$$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$$port/healthz" || true); \
-		if [[ "$$code" == "200" ]]; then echo "gateway: ok — live on 127.0.0.1:$$port"; exit 0; fi; \
-		sleep 2; \
-	done; \
-	echo "gateway: not answering /healthz on 127.0.0.1:$$port — check 'docker logs olympus-omniroute'" >&2; exit 1
-
-gateway-down: ## Stop the in-repo gateway (keeps its data volume)
-	docker compose --profile gateway rm -sf omniroute
+# The dashboard SSO proxy, and the gateway state tooling below it. Deliberately
+# not folded into `docker-up`: the proxy needs the GATEWAY_* credentials from
+# `make gateway-oidc`, and without them oauth2-proxy would start and then refuse
+# every login, which is the failure mode that looks like a working deployment.
+# See compose.gateway-sso.yml and docs/gateway-sso.md.
+#
+# THERE IS NO GATEWAY IN THIS STACK ANY MORE. The single OmniRoute is the Group 2
+# platform service (`2-voice/`, mesh `10.10.2.1`), so this stack starts none and
+# `make gateway-up` / `gateway-down` are gone with the `omniroute` service
+# (ips/docs/convergence-onyx-olympus-distro-atlas.md §4.4). Start or stop the
+# gateway on its own host:
+#
+#   docker compose -f 2-voice/docker-compose.yml up -d omniroute
+#
+# The four targets below stay here because they are the DASHBOARD's tooling, not
+# the gateway's, and the dashboard is one surface wherever the gateway runs — but
+# each has to run on that host, which is what the notes beside them say.
 
 # The gateway's state is ONE volume, and the key that decrypts its provider
 # connections lives inside that same volume (`server.env`) — so the volume does
 # not merely hold the gateway, it is the gateway. This copies both halves into
-# Cerulean Vault, under this stack's own path, so losing the host stops mattering.
-# It is safe to run any time: --check compares the backup with the live gateway
-# and exits non-zero on drift, which is the version worth putting on a timer.
-gateway-vault-backup: ## Back the gateway's keys + connections up to Cerulean Vault
+# Cerulean Vault so losing the host stops mattering.
+#
+# RUN THIS ON THE GATEWAY'S HOST. It asks Docker for the gateway container's own
+# mount, so it needs a Docker that can see `g2-omniroute` (the Group 2 container
+# name) and that host's VAULT_* — the volume, not this checkout, is what is being
+# backed up. It is safe to run any time: `--check` compares the backup with the
+# live gateway and exits non-zero on drift, which is the version worth putting on
+# a timer.
+gateway-vault-backup: ## Back the shared gateway's keys + connections up to Cerulean Vault (run on the gateway's host)
 	python3 scripts/omniroute-vault-backup.py $(ARGS)
 
-gateway-vault-check: ## Fail when the Vault backup no longer matches the live gateway
+gateway-vault-check: ## Fail when the Vault backup no longer matches the live gateway (run on the gateway's host)
 	python3 scripts/omniroute-vault-backup.py --check
 
-gateway-vault-restore: ## Put the stored keys + connections back (ARGS="--force" to overwrite server.env)
+gateway-vault-restore: ## Put the stored keys + connections back (ARGS="--force" to overwrite server.env; run on the gateway's host)
 	python3 scripts/omniroute-vault-backup.py --restore $(ARGS)
 
 gateway-sso-up: ## Put the gateway dashboard behind Cerulean Authentik (oauth2-proxy)

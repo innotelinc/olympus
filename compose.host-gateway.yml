@@ -23,7 +23,10 @@
 # `OMNIROUTE_BASE_URL` (`http://127.0.0.1:20128/v1`) to itself:
 #
 #   http://127.0.0.1:20128/healthz -> FAIL ECONNREFUSED   (from inside Studio)
-#   http://omniroute:20128/healthz -> 200                 (the sibling name)
+#   http://10.10.2.1:20128/healthz -> 200                 (the shared gateway, over the mesh)
+#
+# That second probe is what identifies this case rather than a gateway that is
+# simply down: the address that works is NOT the one in `OMNIROUTE_BASE_URL`.
 #
 # Studio stayed `healthy` throughout, because its healthcheck only asks whether
 # Studio answers. The UI showed an empty pane and the gateway log showed nothing
@@ -32,11 +35,10 @@
 #
 # WHEN NOT TO USE IT
 # ------------------
-# Leave it out if your gateway is published on 0.0.0.0, if every client runs on
-# the compose network (then use the sibling name `http://omniroute:20128/v1`), or
-# if the gateway is on another machine — the base file's defaults already cover
-# those. Read the caveat at the top of docker-compose.yml before changing
-# anything here.
+# Leave it out if the gateway is published on 0.0.0.0, if it is the shared one on
+# another host (then the base file's mesh default already covers you), or if this
+# stack talks to it only from shell scripts. Read the caveat at the top of
+# docker-compose.yml before changing anything here.
 #
 # USAGE
 # -----
