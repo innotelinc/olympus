@@ -11,6 +11,11 @@
 #   leave     drain this host out of the mesh
 #   download  fetch member repos into their group dirs
 #   install   lay out the workspace, download, then join and/or start
+#   deploy    do the same to a REMOTE host over SSH, from here: pick the
+#             components (roster repos + stack extensions) interactively, then
+#             lay out the workspace, clone them, fill each one's .env with
+#             generated credentials (printed once, optionally pushed to Vault)
+#             and, with --join/--up, enrol or start them there
 #
 # Plus the two read-only conveniences:
 #
@@ -40,12 +45,22 @@
 #   scripts/mesh.sh download [repo...] [--group N] [--all] [--pull]
 #   scripts/mesh.sh install  [repo...] [--group N] [--all] [--join] [--up]
 #                            [--pull] [--dry-run]
+#   scripts/mesh.sh deploy   --host [user@]host [--ssh-port N] [--ssh-key FILE]
+#                            [--components LIST] [--root DIR] [--join] [--up]
+#                            [--vault] [--vault-path PATH] [--credentials-file F]
+#                            [--dry-run]
+#                            LIST = all | repos | exts | 1-5 | a group name |
+#                                   comma/space separated repo or ext names
+#                            (no LIST → interactive multi-select)
 #   scripts/mesh.sh status | discover <service> | help
 #
 # Environment overrides
 #   MESH_GIT_BASE   git host for download      (https://github.com/innotelinc)
 #   MESH_STACK_DIR  the platform-stack checkout (auto: <root>/ips)
 #   MESH_DEV_ROOT   the workspace root          (auto: parent of a group dir)
+#   MESH_DEPLOY_ROOT  deploy's target workspace root (default: /opt/innotel)
+#   VAULT_ADDR / VAULT_TOKEN / VAULT_TOKEN_FILE  where --vault pushes secrets
+#   VAULT_PREFIX    KV v2 mount used by --vault  (default: cerulean)
 #
 # Canonical copy: ips/scripts/mesh.sh in the platform-stack repo. Mirrored
 # verbatim into every member repo by scripts/sync-mesh.sh — edit it there.
@@ -82,6 +97,19 @@ DO_UP=0
 SELECT_ALL=0
 SELECT_GROUP=""
 SELECT_REPOS=()
+
+# ── deploy (remote) ──────────────────────────────────────────────────────────
+DEPLOY_HOST=""
+DEPLOY_ROOT="${MESH_DEPLOY_ROOT:-/opt/innotel}"
+SSH_PORT="22"
+SSH_KEY=""
+COMPONENTS=""
+DO_VAULT=0
+VAULT_PATH_OVERRIDE=""
+CRED_FILE=""
+SELECT_COMPONENTS=()
+CRED_NAMES=()
+CRED_VALUES=()
 
 # ── The roster — which repos live on which server ─────────────────────────────
 # <num>|<group>|<repo> [<repo> ...]
@@ -626,6 +654,338 @@ cmd_install() {
   info "Next: ${STACK_DIR}/stack.sh up ${SERVER_N}   ·   ${STACK_DIR}/stack.sh status"
 }
 
+# ── 5. deploy — the install, driven onto a remote host over SSH ─────────────
+# Nothing is installed on this host: every step runs on the target through ssh,
+# so a bare machine needs only sshd + git (docker too for --join/--up).
+# Credentials are generated *here*, written into the target's .env files, printed
+# once at the end, and (with --vault) pushed to the platform Vault — one path per
+# component.
+
+ssh_do() { # remote shell command line (built here, run by the target's shell)
+  [ -n "${DEPLOY_HOST}" ] || die "deploy requires --host [user@]host."
+  local opts=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
+  [ -n "${SSH_KEY}" ] && opts+=(-i "${SSH_KEY}")
+  ssh "${opts[@]}" -p "${SSH_PORT}" "${DEPLOY_HOST}" "$*"
+}
+
+q() { printf '%q' "$1"; }
+
+group_num_for_name() { # voice -> 2
+  case "$1" in
+    1|primary) echo 1 ;; 2|voice) echo 2 ;; 3|media) echo 3 ;;
+    4|social)  echo 4 ;; 5|dev)   echo 5 ;;
+    *) echo "" ;;
+  esac
+}
+
+extension_names() { # ips/extensions/<name>/ext.yml
+  [ -n "${STACK_DIR}" ] || return 0
+  local d
+  for d in "${STACK_DIR}"/extensions/*/; do
+    [ -f "${d}ext.yml" ] && basename "${d}"
+  done
+}
+
+component_list() { # "<kind>|<group>|<name>" — roster repos, then stack extensions
+  local n name
+  for n in 1 2 3 4 5; do
+    for name in $(group_repos "${n}"); do printf 'repo|%s|%s\n' "${n}" "${name}"; done
+  done
+  for name in $(extension_names); do printf 'ext|-|%s\n' "${name}"; done
+}
+
+select_components() {
+  local -a lines=()
+  local line
+  while IFS= read -r line; do [ -n "${line}" ] && lines+=("${line}"); done < <(component_list)
+  [ "${#lines[@]}" -gt 0 ] || die "No components known — is the ips stack checked out (--stack DIR)?"
+
+  local spec="${COMPONENTS}"
+  if [ -z "${spec}" ]; then
+    # %b, not %s: BOLD/NC carry literal `\033` escapes and only printf expands them.
+    printf '\n%bComponents%b\n' "${BOLD}" "${NC}"
+    local i kind n name last=""
+    for i in "${!lines[@]}"; do
+      IFS='|' read -r kind n name <<<"${lines[$i]}"
+      if [ "${kind}" = "repo" ] && [ "${n}" != "${last}" ]; then
+        printf '\n  %b%s-%s%b\n' "${BOLD}" "${n}" "$(group_name_for "${n}")" "${NC}"
+        last="${n}"
+      elif [ "${kind}" = "ext" ] && [ "${last}" != "ext" ]; then
+        printf '\n  %bstack extensions%b\n' "${BOLD}" "${NC}"
+        last="ext"
+      fi
+      printf '   %3d) %-5s %s\n' "$((i + 1))" "${kind}" "${name}"
+    done
+    printf '\nSelect (1,3,5-7 · all · repos · exts · 2/voice · names): '
+    read -r spec
+    [ -n "${spec}" ] || die "Nothing selected."
+  fi
+
+  local token want found r
+  for token in $(printf '%s' "${spec}" | tr ',' ' '); do
+    case "${token}" in
+      all) SELECT_COMPONENTS=("${lines[@]}"); return 0 ;;
+      repos)
+        for line in "${lines[@]}"; do [[ "${line}" == repo\|* ]] && SELECT_COMPONENTS+=("${line}"); done
+        ;;
+      exts|extensions)
+        for line in "${lines[@]}"; do [[ "${line}" == ext\|* ]] && SELECT_COMPONENTS+=("${line}"); done
+        ;;
+      [1-9]|[1-9][0-9]) # a menu number when the spec is a plain list, else server N
+        if [ -n "${COMPONENTS}" ] && [ "${token}" -le 5 ]; then
+          for line in "${lines[@]}"; do [[ "${line}" == repo\|${token}\|* ]] && SELECT_COMPONENTS+=("${line}"); done
+        else
+          [ "${token}" -le "${#lines[@]}" ] && SELECT_COMPONENTS+=("${lines[$((token - 1))]}")
+        fi
+        ;;
+      [0-9]-[0-9]*|[0-9]*-[0-9]*) # menu range a-b
+        local from="${token%%-*}" to="${token##*-}"
+        for ((i = from; i <= to; i++)); do
+          [ "${i}" -ge 1 ] && [ "${i}" -le "${#lines[@]}" ] && SELECT_COMPONENTS+=("${lines[$((i - 1))]}")
+        done
+        ;;
+      */*) # group/name, e.g. 2/capstone
+        local g="${token%%/*}" nm="${token##*/}"
+        g="$(group_num_for_name "${g}")"
+        for line in "${lines[@]}"; do
+          IFS='|' read -r kind n name <<<"${line}"
+          [[ "${name}" == "${nm}" && -z "${g}" || "${name}" == "${nm}" && "${n}" == "${g}" ]] && SELECT_COMPONENTS+=("${line}")
+        done
+        ;;
+      *)
+        found=0
+        for line in "${lines[@]}"; do
+          IFS='|' read -r kind n name <<<"${line}"
+          if [ "${name}" = "${token}" ]; then SELECT_COMPONENTS+=("${line}"); found=1; fi
+        done
+        [ "${found}" = "1" ] || warn "Unknown component '${token}' — skipped"
+        ;;
+    esac
+  done
+
+  # Dedupe (a group and an explicit name overlap all the time).
+  local -a uniq=()
+  for line in "${SELECT_COMPONENTS[@]:-}"; do
+    [ -n "${line}" ] || continue
+    want=1
+    for r in "${uniq[@]:-}"; do [ "${r}" = "${line}" ] && want=0; done
+    [ "${want}" = "1" ] && uniq+=("${line}")
+  done
+  SELECT_COMPONENTS=("${uniq[@]:-}")
+  [ "${#SELECT_COMPONENTS[@]}" -gt 0 ] || die "Nothing selected."
+}
+
+deploy_server() { # the *target's* server number (never this host's)
+  if [ -n "${GROUP_NUM}" ]; then SERVER_N="${GROUP_NUM}"; return 0; fi
+  local line kind n name
+  for line in "${SELECT_COMPONENTS[@]}"; do
+    IFS='|' read -r kind n name <<<"${line}"
+    if [ "${kind}" = "repo" ]; then
+      SERVER_N="${n}"
+      info "Server ${SERVER_N} (group ${n}-$(group_name_for "${n}")) inferred from '${name}' — override with --server N"
+      return 0
+    fi
+  done
+  die "Extensions only — pass --server N so the mesh layout is unambiguous."
+}
+
+deploy_preflight() {
+  info "Target ${DEPLOY_HOST} (ssh port ${SSH_PORT})"
+  if [ "${DRY_RUN}" = "1" ]; then
+    warn "DRY-RUN — skipping the ssh probe of ${DEPLOY_HOST}"
+    return 0
+  fi
+  ssh_do 'true' || die "Cannot ssh to ${DEPLOY_HOST} (BatchMode: use a key, or --ssh-key FILE)."
+  if [ "$(ssh_do 'id -u')" = "0" ]; then
+    ok "root on the target"
+  else
+    info "non-root login (docker needs the target user in the docker group)"
+  fi
+  local tool missing=0
+  for tool in git docker; do
+    if ssh_do "command -v ${tool} >/dev/null 2>&1"; then ok "${tool} present"; else warn "${tool} missing on the target"; [ "${tool}" = git ] && missing=1; fi
+  done
+  [ "${missing}" = "0" ] || die "Install git on ${DEPLOY_HOST} first."
+}
+
+gen_secret() { # [len]
+  local len="${1:-28}"
+  if have openssl; then
+    openssl rand -base64 $((len * 2)) | tr -dc 'A-Za-z0-9' | cut -c1-"${len}"
+  else
+    LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "${len}"
+  fi
+}
+
+# Only keys whose *name* says secret and whose sample value is empty or a
+# placeholder are touched — a real value in .env.example is left alone.
+SECRET_KEY_RE='(PASSWORD|PASS|SECRET|TOKEN|KEY|SALT|CREDENTIAL|WEBHOOK)'
+PLACEHOLDER_RE='(change-me|changeme|change_me|placeholder|example|your[-_]|some-|xxx|todo|hunter2|^$|^secret$|^password$)'
+
+remote_env_set() { # dir key value
+  local dir="$1" key="$2" value="$3"
+  ssh_do "f=$(q "${dir}/.env"); if grep -q '^${key}=' \"\$f\"; then sed -i 's|^${key}=.*|${key}=${value}|' \"\$f\"; else printf '%s=%s\n' ${key} ${value} >> \"\$f\"; fi"
+}
+
+deploy_env_credentials() { # dir component
+  local dir="$1" component="$2"
+  local example
+  example="$(ssh_do "cat $(q "${dir}/.env.example") 2>/dev/null" || true)"
+  if [ -z "${example}" ]; then info "${component}: no .env.example — nothing to seed"; return 0; fi
+  [ "${DRY_RUN}" = "1" ] || ssh_do "test -f $(q "${dir}/.env") || cp $(q "${dir}/.env.example") $(q "${dir}/.env")"
+
+  local line key value gen
+  local -a pairs=()
+  local -a keys=()
+  while IFS= read -r line; do
+    case "${line}" in '#'*|'') continue ;; esac
+    key="${line%%=*}"; value="${line#*=}"
+    [[ "${key}" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
+    [[ "${key}" =~ ${SECRET_KEY_RE} ]] || continue
+    [[ "${value}" =~ ${PLACEHOLDER_RE} ]] || continue
+    gen="$(gen_secret 28)"
+    if [ "${DRY_RUN}" = "1" ]; then
+      info "DRY-RUN — would set ${component}:${key}"
+    else
+      remote_env_set "${dir}" "${key}" "${gen}" || warn "${component}: could not write ${key}"
+    fi
+    pairs+=("${key}=${gen}")
+    keys+=("${key}")
+    CRED_NAMES+=("${component}:${key}")
+    CRED_VALUES+=("${gen}")
+  done <<<"${example}"
+
+  if [ "${#keys[@]}" -gt 0 ]; then
+    ok "${component}: ${#keys[@]} credential(s) generated — ${keys[*]}"
+    vault_push "${component}" "${pairs[@]}"
+  else
+    info "${component}: no placeholder secrets in .env.example"
+  fi
+}
+
+vault_push() { # component KEY=VALUE...
+  local component="$1"; shift
+  [ "${DO_VAULT}" = "1" ] || return 0
+  if [ -z "${VAULT_ADDR:-}" ]; then warn "VAULT_ADDR unset — not pushing ${component}"; return 0; fi
+  local token="${VAULT_TOKEN:-}"
+  if [ -z "${token}" ] && [ -n "${VAULT_TOKEN_FILE:-}" ] && [ -f "${VAULT_TOKEN_FILE}" ]; then
+    token="$(cat "${VAULT_TOKEN_FILE}")"
+  fi
+  if [ -z "${token}" ]; then warn "No Vault token (VAULT_TOKEN / VAULT_TOKEN_FILE) — not pushing ${component}"; return 0; fi
+  have python3 || { warn "python3 not found — cannot build the Vault payload for ${component}"; return 0; }
+
+  local prefix="${VAULT_PREFIX:-cerulean}" path="${VAULT_PATH_OVERRIDE:-${component}}"
+  local -a curl_args=(-fsS -X POST)
+  [ -n "${VAULT_NAMESPACE:-}" ] && curl_args+=(-H "X-Vault-Namespace: ${VAULT_NAMESPACE}")
+  [ "${VAULT_SKIP_VERIFY:-}" = "1" ] && curl_args+=(-k)
+
+  local payload
+  payload="$(printf '%s\n' "$@" | python3 -c 'import json, sys
+kv = {}
+for line in sys.stdin.read().splitlines():
+    if "=" in line:
+        k, v = line.split("=", 1)
+        kv[k] = v
+print(json.dumps({"data": kv}))')" || { warn "${component}: could not build the payload"; return 0; }
+
+  local url="${VAULT_ADDR%/}/v1/${prefix}/data/${path}"
+  if [ "${DRY_RUN}" = "1" ]; then warn "DRY-RUN — would write $(($#)) key(s) to ${url}"; return 0; fi
+  if curl "${curl_args[@]}" "${url}" -H "X-Vault-Token: ${token}" --data "${payload}" >/dev/null; then
+    ok "${component}: stored in Vault at ${prefix}/data/${path}"
+  else
+    warn "${component}: Vault write failed (${url})"
+  fi
+}
+
+cmd_deploy() {
+  have ssh || die "ssh is required for deploy."
+  require_stack
+  [ -n "${DEPLOY_HOST}" ] || die "Usage: mesh.sh deploy --host [user@]host [--components LIST]"
+
+  select_components
+  deploy_server
+  deploy_preflight
+
+  local root="${DEPLOY_ROOT}" n
+  info "Workspace root on the target: ${root}"
+  local kind name slug dir ids=()
+  for n in 1 2 3 4 5; do
+    if [ "${DRY_RUN}" = "1" ]; then
+      info "DRY-RUN — would ensure ${root}/${n}-$(group_name_for "$n")/"
+    else
+      ssh_do "mkdir -p $(q "${root}/${n}-$(group_name_for "$n")")"
+    fi
+  done
+
+  local any_repo=0
+  for ids in "${SELECT_COMPONENTS[@]}"; do
+    IFS='|' read -r kind n name <<<"${ids}"
+    if [ "${kind}" = "ext" ]; then
+      info "extension '${name}' — enabled on the target with stack.sh enable ${name} ${SERVER_N}"
+      continue
+    fi
+    any_repo=1
+    slug="$(repo_slug "${name}")"
+    dir="${root}/${n}-$(group_name_for "${n}")/${name}"
+    if [ "${DRY_RUN}" = "1" ]; then
+      info "DRY-RUN — would clone ${MESH_GIT_BASE:-https://github.com/innotelinc}/${slug}.git → ${DEPLOY_HOST}:${dir}"
+      continue
+    fi
+    if ssh_do "test -d $(q "${dir}/.git")"; then
+      if ssh_do "git -C $(q "${dir}") pull --ff-only"; then ok "${name} — updated"; else warn "${name} — pull failed; left as is"; fi
+    elif ssh_do "mkdir -p $(q "$(dirname "${dir}")") && git clone --depth 1 $(q "${MESH_GIT_BASE:-https://github.com/innotelinc}/${slug}.git") $(q "${dir}")"; then
+      ok "${name} — cloned to ${dir}"
+    else
+      err "${name} — clone failed (${MESH_GIT_BASE:-https://github.com/innotelinc}/${slug}.git)"; continue
+    fi
+    deploy_env_credentials "${dir}" "${name}"
+  done
+
+  # Extensions are enabled through the stack on the target (it owns the group
+  # composes), so they need the stack checkout there too.
+  if [ "${any_repo}" = "1" ] && [ "${DO_UP}" = "1" ]; then
+    local stack_dir="${root}/ips"
+    if [ "${DRY_RUN}" = "1" ]; then
+      info "DRY-RUN — would run ${stack_dir}/stack.sh up ${SERVER_N} on the target"
+    else
+      ssh_do "test -d $(q "${stack_dir}/.git") || git clone --depth 1 $(q "${MESH_GIT_BASE:-https://github.com/innotelinc}/innotel-platform-stack.git") $(q "${stack_dir}")"
+      for ids in "${SELECT_COMPONENTS[@]}"; do
+        IFS='|' read -r kind n name <<<"${ids}"
+        [ "${kind}" = "ext" ] && ssh_do "cd $(q "${stack_dir}") && ./stack.sh enable ${name} ${SERVER_N}"
+      done
+      ssh_do "cd $(q "${stack_dir}") && ./stack.sh up ${SERVER_N}"
+    fi
+  fi
+
+  if [ "${DO_JOIN}" = "1" ]; then
+    local join_repo
+    join_repo="${root}/${SERVER_N}-$(group_name_for "${SERVER_N}")/$(group_repos "${SERVER_N}" | awk '{print $1}')"
+    if [ "${DRY_RUN}" = "1" ]; then
+      info "DRY-RUN — would run ${join_repo}/scripts/mesh.sh join --server ${SERVER_N} on the target"
+    else
+      ssh_do "cd $(q "${join_repo}") && ./scripts/mesh.sh join --server ${SERVER_N}"
+    fi
+  fi
+
+  ok "Deploy to ${DEPLOY_HOST} complete."
+  if [ "${#CRED_NAMES[@]}" -gt 0 ]; then
+    printf '\n%bGenerated credentials%b (also written to the target .env files)\n' "${BOLD}" "${NC}"
+    local i
+    for i in "${!CRED_NAMES[@]}"; do printf '  %-46s %s\n' "${CRED_NAMES[$i]}" "${CRED_VALUES[$i]}"; done
+    if [ -n "${CRED_FILE}" ]; then
+      {
+        printf '# credentials generated by mesh.sh deploy for %s on %s\n' "${DEPLOY_HOST}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        for i in "${!CRED_NAMES[@]}"; do printf '%s=%s\n' "${CRED_NAMES[$i]}" "${CRED_VALUES[$i]}"; done
+      } > "${CRED_FILE}"
+      printf '\nwrote %s (mode 600)\n' "${CRED_FILE}"
+      chmod 600 "${CRED_FILE}" 2>/dev/null || true
+    fi
+  else
+    warn "No credentials were generated — check the components' .env.example files."
+  fi
+  info "Next: ssh ${DEPLOY_HOST} 'cd ${root}/ips && ./stack.sh status'"
+}
+
 # ── status / discover ────────────────────────────────────────────────────────
 cmd_status() {
   find_stack
@@ -701,6 +1061,13 @@ main() {
       --up)         DO_UP=1; shift ;;
       --purge)      PURGE=1; shift ;;
       --no-verify)  NO_VERIFY=1; shift ;;
+      --host)       DEPLOY_HOST="$2"; shift 2 ;;
+      --ssh-port)   SSH_PORT="$2"; shift 2 ;;
+      --ssh-key)    SSH_KEY="$2"; shift 2 ;;
+      --components) COMPONENTS="$2"; shift 2 ;;
+      --credentials-file) CRED_FILE="$2"; shift 2 ;;
+      --vault)      DO_VAULT=1; shift ;;
+      --vault-path) DO_VAULT=1; VAULT_PATH_OVERRIDE="$2"; shift 2 ;;
       --dry-run)    DRY_RUN=1; shift ;;
       -h|--help)    usage; exit 0 ;;
       -*)           die "Unknown option: $1" ;;
@@ -713,6 +1080,7 @@ main() {
     leave)    cmd_leave ;;
     download) cmd_download ;;
     install)  cmd_install ;;
+    deploy)   cmd_deploy ;;
     status)   cmd_status ;;
     discover) cmd_discover "${SELECT_REPOS[@]:-}" ;;
     help|-h|--help) usage ;;
