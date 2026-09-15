@@ -1,5 +1,6 @@
 import { authorizeRequest } from "@/lib/auth";
-import { ProjectError, listProjects, namespaceFor, saveProject } from "@/lib/projects";
+import { ProjectError, listProjects, saveProject } from "@/lib/projects";
+import { libraryNamespace } from "@/lib/identities";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,7 +24,7 @@ export async function GET(request: Request): Promise<Response> {
   const gate = authorizeRequest(request);
   if (!gate.ok) return gate.response;
 
-  const namespace = namespaceFor(gate.session?.sub);
+  const namespace = await libraryNamespace(gate);
   return Response.json({ projects: listProjects(namespace) }, { headers: NO_STORE });
 }
 
@@ -39,7 +40,7 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const body = (payload ?? {}) as Record<string, unknown>;
-  const namespace = namespaceFor(gate.session?.sub);
+  const namespace = await libraryNamespace(gate);
 
   try {
     const { project, created } = saveProject(namespace, body);

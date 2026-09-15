@@ -1,7 +1,8 @@
 import { authorizeRequest } from "@/lib/auth";
 import { MAX_LOG_BYTES, readBuildLog } from "@/lib/build-queue";
 import { specSlug } from "@/lib/factory-spec";
-import { namespaceFor, readProject } from "@/lib/projects";
+import { readProject } from "@/lib/projects";
+import { libraryNamespace } from "@/lib/identities";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,7 +40,7 @@ export async function GET(request: Request, context: Context): Promise<Response>
   if (!gate.ok) return gate.response;
 
   const { id } = await context.params;
-  const project = readProject(namespaceFor(gate.session?.sub), id);
+  const project = readProject(await libraryNamespace(gate), id);
   if (!project) return fail("No such saved app.", 404);
 
   const job = (new URL(request.url).searchParams.get("job") ?? "").trim();

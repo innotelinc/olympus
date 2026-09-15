@@ -1,15 +1,16 @@
 import {
   chatCompletionsUrl,
   chooseModel,
-  isPlaceholderSecret,
-  readConfig,
   sseToTextStream,
+  withStreamEnd,
   type PriorFile,
+  type TokenUsage,
 } from "@/lib/omniroute";
 import { PlanError, generationMessages, parsePlanObject } from "@/lib/plan";
 import { parseKind } from "@/lib/projects";
 import { authorizeRequest, identityKey } from "@/lib/auth";
 import { checkRateLimit } from "@/lib/ratelimit";
+import { beginTurn, finishTurn } from "@/lib/tenancy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -66,13 +67,13 @@ export async function POST(request: Request): Promise<Response> {
   const gate = authorizeRequest(request);
   if (!gate.ok) return gate.response;
 
-  const config = readConfig();
-  if (isPlaceholderSecret(config.apiKey)) {
-    return fail(
-      "No gateway key is configured. Set OMNIROUTE_API_KEY in the repo .env and restart Studio.",
-      503,
-    );
-  }
+  // Whose key pays, and whether they may spend it. Resolved before the stream is
+  // opened: a refused turn must not reach the gateway at all. See lib/tenancy for
+  // why identity is strict and the quota check is not.
+  const started = await beginTurn(gate);
+  if (!started.ok) return started.response;
+  const { turn } = started;
+  const config = turn.config;
 
   // Every generation bills the shared model pool, so each identity gets a
   // bounded number of attempts per minute. OIDC callers are keyed by their
@@ -175,10 +176,33 @@ export async function POST(request: Request): Promise<Response> {
     return fail(`Gateway responded ${upstream.status} for model "${model}".${hint}${suffix}`, 502);
   }
 
+  // The turn is reported when the stream ends, not when the handler returns — a
+  // stream has not been paid for until it has been generated. Token counts come
+  // from the gateway's own tail when it sends them (see extractUsage); a gateway
+  // that sends none still gets the request recorded.
+  let usage: TokenUsage | null = null;
+  const upstreamBody = upstream.body as ReadableStream<Uint8Array>;
+  const reportTurn = (): void => {
+    const reported = usage as TokenUsage | null;
+    void finishTurn(turn, {
+      tokensIn: reported?.tokensIn ?? 0,
+      tokensOut: reported?.tokensOut ?? 0,
+      requests: 1,
+      model,
+    });
+  };
+
   const contentType = upstream.headers.get("content-type") ?? "";
-  const stream = contentType.includes("text/event-stream")
-    ? sseToTextStream(upstream.body as ReadableStream<Uint8Array>)
-    : (upstream.body as ReadableStream<Uint8Array>);
+  const stream = withStreamEnd(
+    contentType.includes("text/event-stream")
+      ? sseToTextStream(upstreamBody, {
+          onUsage: (reported) => {
+            usage = reported;
+          },
+        })
+      : upstreamBody,
+    reportTurn,
+  );
 
   return new Response(stream, {
     status: 200,

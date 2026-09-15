@@ -143,10 +143,48 @@ failing obscurely.
 | `STUDIO_PUBLIC_HOST` | — | Public host the edge serves Studio on. Read by `make studio-oidc`, which registers `https://<host>/api/auth/callback` as a redirect URI; Studio itself derives the callback from the request. |
 | `BASE_DOMAIN` | — | The stack's root host. Read by `make studio-oidc` too: the root name serves a landing screen with a sign-in button, so its callback is registered alongside the studio host's — sign-in works from whichever host the visitor arrived on. |
 | `STUDIO_DATA_DIR` | `<repo>/data/studio` | Where saved apps live. The compose service points it at a named volume. |
+| `CONTROL_PLANE_INTERNAL_URL` | — | Distro's control plane (tenancy). Empty = single-operator, spending the shared `OMNIROUTE_API_KEY`; set = every turn is spent on the signed-in user's own key, with quota and usage recorded. See *Tenancy* below. |
+| `CONTROL_INTERNAL_TOKEN` | — | Service-to-service token for the control plane's identity/audit routes. Must match `CONTROL_INTERNAL_TOKEN` there (Distro's bootstrap generates it). |
 | `STUDIO_RATE_LIMIT_PER_MIN` | `20` | Generations per minute per signed-in identity on `/api/generate` (hard cap 600). Exceeding it answers `429` with `retry-after`; rejected requests consume no budget. `0` (or `off`) disables the limit — for a single-operator deployment behind the IdP; a typo falls back to the default, never to unlimited. The **deployment default**; the operator can override it at runtime (next section). |
 
 Placeholders from `.env.example` (`change-me…`) count as unset, so an unedited
 template fails loudly instead of sending a bogus key.
+
+### Tenancy — whose key pays
+
+Studio is single-tenant in the ways that cost money: with no tenancy configured
+it spends **one** gateway key from `.env`, with no per-identity attribution and no
+per-user quota. Distro's control plane already solved that (OmniRoute accounts per
+**API key**, so `user ↔ gateway_key` gives attribution and enforcement without
+touching the gateway), and Studio consumes it as its tenancy layer.
+
+Set `CONTROL_PLANE_INTERNAL_URL` + `CONTROL_INTERNAL_TOKEN` and, per model turn:
+
+1. **Identity.** Studio resolves the signed-in Authentik subject to a
+   control-plane account (`POST /api/internal/identity`), creating it and minting
+   that user's gateway key on first sight. A `409` — the email is already bound to
+   a *different* subject — is surfaced, never papered over.
+2. **Quota.** `GET /api/internal/quota-check` decides, before dispatch. Denied is
+   a `429` naming the reason, and nothing reaches the gateway.
+3. **Spend.** The turn runs on **that user's** key. There is no quiet fallback to
+   the shared key: a fallback would move one user's spend onto the operator's,
+   which is the problem tenancy exists to fix.
+4. **Record.** `POST /api/internal/usage-report` after the turn, and an audit row
+   for build, publish and export — the three actions that touch a public name or
+   the repository.
+
+What is strict and what is not, deliberately: **the key is strict**, and a control
+plane that cannot *identify* a caller is a `503`. **The quota check fails open** (a
+read-only hiccup on the tenancy service must not stop a user from building; the
+key's own hard cap is the backstop), and **accounting is best-effort** — a turn
+already paid for must not fail because the ledger write did.
+
+The library follows the account: saved apps are keyed on the control-plane user id.
+An existing subject-keyed library is **adopted** — `$STUDIO_DATA_DIR/identities.json`
+records the mapping pointing at the directory the files are already in — so turning
+tenancy on does not appear to lose anything. Token counts for a streamed turn come
+from the gateway's own stream tail when it sends them; a gateway that sends none
+still gets the request recorded.
 
 ### Changing the rate limit without a redeploy
 
@@ -608,10 +646,13 @@ looked fine because Studio's healthcheck only asks whether Studio answers.
 
 | Topology | `OMNIROUTE_BASE_URL` |
 | --- | --- |
-| Gateway is a sibling container | `http://omniroute:20128/v1` — and attach Studio to that container's network |
-| Gateway is loopback-published on the host | Run Studio with host networking, then `http://127.0.0.1:20128/v1` — `make docker-studio-up` |
-| Gateway is on another machine | `http://<lan-ip>:20128/v1` |
-| Gateway is published on `0.0.0.0` | `http://host.docker.internal:20128/v1` (the compose default) |
+| Shared gateway, another host (the platform default) | `http://<gateway-host>:20128/v1` — the mesh value, `http://10.10.2.1:20128/v1`. OmniRoute serves its API and dashboard on that one port |
+| Gateway behind this stack's Authentik SSO proxy | `http://<gateway-host>:20129/v1` — the proxy's door, which is `GATEWAY_SSO_PORT` below |
+| Gateway is loopback-published on THIS host | Run Studio with host networking, then `http://127.0.0.1:20128/v1` — `make docker-studio-up` |
+| Gateway is published on `0.0.0.0` on this host | `http://host.docker.internal:20128/v1` |
+
+The old "sibling container" row (`http://omniroute:20128/v1`) is gone with the
+`omniroute` service: this stack starts no gateway, so there is no sibling to name.
 
 ## Deploying behind Cerulean + NPM Edge
 

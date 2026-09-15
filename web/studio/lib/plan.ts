@@ -31,6 +31,7 @@
 // component imports `missingPlannedFiles`), and `projects.ts` owns `node:fs`. A
 // kind is two words; it has no business pulling a filesystem into a client bundle.
 import { parseKind, type ProjectKind } from "./kinds";
+import { parseTarget, type PlanTarget } from "./targets";
 
 /** Longest a command may be. Generous, but a plan is not a shell script. */
 const MAX_COMMAND_CHARS = 500;
@@ -95,6 +96,17 @@ export type BuildPlan = {
    * rather than asking again.
    */
   kind: ProjectKind;
+  /**
+   * What serves the project's state — its own container's database, or the
+   * deployment's self-hosted Convex backend.
+   *
+   * Read through `parseTarget` rather than trusted, for the same reason `kind` is:
+   * the packager and the runtime each act on this field, so a value neither of them
+   * understands has to collapse to the default here rather than being interpreted
+   * twice. `./targets` explains why this is a plan field and not a fourth kind, and
+   * why a website is always `container`.
+   */
+  target: PlanTarget;
   summary: string;
   runtime: PlanRuntime;
   run: PlanRun;
@@ -240,6 +252,11 @@ export function parsePlanObject(payload: unknown): BuildPlan {
     name,
     slug: slugify(name, kind),
     kind,
+    // A website is always a container. Static files have nowhere to keep a query and
+    // nothing that can run a function, so a website that claimed Convex would be a
+    // plan nothing could build — and the packager refuses exactly that, which would
+    // turn a vocabulary mistake into a failed build minutes later.
+    target: kind === "website" ? "container" : parseTarget(root.target),
     summary: asText(root.summary, MAX_SUMMARY_CHARS) || "No summary was given.",
     runtime: {
       language: asText(runtime.language, 40) || "unknown",
@@ -378,6 +395,7 @@ Reply with exactly this JSON shape and no other keys:
 {
   "name": "Weight Tracker",
   "kind": "app",
+  "target": "container",
   "summary": "One or two sentences: what it does and the stack you chose, in the language of the person who asked.",
   "runtime": {
     "language": "node",
@@ -403,6 +421,7 @@ Rules:
 - \`files\` is every file you intend to write, with a short purpose each. It is what the person reads to judge the plan, so list real paths, not directories.
 - \`notes\` is where a genuine caveat goes. Do not use it for a summary of the summary, and do not pad it.
 - "static" means there is no toolchain and no process to start — plain HTML, CSS and JavaScript that nginx serves. Leave \`install\` and \`build\` empty and make \`start\` exactly \`nginx -g 'daemon off;'\`. A React or Vite site is "node", because something has to bundle it.
+- \`target\` is what serves the state. "container" is the default and almost always right: the project keeps its own database, on disk, beside its code, in its own container. "convex" is only for a request that genuinely needs live, shared, realtime state, and it means the deployment's self-hosted Convex backend serves it — Atlas runs one. Do not choose "convex" for a single-user app that a file-backed database serves. A "website" is always "container".
 - \`kind\` is exactly "app" or "website", decided from the request. It has to match the plan you wrote: a "website" has no database and its \`start\` is nginx serving static files, and an "app" has a server that stays in the foreground and keeps state. A plan whose \`kind\` contradicts its own \`runtime\` and \`run\` is the one thing here that cannot be confirmed.
 - No markdown fences, no prose before or after the JSON. The object is the whole reply.`;
 
@@ -482,6 +501,9 @@ function describePlan(plan: BuildPlan): string {
     `Name: ${plan.name}`,
     `What it is: ${kindLine}`,
     `Stack: ${stack}`,
+    plan.target === "convex"
+      ? "Data target: Convex — the deployment's self-hosted backend (Atlas). The schema and the functions deploy there; the deployment URL reaches the build as `CONVEX_URL`."
+      : "",
     `What it does: ${plan.summary}`,
     `Files the plan listed:\n${files}`,
     plan.notes ? `Notes from the plan: ${plan.notes}` : "",
@@ -535,9 +557,11 @@ export function generationMessages(
     "- Declare dependency versions that exist. Do not invent a version number; if you are unsure of the current one, use a range that cannot resolve to nothing.",
     `- The server must listen on port ${plan.run.port} and bind every interface, not just localhost. Binding 127.0.0.1 is the most common way a project that works locally is unreachable once it is running.`,
     "- Read configuration from environment variables and fall back to a working default. There is no .env file to read and no secrets to be given.",
-    plan.runtime.database
-      ? `- Persistence is ${plan.runtime.database}. Keep what the user enters: a tracker that forgets is not a tracker. A file-backed database lives on disk next to the code and survives a restart.`
-      : "- This project keeps no state. Do not add a database or a server it does not need.",
+    plan.target === "convex"
+      ? `- Persistence and compute are Convex's. Write the schema and the functions under \`convex/\`, and let the client use the deployment the build points it at: \`CONVEX_URL\`, plus the framework-visible \`VITE_CONVEX_URL\` / \`NEXT_PUBLIC_CONVEX_URL\` set to the same value — read whichever your framework exposes. Never hardcode a deployment URL, never write a deploy key into the project, and do not add a database of your own: the Convex deployment is where the data lives.`
+      : plan.runtime.database
+        ? `- Persistence is ${plan.runtime.database}. Keep what the user enters: a tracker that forgets is not a tracker. A file-backed database lives on disk next to the code and survives a restart.`
+        : "- This project keeps no state. Do not add a database or a server it does not need.",
     "- Do not add a step that is not in the plan and do not change the commands above. Nothing else runs.",
   ].join("\n");
 

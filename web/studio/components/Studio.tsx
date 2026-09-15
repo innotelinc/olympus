@@ -1771,6 +1771,10 @@ export default function Studio({
                 ))}
                 <li>{plan.runtime.database ? plan.runtime.database : "no database"}</li>
                 <li>{plan.kind === "website" ? "static" : "persistent"}</li>
+                {/* Only when it is not the default: a chip reading "container" on every
+                    plan would be noise, and the absence of a Convex chip is the
+                    answer for everything that is not one. */}
+                {plan.target === "convex" ? <li>convex backend</li> : null}
               </ul>
 
               <dl className="plan-run">

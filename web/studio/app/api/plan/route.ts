@@ -1,12 +1,8 @@
-import {
-  chooseModel,
-  completeChat,
-  isPlaceholderSecret,
-  readConfig,
-} from "@/lib/omniroute";
+import { chooseModel, completeChat, type TokenUsage } from "@/lib/omniroute";
 import { PlanError, planMessages, parsePlan } from "@/lib/plan";
 import { authorizeRequest, identityKey } from "@/lib/auth";
 import { checkRateLimit } from "@/lib/ratelimit";
+import { beginTurn, finishTurn } from "@/lib/tenancy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,13 +72,13 @@ export async function POST(request: Request): Promise<Response> {
   const gate = authorizeRequest(request);
   if (!gate.ok) return gate.response;
 
-  const config = readConfig();
-  if (isPlaceholderSecret(config.apiKey)) {
-    return fail(
-      "No gateway key is configured. Set OMNIROUTE_API_KEY in the repo .env and restart Studio.",
-      503,
-    );
-  }
+  // Whose key pays, and whether they may spend it — resolved before anything is
+  // dispatched, so a refused turn costs nothing. Identity is strict (no silent
+  // fallback to the shared key) and the quota check fails open; see lib/tenancy.
+  const started = await beginTurn(gate);
+  if (!started.ok) return started.response;
+  const { turn } = started;
+  const config = turn.config;
 
   const rate = checkRateLimit(identityKey(gate));
   if (!rate.ok) {
@@ -110,6 +106,7 @@ export async function POST(request: Request): Promise<Response> {
     return fail(`${chosen.reject} Pick one from the list, or leave it on the default.`, 400);
   }
 
+  let usage: TokenUsage | null = null;
   let reply: string;
   try {
     reply = await completeChat(config, {
@@ -121,6 +118,10 @@ export async function POST(request: Request): Promise<Response> {
       // file list still fits.
       maxTokens: 2_000,
       temperature: 0.2,
+      // The gateway's own count, when it reports one. Recorded below.
+      onUsage: (reported) => {
+        usage = reported;
+      },
     });
   } catch (error) {
     if (request.signal.aborted) return new Response(null, { status: 499 });
@@ -128,6 +129,18 @@ export async function POST(request: Request): Promise<Response> {
       ? ((error as { status: number }).status)
       : 502;
     return fail(error instanceof Error ? error.message : "The planner failed.", status);
+  }
+
+  // Recorded before the plan is validated, because the gateways charged for (and
+  // the user spent) the turn whether or not the answer parsed.
+  if (turn.caller) {
+    const reported = usage as TokenUsage | null;
+    await finishTurn(turn, {
+      tokensIn: reported?.tokensIn ?? 0,
+      tokensOut: reported?.tokensOut ?? 0,
+      requests: 1,
+      model: chosen.model,
+    });
   }
 
   let plan;

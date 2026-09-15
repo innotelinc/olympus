@@ -10,6 +10,13 @@ from a list" — it loses them the way a locked box loses its contents. Measured
 during the move into this repository: all ten connections came across only
 because `server.env` came with them.
 
+RUN IT ON THE GATEWAY'S HOST. The gateway is the platform's single OmniRoute in
+Group 2 (`2-voice/`, mesh `10.10.2.1`); this script is the tooling for the DASHBOARD
+and its state, so it belongs beside the volume rather than beside whichever stack
+is talking to the gateway. It asks Docker for the container's own mount, which
+means a Docker that can see the gateway container (`g2-omniroute` by default) and
+that host's VAULT_* — the volume is what is being backed up, not this checkout.
+
 `scripts/omniroute-restore-providers.py` already answers "how do I move
 connections between gateways". This answers the other half — "what do I hold on
 to, so that a gateway can be rebuilt at all" — by putting both halves of that
@@ -64,7 +71,12 @@ RESTORE_SCRIPT = REPO_ROOT / "scripts" / "omniroute-restore-providers.py"
 DEFAULT_PREFIX = "cerulean"
 DEFAULT_PATH = "olympus"
 VAULT_ENTRY = "omniroute"
-DEFAULT_CONTAINER = "olympus-omniroute"
+# The gateway moved to Group 2 (`2-voice/`), where the platform's single
+# OmniRoute runs — so the container to ask is the GROUP's, not this stack's.
+# Run this script on that host; override with --container, or point --data-dir /
+# OMNIROUTE_DATA_DIR straight at the volume's mount when the container is named
+# something else.
+DEFAULT_CONTAINER = "g2-omniroute"
 DEFAULT_HOST_DATA_DIR = Path("/root/.omniroute")
 
 KEY_SERVER_ENV = "SERVER_ENV"
@@ -427,8 +439,9 @@ def do_restore(
     `server.env` has to exist before the gateway is started on that volume, and the
     connections can only be imported into a gateway that is already running. So a
     restore that stops between the two is not a corrupt state, it is an unfinished
-    one: the keys are in place and re-running after `make gateway-up` finishes the
-    job. That is why the failure says so rather than only exiting non-zero.
+    one: the keys are in place and re-running once the gateway is started on that
+    volume finishes the job. That is why the failure says so rather than only
+    exiting non-zero.
     """
     values, version, updated = vault.read()
     if not values:
@@ -504,8 +517,9 @@ def do_restore(
     print(f"data dir   {data_dir}")
     print(f"server.env {report['server_env']}")
     print(f"providers  {restored} connection(s) added")
-    print("\nNext: start the gateway and check it can decrypt what it was given —")
-    print("  make gateway-up && make build-model-check")
+    print("\nNext: start the gateway on that volume and check it can decrypt what it was given —")
+    print("  docker compose -f 2-voice/docker-compose.yml up -d omniroute")
+    print("  make build-model-check   # from the Olympus checkout, against the shared gateway")
     return EXIT_OK
 
 

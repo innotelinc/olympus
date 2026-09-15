@@ -10,25 +10,33 @@
 # probe it. Containers labelled `autoheal=true` are restarted by the autoheal
 # service below when their healthcheck fails.
 #
-# The gateway defaults to an external instance. READ THE CAVEAT:
-# `host.docker.internal:20128` only works when the gateway is bound to a routable
-# address. A gateway published as 127.0.0.1:20128 (loopback-only) is NOT reachable
-# from a bridge network — verified. Pick the wiring that matches your topology:
-#   sibling container            OMNIROUTE_BASE_URL=http://omniroute:20128/v1  (+ same network)
-#   loopback-published on host   run that service with network_mode: host, use http://127.0.0.1:20128/v1
-#   gateway on another machine   OMNIROUTE_BASE_URL=http://<lan-ip>:20128/v1
-#   published on 0.0.0.0         OMNIROUTE_BASE_URL=http://host.docker.internal:20128/v1 (default below)
+# THE GATEWAY IS A SHARED PLATFORM SERVICE — this file starts none. The single
+# OmniRoute lives in Group 2 (`2-voice/`, mesh `10.10.2.1`; Consul service
+# `omniroute`), because one gateway means one provider pool and one place to
+# rotate. Olympus used to carry a second copy behind `profiles: ['gateway']`;
+# it was removed once the shared one held the provider connections (see
+# ips/docs/convergence-onyx-olympus-distro-atlas.md §4.4).
 #
-# The gateway is also a service in THIS file (`omniroute`, profile `gateway`), so
-# inside this project it is always reachable as `http://omniroute:20128/v1` and
-# the loopback row above stops being necessary — but only for services on the
-# compose network. Nothing here picks the URL for a service: `OMNIROUTE_BASE_URL`
-# is read from the same `.env` the host-side build runner uses, and that has to
-# stay the loopback URL. So the rule on this host is narrower than the table:
-# whenever the gateway is published on loopback, every service that talks to it
-# runs with `compose.host-gateway.yml`. `make docker-studio-up` is how Studio
-# gets there; starting Studio without it is silent — Studio resolves
-# `127.0.0.1:20128` to itself and every generation fails ECONNREFUSED.
+# `OMNIROUTE_BASE_URL` still has to survive the topology it is used from. READ THE
+# CAVEAT: `host.docker.internal:20128` only works when the gateway is bound to a
+# routable address, and a gateway published as 127.0.0.1:20128 (loopback-only) is
+# NOT reachable from a bridge network — verified. Pick the row that matches:
+#   shared gateway over the mesh  OMNIROUTE_BASE_URL=http://10.10.2.1:20128/v1 (default below)
+#                                 (OmniRoute serves its API and dashboard on that one port;
+#                                  the :20129 door is this stack's own SSO proxy, below)
+#   loopback-published on host    run the services with network_mode: host, use http://127.0.0.1:20128/v1
+#   published on 0.0.0.0          OMNIROUTE_BASE_URL=http://host.docker.internal:20128/v1
+#
+# Nothing here picks the URL for a service: `OMNIROUTE_BASE_URL` is read from the
+# same `.env` the host-side build runner uses. Whenever the gateway is published
+# on THIS host's loopback, every service that talks to it runs with
+# `compose.host-gateway.yml`. `make docker-studio-up` is how Studio gets there;
+# starting Studio without it is silent — Studio resolves `127.0.0.1:20128` to
+# itself and every generation fails ECONNREFUSED.
+
+# Project name is pinned so container/volume names never depend on where this
+# repo is checked out (the mesh puts it in 5-dev/olympus).
+name: olympus
 
 services:
   olympus:
@@ -50,7 +58,7 @@ services:
       - path: .env
         required: false
     environment:
-      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://host.docker.internal:20128/v1}
+      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://${MESH_GATEWAY_HOST:-10.10.2.1}:20128/v1}
       OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       SPEC: ${SPEC:-}
@@ -101,7 +109,7 @@ services:
         required: false
     # See the OmniRoute caveat at the top of this file before changing the base URL.
     environment:
-      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://host.docker.internal:20128/v1}
+      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://${MESH_GATEWAY_HOST:-10.10.2.1}:20128/v1}
       OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
       OMNIROUTE_MODEL: ${OMNIROUTE_MODEL:-auto/coding}
       STUDIO_ACCESS_TOKEN: ${STUDIO_ACCESS_TOKEN:-}
@@ -114,6 +122,12 @@ services:
       # listed group only, everyone else gets 403.
       OIDC_ALLOWED_GROUPS: ${OIDC_ALLOWED_GROUPS:-}
       STUDIO_SESSION_SECRET: ${STUDIO_SESSION_SECRET:-}
+      # Tenancy (Distro's control plane — convergence §5.2). With these set, a
+      # turn is spent on the signed-in user's own gateway key, quota is checked
+      # before it and usage recorded after it; with them empty Studio falls back
+      # to the single shared OMNIROUTE_API_KEY above, exactly as before.
+      CONTROL_PLANE_INTERNAL_URL: ${CONTROL_PLANE_INTERNAL_URL:-}
+      CONTROL_INTERNAL_TOKEN: ${CONTROL_INTERNAL_TOKEN:-}
       # Saved-app library. Without this volume the store lives in the container
       # and every app disappears on the next image build.
       STUDIO_DATA_DIR: ${STUDIO_DATA_DIR:-/app/data/studio}
@@ -170,7 +184,7 @@ services:
   # the staged copy is reachable without anyone installing a web server by hand.
   #
   # Host networking for the same reason the SSO proxy uses it: the NPM edge lives
-  # on another host (192.168.1.71) and has to reach back to a LAN address, and
+  # on another host (192.168.1.46) and has to reach back to a LAN address, and
   # `network_mode: host` is what makes that address exist. It binds ONE port —
   # ${SITE_PORT:-20130} — on every interface, so a site staged here is readable by
   # anything that can route to this host. That is the intent: a published site is
@@ -216,58 +230,20 @@ services:
       # nginx would keep serving :80 as well.
       - ./deploy/nginx-sites.conf.template:/etc/nginx/templates/default.conf.template:ro
 
-  # OmniRoute — the model gateway, brought inside the stack (opt-in).
+  # The OmniRoute gateway is NOT here. It is the shared platform service in
+  # Group 2 (`2-voice/`), one provider pool for every platform; the `omniroute`
+  # service and the `omniroute-data` volume that used to sit at this point were
+  # removed in ips/docs/convergence-onyx-olympus-distro-atlas.md §4.4.
   #
-  # The PUBLISHED IMAGE, not a source build. `core-modules/omniroute` (which
-  # setup.sh keeps for the `omniroute` CLI and for reading upstream) is a
-  # reference checkout; what serves traffic is `diegosouzapw/omniroute:latest`.
-  # Running that same artefact here is what makes the settings API and
-  # scripts/omniroute-restore-providers.py talk to the deployed product rather
-  # than to a local build of it.
-  #
-  #   docker compose --profile gateway up -d omniroute
-  #
-  # Profile-gated so a plain `docker compose up` neither pulls a ~3 GB image nor
-  # surprises a deployment whose gateway lives somewhere else.
-  #
-  # LOOPBACK ONLY, deliberately. The dashboard writes provider credentials and can
-  # read them back, so it is not a LAN service: reach it through the SSO proxy
-  # (compose.gateway-sso.yml) or a tunnel, never by widening this binding.
-  #
-  # `make gateway-up` starts this and waits for /healthz. The volume below is the
-  # whole gateway: provider connections, settings, the dashboard password hash —
-  # and `server.env`, whose STORAGE_ENCRYPTION_KEY is what decrypts the
-  # connections it sits beside. Lose the volume and the credentials are not
-  # "missing", they are unreadable; see docs/stack.md.
-  omniroute:
-    image: diegosouzapw/omniroute:latest
-    container_name: olympus-omniroute
-    profiles: ["gateway"]
-    restart: unless-stopped
-    labels:
-      - "autoheal=true"
-    environment:
-      # Carried over from the gateway this replaced, so a session already signed
-      # in stays signed in. It signs the dashboard's cookies and lives in the
-      # environment rather than the volume, so it is the one thing the volume
-      # copy does not bring across.
-      JWT_SECRET: ${OMNIROUTE_JWT_SECRET:-}
-      # INITIAL_PASSWORD is NOT passed here on purpose. It only takes effect
-      # against an empty volume, and `.env` carries it as a `vault://` reference
-      # that compose cannot resolve — passing the literal string would set that
-      # literal as the dashboard password. Seed a fresh volume the documented
-      # way instead: scripts/omniroute-vault.sh reads the same reference.
-    volumes:
-      # Provider connections, settings and the dashboard password hash. Without
-      # this volume every image rebuild is a fresh gateway with no providers —
-      # exactly the state scripts/omniroute-restore-providers.py exists to repair.
-      - omniroute-data:/app/data
-    ports:
-      - "127.0.0.1:${OMNIROUTE_PORT:-20128}:20128"
-    # No healthcheck here on purpose: the image ships its own
-    # (`node healthcheck.mjs`, 30s interval), and `autoheal` watches that. An
-    # override would only pin us to a worse probe than upstream's and stop us
-    # inheriting their fixes.
+  # The gateway's STATE (provider connections, settings, the dashboard password
+  # hash, and `server.env`, whose STORAGE_ENCRYPTION_KEY decrypts them) is one
+  # volume on the gateway's host. `make gateway-vault-backup` / `-check` /
+  # `-restore` copy it to Cerulean Vault and must be run THERE, not here —
+  # scripts/omniroute-vault-backup.py asks Docker for the container's own mount,
+  # so it needs a Docker that can see the gateway (`--container g2-omniroute`).
+  # `make gateway-sso-up` / `gateway-edge` / `gateway-auth-mode` belong on that
+  # host too: the SSO proxy forwards to the gateway's loopback binding, so the
+  # dashboard gate has to run beside the dashboard. See docs/gateway-sso.md.
 
   # Autoheal — restarts containers whose healthcheck reports "unhealthy".
   #
@@ -298,8 +274,6 @@ services:
 
 volumes:
   olympus-builds:
-  # The gateway's state — providers, settings, dashboard password.
-  omniroute-data:
   # Studio's saved apps — per Authentik identity, one JSON file each.
   studio-data:
 
