@@ -75,6 +75,20 @@ export async function GET(request: Request): Promise<Response> {
       );
     }
     const detail = error instanceof Error ? error.message : "unknown error";
+    // `invalid_client` from the token endpoint is the one failure an operator
+    // cannot read off the screen: it means Authentik did not accept the
+    // client_id/client_secret Studio presented, and the fix is a known command
+    // rather than anything about the browser. Say so instead of echoing the
+    // raw body.
+    if (/invalid_client/i.test(detail)) {
+      return deny(
+        "Sign-in failed: Authentik rejected Studio's client credentials (invalid_client). " +
+          "The OIDC_CLIENT_ID / OIDC_CLIENT_SECRET do not match the registered provider. " +
+          "Run `make studio-oidc ARGS=--rotate-secret`, set OIDC_CLIENT_SECRET (Cerulean Vault) " +
+          "to the value it prints, restart Studio, or run `make studio-oidc-check` to diagnose.",
+        401,
+      );
+    }
     return deny(`Sign-in failed: ${detail}`, 401);
   }
 
