@@ -26,7 +26,7 @@ export type MockOidc = {
   /** Back to the published RS256 key with no overrides. */
   resetSigning: () => void;
   /** Whether the token endpoint should fail. */
-  failTokenEndpoint: (status: number) => void;
+  failTokenEndpoint: (status: number, errorCode?: string) => void;
   lastTokenRequest: () => { body: string; authorization: string | null } | null;
   counts: () => Record<"discovery" | "jwks" | "token", number>;
   close: () => Promise<void>;
@@ -66,6 +66,10 @@ export async function startMockOidc(options: {
   let rogueSignature = false;
   let forcedAlgorithm: string | null = null;
   let tokenFailureStatus = 0;
+  // What a forced token failure reports. `invalid_grant` is the ordinary shape
+  // (the code was bad); `invalid_client` is the one that means "these
+  // credentials do not authenticate" and gets its own operator-facing message.
+  let tokenFailureError = "invalid_grant";
   let nonce = "";
   let overrides: Record<string, unknown> = {};
   let lastToken: { body: string; authorization: string | null } | null = null;
@@ -122,7 +126,7 @@ export async function startMockOidc(options: {
         lastToken = { body: raw, authorization: request.headers.authorization ?? null };
 
         if (tokenFailureStatus) {
-          return send(tokenFailureStatus, { error: "invalid_grant" });
+          return send(tokenFailureStatus, { error: tokenFailureError });
         }
 
         const now = Math.floor(Date.now() / 1000);
@@ -185,8 +189,9 @@ export async function startMockOidc(options: {
       rogueSignature = false;
       forcedAlgorithm = null;
     },
-    failTokenEndpoint: (status) => {
+    failTokenEndpoint: (status, errorCode) => {
       tokenFailureStatus = status;
+      tokenFailureError = errorCode ?? "invalid_grant";
     },
     lastTokenRequest: () => lastToken,
     counts: () => ({ ...counts }),

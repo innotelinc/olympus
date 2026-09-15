@@ -194,6 +194,112 @@ def resolve_vault_reference(value: str, setting, env_path: Path) -> str:
     return resolved.strip()
 
 
+def verify_client(setting, env_path: Path) -> int:
+    """Prove the configured client_id/client_secret actually authenticate.
+
+    A login failure at the token endpoint is opaque from the client side: both a
+    wrong secret and a public client return the same `400 invalid_client`, and
+    Authentik stores the secret write-only, so nothing can be diffed by hand.
+
+    The one honest probe is a request that CANNOT succeed on the code but does
+    exercise client authentication first. A bogus `code` with a real
+    client_id/client_secret comes back `invalid_grant` (the client was accepted,
+    the code was not) — while bad credentials come back `invalid_client`. The two
+    are therefore distinguishable without a browser, and this is read-only: it
+    mints nothing and changes nothing.
+    """
+    import base64
+
+    issuer = setting("OIDC_ISSUER_URL").rstrip("/")
+    client_id = setting("OIDC_CLIENT_ID")
+    client_secret = setting("OIDC_CLIENT_SECRET")
+
+    if not issuer:
+        print("verify-client: OIDC_ISSUER_URL is not set in the environment or " + str(env_path), file=sys.stderr)
+        return 2
+    if not client_id or not client_secret:
+        print(
+            "verify-client: OIDC_CLIENT_ID / OIDC_CLIENT_SECRET are not both set — "
+            "nothing to verify. Put the values the client presents in .env (or export them).",
+            file=sys.stderr,
+        )
+        return 2
+
+    discovery_url = f"{issuer}/.well-known/openid-configuration"
+    try:
+        with urllib.request.urlopen(discovery_url, timeout=30) as response:
+            document = json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as error:
+        print(f"verify-client: discovery at {discovery_url} answered HTTP {error.code}", file=sys.stderr)
+        return 2
+    except (urllib.error.URLError, OSError) as error:
+        print(f"verify-client: could not reach {discovery_url}: {getattr(error, 'reason', error)}", file=sys.stderr)
+        return 2
+
+    token_endpoint = document.get("token_endpoint")
+    if not token_endpoint:
+        print(f"verify-client: discovery at {discovery_url} names no token_endpoint", file=sys.stderr)
+        return 2
+
+    # `redirect_uri` must be one the provider knows; the first configured one is
+    # a safe default and its value does not affect the client-auth verdict.
+    redirect_uri = (default_redirect_uris(setting) or ["http://localhost/callback"])[0]
+
+    body = urlencode(
+        {
+            "grant_type": "authorization_code",
+            "code": "probe-invalid-code",
+            "redirect_uri": redirect_uri,
+            "client_id": client_id,
+            "code_verifier": "probe-invalid-verifier",
+        }
+    ).encode()
+    request = urllib.request.Request(token_endpoint, data=body, method="POST")
+    request.add_header("Content-Type", "application/x-www-form-urlencoded")
+    request.add_header("Accept", "application/json")
+    request.add_header(
+        "Authorization",
+        "Basic " + base64.b64encode(f"{client_id}:{client_secret}".encode()).decode(),
+    )
+
+    payload: dict = {}
+    status = 0
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            status = response.status
+            payload = json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as error:
+        status = error.code
+        try:
+            payload = json.loads(error.read() or b"{}")
+        except Exception:
+            payload = {}
+    except (urllib.error.URLError, OSError) as error:
+        print(f"verify-client: could not reach {token_endpoint}: {getattr(error, 'reason', error)}", file=sys.stderr)
+        return 2
+
+    error_code = str(payload.get("error", ""))
+    print(f"verify-client: {token_endpoint} answered HTTP {status} {error_code or '(no error)'}")
+
+    if error_code == "invalid_client":
+        print(
+            "  FAIL: Authentik rejected the client credentials (invalid_client).\n"
+            "  The OIDC_CLIENT_ID / OIDC_CLIENT_SECRET do not authenticate this provider.\n"
+            "  Repair:  make studio-oidc ARGS=--rotate-secret   # prints the new secret once\n"
+            "  then set OIDC_CLIENT_SECRET (Cerulean Vault) to that value and restart Studio.\n"
+            "  A provider left as a PUBLIC client also lands here — this same command\n"
+            "  patches client_type back to 'confidential'.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        "  ok: the client authenticated (this probe fails only on the fake code, "
+        "which is the point) — the credentials Studio presents are valid."
+    )
+    return 0
+
+
 def default_redirect_uris(setting) -> list[str]:
     """Local callback; the public host's callback; the stack's root host too.
 
@@ -321,6 +427,11 @@ def main() -> int:
     )
     parser.add_argument("--api-base", default="")
     parser.add_argument("--token", default="")
+    parser.add_argument(
+        "--verify-client",
+        action="store_true",
+        help="probe the token endpoint to prove the configured client_id/client_secret authenticate (read-only)",
+    )
     parser.add_argument("--env-file", default="")
     parser.add_argument(
         "--env-prefix",
@@ -354,6 +465,12 @@ def main() -> int:
                     file=sys.stderr,
                 )
         return ""
+
+    # The client-credential probe needs no Authentik API token, so it answers
+    # before this script demands one — a checkout that can reach the issuer but
+    # has no API token can still prove whether sign-in will work.
+    if args.verify_client:
+        return verify_client(setting, env_path)
 
     api_base = args.api_base or setting("AUTHENTIK_URL")
     token = args.token or resolve_vault_reference(setting("AUTHENTIK_TOKEN"), setting, env_path)
@@ -445,6 +562,21 @@ def main() -> int:
             patch["redirect_uris"] = [
                 {"matching_mode": "strict", "url": uri} for uri in [*current_uris, *missing_uris]
             ]
+        # A provider left as a PUBLIC client cannot authenticate at the token
+        # endpoint at all: the client sends its secret and Authentik answers
+        # `400 invalid_client` ("unsupported authentication method"). None of the
+        # repairs above look at HOW the client authenticates, so an app that
+        # exists but was created as public stays broken forever while every
+        # re-run reports it "fully configured". Confidential is what a
+        # server-side client like Studio must be.
+        if provider.get("client_type") != "confidential":
+            patch["client_type"] = "confidential"
+        # Same class of gap, same symptom: a provider registered under a
+        # different client_id than the one this client presents is unknown to
+        # Authentik, which also answers `invalid_client`. Re-point it instead of
+        # leaving a duplicate to be discovered by hand.
+        if provider.get("client_id") and provider.get("client_id") != args.client_id:
+            patch["client_id"] = args.client_id
         if args.rotate_secret:
             rotated_secret = secrets.token_urlsafe(48)
             patch["client_secret"] = rotated_secret
@@ -461,6 +593,12 @@ def main() -> int:
             if "grant_types" in patch:
                 print(f"\n  grant_types was {sorted(current_grants)} — patched to {repaired.get('grant_types')}")
                 print("  (without this, Authentik answers 'Invalid grant_type for provider' at /authorize)")
+            if "client_type" in patch:
+                print(f"  client_type was {provider.get('client_type')!r} — patched to 'confidential'")
+                print("  (without this, Authentik answers 'invalid_client' at the token endpoint)")
+            if "client_id" in patch:
+                print(f"  client_id was {provider.get('client_id')!r} — patched to {args.client_id!r}")
+                print("  (the client presented a client_id Authentik did not know)")
             if missing_uris:
                 print(f"  registered redirect URI(s): {', '.join(missing_uris)}")
             if rotated_secret:

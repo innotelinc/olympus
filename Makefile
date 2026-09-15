@@ -496,6 +496,10 @@ studio-oidc-check: ## Confirm the issuer answers discovery, and the credential i
 	code=$$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$$url" || true); \
 	if [[ "$$code" == "200" ]]; then echo "discovery: ok — $$url"; else echo "discovery: HTTP $$code from $$url" >&2; exit 1; fi
 	@python3 scripts/authentik-studio-token.py --check $(ARGS)
+	@# The credential the browser flow actually uses: a bogus code against the
+	@# token endpoint separates "invalid_client" (credentials wrong — the exact
+	@# 400 that surfaces as `Sign-in failed:` in Studio) from "invalid_grant".
+	@python3 scripts/authentik-studio-app.py --verify-client
 
 studio-token-check: ## Report the registration credential's expiry (exit 2 once it is lapsing)
 	@if [[ ! -f .env ]]; then echo "no .env — cp .env.example .env first" >&2; exit 2; fi

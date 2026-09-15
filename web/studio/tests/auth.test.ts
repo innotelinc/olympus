@@ -518,6 +518,28 @@ describe("callback route", () => {
     expect(response.status).toBe(401);
     expect(await response.text()).toMatch(/token endpoint returned 400/i);
   });
+
+  it("explains an invalid_client rejection instead of echoing it", async () => {
+    oidc.failTokenEndpoint(400, "invalid_client");
+
+    const loginResponse = await loginGet(new Request("http://studio.test/api/auth/login"));
+    const flowCookie = cookieValue(loginResponse.headers, FLOW_COOKIE)!;
+    const state = new URL(loginResponse.headers.get("location")!).searchParams.get("state")!;
+    const flow = readFlow(`${FLOW_COOKIE}=${flowCookie}`, readAuthConfig()!)!;
+    oidc.setNonce(flow.nonce);
+
+    const response = await callbackGet(
+      new Request(`http://studio.test/api/auth/callback?code=auth-code&state=${state}`, {
+        headers: { cookie: `${FLOW_COOKIE}=${flowCookie}` },
+      }),
+    );
+
+    const body = await response.text();
+    expect(response.status).toBe(401);
+    // The fix lives in the operator's hands, so the message names it.
+    expect(body).toMatch(/invalid_client/i);
+    expect(body).toMatch(/studio-oidc/);
+  });
 });
 
 describe("route protection", () => {
