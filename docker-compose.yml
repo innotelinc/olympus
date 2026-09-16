@@ -157,8 +157,15 @@ services:
       # neither queue nor see a heartbeat; `make studio-build-queue-dir` (or
       # scripts/studio-export-dir.sh) settles it for uid 1001.
       - ./.factory/build-queue:/app/build-queue
+    # Not published on every interface. Studio was on 0.0.0.0, so anyone on the
+    # LAN could reach the app directly and skip the edge — and with it the
+    # sign-in the edge performs (docs/gateway-sso.md). The edge is a container on
+    # its own bridge, so it cannot reach a loopback-only port; it dials the
+    # docker0 gateway instead, which is the same pattern the DNS console uses.
+    # STUDIO_EDGE_HOST is the address the NPM proxy hosts must point at.
     ports:
-      - "${STUDIO_PORT:-3001}:3001"
+      - "127.0.0.1:${STUDIO_PORT:-3001}:3001"
+      - "${STUDIO_EDGE_HOST:-172.17.0.1}:${STUDIO_PORT:-3001}:3001"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

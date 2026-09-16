@@ -406,9 +406,18 @@ def edge_targets_this_host(cfg):
 
 
 def local_addresses():
-    """This host's own addresses, as a proxy host would name them."""
+    """This host's own addresses, as a proxy host would name them.
+
+    Every interface, not just the outbound one. A service published on the LAN
+    address and a service published only on the docker bridge are both *this*
+    host, and the edge — itself a container — reaches the latter as 172.17.0.1.
+    The assertion below exists to catch the edge pointing somewhere else
+    entirely (it is what found the legacy 192.168.1.10 deployment), so it has to
+    know both spellings or it fires on a correct configuration.
+    """
     addrs = {"127.0.0.1", "localhost", "host.docker.internal"}
     import socket
+    import subprocess
 
     for probe in ("8.8.8.8", "1.1.1.1"):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -419,6 +428,21 @@ def local_addresses():
             pass
         finally:
             sock.close()
+
+    try:
+        out = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return addrs
+    for line in out.splitlines():
+        parts = line.split()
+        # `2: eth0    inet 192.168.1.46/24 brd ...`
+        if len(parts) > 3 and parts[2] == "inet":
+            addrs.add(parts[3].split("/")[0])
     return addrs
 
 
