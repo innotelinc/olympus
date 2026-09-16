@@ -206,18 +206,21 @@ was re-pointed at the new host:
 | Public `/v1`, `/v1/models` | `403`, refused at the edge | unchanged — `403` |
 | LAN `/ping` via the proxy | `200` | unchanged — `200` |
 
-Two things measured on `.46` **differ from what the table below records**, and both
-matter enough to say rather than leave stale:
+Two things measured on `.46` **differed from what the table below records**. The
+first has since been fixed; the second is still true and is why the key is treated
+as a label:
 
-* **The gateway is published on `0.0.0.0:20128`, not loopback.** The container running
-  here (`diegosouzapw/omniroute:latest`) was started outside this repo's compose, which
-  is why no compose file declares that binding — and why
-  `compose.gateway-sso.yml`'s premise ("the gateway has no network surface") does not
-  hold on this host. The LAN can therefore reach the dashboard's own login directly and
-  skip the proxy, and with it the `cerulean-platform` group check: `/dashboard` → `307`,
-  `/api/providers` → `401`. Not credential-free, but a weaker door than the one
-  described below. Closing it means re-creating that container with
-  `-p 127.0.0.1:20128:20128`, which is why this is recorded rather than changed.
+* ~~**The gateway is published on `0.0.0.0:20128`, not loopback.**~~ **Fixed.** The
+  container had been started by hand outside any compose file, which is why no
+  compose file declared the binding. It is now created by
+  `2-voice/capstone/docker-compose.yml` (its real owner), which binds
+  `127.0.0.1:20128` and `172.17.0.1:20128` — the two names every consumer resolves
+  (`host.docker.internal` → `172.17.0.1` via `host-gateway`, and loopback for
+  host-mode processes). The LAN address refuses connections, the proxy still reaches
+  it on loopback, and the stored providers survived the recreate because the volume
+  (`capstone_omniroute_data`) and all four secrets were fingerprinted as unchanged
+  before the swap. So `compose.gateway-sso.yml`'s premise ("the gateway has no
+  network surface") holds again on this host.
 * **`/v1` does check a key here.** `401` with no key and `401` with a bogus one, both
   direct to `20128` and through the proxy. The "key is not a gate" finding below belongs
   to the build that ran on `.10`.
@@ -359,7 +362,7 @@ edge       NPM (192.168.1.46) :443     →  http://172.17.0.1:20129
 proxy      oauth2-proxy                →  Authentik, for everything but /ping
 session    oauth2-proxy                →  redis at 127.0.0.1:16379
 gateway    omniroute                   →  127.0.0.1:20128
-                                          (published on 0.0.0.0 here — see Where this now runs)
+                                          (bound to loopback + docker0 — see Where this now runs)
 ```
 
 A resolver that does not answer is a DNS error. A dead edge is a connection
