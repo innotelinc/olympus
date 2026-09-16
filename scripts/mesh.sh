@@ -181,8 +181,9 @@ find_stack() {
 
 require_stack() {
   find_stack
-  [ -n "${STACK_DIR}" ] && [ -f "${STACK_DIR}/stack.sh" ] \
-    || die "Platform stack (ips) not found. Pass MESH_STACK_DIR=/path/to/ips."
+  if [ -z "${STACK_DIR}" ] || [ ! -f "${STACK_DIR}/stack.sh" ]; then
+    die "Platform stack (ips) not found. Pass MESH_STACK_DIR=/path/to/ips."
+  fi
 }
 
 ENV_FILE() { echo "${STACK_DIR:-}/.env"; }
