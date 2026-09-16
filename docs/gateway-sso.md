@@ -9,7 +9,7 @@ proxy that authenticates against Cerulean Authentik and admits only members of
 ```
 browser ──https──▶ NPM edge (192.168.1.46)
                        │  gateway.olympus.innotel.us  (CNAME → innotel.us → 73.68.203.71)
-                       ▼  http://192.168.1.10:20129
+                       ▼  http://172.17.0.1:20129
                  gateway-sso (oauth2-proxy) ──▶ Authentik OIDC + group check
                        │  └──▶ redis at 127.0.0.1:16379   (the session lives here)
                        │  http://127.0.0.1:20128
@@ -28,7 +28,7 @@ the next section — that is not a preference, it is the one path that cannot wo
 | --- | --- |
 | Public name | `gateway.olympus.innotel.us` — CNAME `gateway.olympus` → `innotel.us` in zone `innotel.us` |
 | Certificate | Let's Encrypt, issued by Cerulean (its row #16), exported to NPM as certificate #174 |
-| Edge | NPM proxy host #198 → `http://192.168.1.10:20129`, TLS enforced, websockets on |
+| Edge | NPM proxy host #81 → `http://172.17.0.1:20129`, TLS enforced, websockets on |
 | Proxy | `olympus-gateway-sso` (`quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine`), host networking, listens `0.0.0.0:20129` |
 | Session store | `olympus-gateway-sso-sessions` (`redis:7-alpine`), loopback only on `127.0.0.1:16379`, password from `GATEWAY_SSO_REDIS_PASSWORD` |
 | Upstream | `http://127.0.0.1:20128` (the gateway's loopback binding) |
@@ -149,7 +149,7 @@ sorts callers by what they are:
 
 | Path | Who gets in | Why |
 | --- | --- | --- |
-| `/v1/*` | anyone who can reach `192.168.1.10:20129` — **no key is checked** (see below) | inference clients send `Authorization: Bearer …`, not a session cookie, so an interactive OIDC login here would break every one of them rather than add a check. The door is the LAN address, and **the public name refuses this path at the edge** |
+| `/v1/*` | anyone who can reach `192.168.1.46:20129` — and then the gateway's own key check, which on this build does reject a missing or bogus key (see below) | inference clients send `Authorization: Bearer …`, not a session cookie, so an interactive OIDC login here would break every one of them rather than add a check. The door is the LAN address, and **the public name refuses this path at the edge** |
 | `/healthz` | anyone | liveness, 200 with no body and no secrets |
 | everything else, including `/dashboard` and `/api/providers` | an Authentik session in `cerulean-platform` | this is the surface that reads and writes provider credentials |
 
@@ -163,6 +163,11 @@ sorts callers by what they are:
 > at the edge — `make gateway-edge --deny-path /v1`, asserted by
 > `make gateway-edge-check` — and the LAN address above is how a client on another
 > machine reaches inference. Treat the key as a label, not a gate.
+>
+> **Re-measured on `.46` — see [Where this now runs](#where-this-now-runs):** there,
+> `/v1/models` answers `401` with no key *and* `401` with a bogus one, both direct and
+> through the proxy. So the finding above is a property of the build that ran on `.10`,
+> not of the gateway running now.
 
 `--skip-auth-route` is what draws that line. `/api/auth/login` is deliberately
 **not** on it: that is the dashboard's own password login, and exempting it would
@@ -175,8 +180,8 @@ neither is achieved by changing the gateway's binding:
 
 ```bash
 # from any machine on the LAN — the address, not the name
-curl -H "Authorization: Bearer $OMNIROUTE_API_KEY" http://192.168.1.10:20129/v1/models
-OMNIROUTE_BASE_URL=http://192.168.1.10:20129/v1
+curl -H "Authorization: Bearer $OMNIROUTE_API_KEY" http://192.168.1.46:20129/v1/models
+OMNIROUTE_BASE_URL=http://192.168.1.46:20129/v1
 ```
 
 **Not the published name.** `https://gateway.olympus.innotel.us/v1/*` answers `403` by
@@ -184,6 +189,41 @@ edge rule: that name exists to reach the dashboard, and `/v1` there handed the i
 an unauthenticated inference API. A client on another machine points
 `OMNIROUTE_BASE_URL` at the LAN address; nothing else about its setup changes. It can
 send the key — the key is not what is being checked.
+
+## Where this now runs
+
+The stack below was first stood up on `192.168.1.10`. It now runs on `192.168.1.46`
+(`5-dev/olympus`), together with the rest of the estate — see
+[host-migration.md](host-migration.md). The proxy and the gateway moved, and the edge
+was re-pointed at the new host:
+
+| | On `.10` | On `.46` (live) |
+| --- | --- | --- |
+| Edge | NPM host #198 → `.10:20129` | NPM host **#81** → `172.17.0.1:20129`, cert `#5`, websockets on |
+| Proxy | `0.0.0.0:20129` | `*:20129` |
+| Upstream | `127.0.0.1:20128` | `127.0.0.1:20128` (`GATEWAY_SSO_UPSTREAM`, unchanged) |
+| Public `/` | `302` → Authentik | unchanged — `302` |
+| Public `/v1`, `/v1/models` | `403`, refused at the edge | unchanged — `403` |
+| LAN `/ping` via the proxy | `200` | unchanged — `200` |
+
+Two things measured on `.46` **differ from what the table below records**, and both
+matter enough to say rather than leave stale:
+
+* **The gateway is published on `0.0.0.0:20128`, not loopback.** The container running
+  here (`diegosouzapw/omniroute:latest`) was started outside this repo's compose, which
+  is why no compose file declares that binding — and why
+  `compose.gateway-sso.yml`'s premise ("the gateway has no network surface") does not
+  hold on this host. The LAN can therefore reach the dashboard's own login directly and
+  skip the proxy, and with it the `cerulean-platform` group check: `/dashboard` → `307`,
+  `/api/providers` → `401`. Not credential-free, but a weaker door than the one
+  described below. Closing it means re-creating that container with
+  `-p 127.0.0.1:20128:20128`, which is why this is recorded rather than changed.
+* **`/v1` does check a key here.** `401` with no key and `401` with a bogus one, both
+  direct to `20128` and through the proxy. The "key is not a gate" finding below belongs
+  to the build that ran on `.10`.
+
+Everything below is the original record, taken against the `.10` deployment unless a
+row says otherwise.
 
 ## What was verified, and what was not
 
@@ -315,10 +355,11 @@ sentence in a browser:
 
 ```
 DNS        gateway.olympus.innotel.us  CNAME  innotel.us  → A  73.68.203.71
-edge       NPM (192.168.1.46) :443     →  http://192.168.1.10:20129
+edge       NPM (192.168.1.46) :443     →  http://172.17.0.1:20129
 proxy      oauth2-proxy                →  Authentik, for everything but /ping
 session    oauth2-proxy                →  redis at 127.0.0.1:16379
-gateway    omniroute, loopback only     →  127.0.0.1:20128
+gateway    omniroute                   →  127.0.0.1:20128
+                                          (published on 0.0.0.0 here — see Where this now runs)
 ```
 
 A resolver that does not answer is a DNS error. A dead edge is a connection

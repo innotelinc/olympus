@@ -6,10 +6,10 @@ never what happened. The name is four separate things wired in series, and each 
 fails with the same sentence in a browser:
 
     DNS        gateway.olympus.innotel.us  CNAME  innotel.us  → A  73.68.203.71
-    edge       NPM (192.168.1.46) :443     →  http://192.168.1.10:20129
+    edge       NPM (192.168.1.46) :443     →  http://172.17.0.1:20129
     proxy      oauth2-proxy                →  Authentik (302) for anything but /ping
     session    oauth2-proxy                →  redis at 127.0.0.1:16379
-    gateway    omniroute, loopback         →  127.0.0.1:20128
+    gateway    omniroute                   →  127.0.0.1:20128
 
 A resolver that does not answer produces a DNS error; an edge that is down produces
 a connection timeout; a lapsed certificate produces a TLS warning; a stopped proxy
