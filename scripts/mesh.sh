@@ -256,9 +256,8 @@ cmd_join() {
   have docker || die "docker is required to join the mesh."
   resolve_server
 
-  local gname genv mesh_ip consul_addr consul_flag file
+  local gname mesh_ip consul_addr consul_flag file
   gname="$(group_name_for "${SERVER_N}")"
-  genv="$(group_env_for "${SERVER_N}")"
   mesh_ip="10.10.${SERVER_N}.1"
   if [ "${SERVER_N}" = "1" ]; then
     consul_addr="${mesh_ip}";  consul_flag="-server=true -bootstrap-expect=1"
@@ -323,9 +322,14 @@ cmd_join() {
   # the mesh compose reads them, so pin them here too for a bare `mesh.sh join`.
   export CONSUL_SERVER_ADDR="${consul_addr}"
   export CONSUL_SERVER_FLAG="${consul_flag}"
-  export MESH_SUBNET="$(echo "${mesh_ip}" | sed 's/\.[0-9]*$/.0/')"
+  # Strip the last octet with parameter expansion (SC2001) — no subprocess,
+  # and the assignment is split from the export (SC2155).
+  local mesh_subnet="${mesh_ip%.*}.0"
+  export MESH_SUBNET="${mesh_subnet}"
   export INTERNAL_SUBNET="${MESH_SUBNET}"
-  export SERVER_PUBLIC_IP="$(env_get "SERVER_${SERVER_N}_PUBLIC_IP")"
+  local server_public_ip
+  server_public_ip="$(env_get "SERVER_${SERVER_N}_PUBLIC_IP")"
+  export SERVER_PUBLIC_IP="${server_public_ip}"
   export REGISTRY_ADDR="10.10.1.1:8500"
   export MESH_PORT="${MESH_PORT_OVERRIDE:-51820}"
   export MESH_NETWORK="10.10.0.0/16"
@@ -559,8 +563,9 @@ resolve_selection() {
 }
 
 require_workspace() {
-  [ -n "${DEV_ROOT}" ] && [ -d "${DEV_ROOT}" ] \
-    || die "No workspace root — run from a group checkout or set MESH_DEV_ROOT=/path/to/root."
+  if [ -z "${DEV_ROOT}" ] || [ ! -d "${DEV_ROOT}" ]; then
+    die "No workspace root — run from a group checkout or set MESH_DEV_ROOT=/path/to/root."
+  fi
 }
 
 cmd_download() {
@@ -992,7 +997,7 @@ cmd_status() {
   local name n
   n="$(detect_server)"
   name="${REPO_NAME}"
-  printf "\n${BOLD}═══ Innotel mesh — this host ═══${NC}\n\n"
+  printf '\n%s═══ Innotel mesh — this host ═══%s\n\n' "${BOLD}" "${NC}"
   printf '  repo        %s\n' "${name}"
   printf '  workspace   %s\n' "${DEV_ROOT:-(standalone checkout)}"
   printf '  stack       %s\n' "${STACK_DIR:-(not found)}"
