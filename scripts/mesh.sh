@@ -124,9 +124,8 @@ EOF
 # Repos whose git remote name differs from the dir name it is checked out as.
 repo_slug() {
   case "$1" in
-    ips)  echo "innotel-platform-stack" ;;
-    sign) echo "sign-platform" ;;
-    *)    echo "$1" ;;
+    ips) echo "innotel-platform-stack" ;;
+    *)   echo "$1" ;;
   esac
 }
 
