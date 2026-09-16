@@ -52,10 +52,19 @@ Confirmed here: `192.168.1.10`'s Studio held a credential Authentik rejected, an
 
 | Name | Served from | Move |
 | --- | --- | --- |
-| `studio.olympus.innotel.us`, `olympus.innotel.us` | ~~`.10:3001`~~ → **`.46:3050`** (done) | ✅ re-pointed, login verified |
+| `studio.olympus.innotel.us`, `olympus.innotel.us` | ~~`.10:3001`~~ → **`172.17.0.1:3050`** (done) | ✅ re-pointed, login verified |
 | `*.studio.olympus.innotel.us` (3 sites × published + preview) | `.10:20130` | pending — one container + vhost per site |
 | `gateway.olympus.innotel.us` | `.10:20129` | pending — the OmniRoute SSO proxy |
 | `secure.innotel.us` | `.10:8088` | pending — not part of this stack |
+
+The Studio upstream is the **docker0 gateway**, not the LAN address, because Studio
+is no longer published on every interface: it binds `127.0.0.1` and `172.17.0.1`
+only (`docker-compose.yml`, `STUDIO_EDGE_HOST`). Anyone on the LAN could otherwise
+reach the app directly and skip the edge — and with it the sign-in the edge does.
+The edge is itself a container on its own bridge, so it cannot reach a
+loopback-only port and dials the gateway instead, the same way the DNS console is
+reached. If the store address ever needs to move again, it is `STUDIO_EDGE_HOST`
+in `.env` **and** the `forward_host` on both NPM proxy hosts.
 
 Studio's own state is a **named docker volume** (`olympus_studio-data` → `/app/data`),
 which is why it does not travel with a checkout: a fresh host comes up with an
