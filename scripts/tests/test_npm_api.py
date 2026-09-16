@@ -105,6 +105,38 @@ class ClosedPathsConfig(unittest.TestCase):
         )
 
 
+class LongRequestConfig(unittest.TestCase):
+    def test_the_proxy_stops_being_the_thing_that_times_out(self) -> None:
+        snippet = npm.long_request_config(900)
+        self.assertIn("proxy_read_timeout 900s;", snippet)
+        self.assertIn("proxy_send_timeout 900s;", snippet)
+
+    def test_a_streaming_answer_is_not_collected_before_it_is_sent(self) -> None:
+        # Buffering off is the difference between tokens arriving as they are
+        # generated and the browser waiting for the whole build — which, for a long
+        # build, is indistinguishable from the timeout this rule exists to remove.
+        self.assertIn("proxy_buffering off;", npm.long_request_config())
+
+    def test_the_report_names_the_timeout_instead_of_saying_advanced_config_set(self) -> None:
+        # The report is read back out of the snippet for the same reason the refused
+        # paths are: a log line that describes a different rule than the one written
+        # is the failure this module exists to catch.
+        report = npm.refused_paths(npm.long_request_config(900))
+        self.assertEqual(report, "long-request timeouts (900s) at the edge")
+
+    def test_a_refusal_only_snippet_still_reports_refusals(self) -> None:
+        # The two snippets are written by different callers and must not be confused
+        # for each other when a host is reported.
+        self.assertIsNone(npm.long_request_seconds(npm.closed_paths_config(["/v1"])))
+        self.assertIn("refuses /v1", npm.refused_paths(npm.closed_paths_config(["/v1"])))
+
+    def test_a_write_of_the_timeout_snippet_lands_and_is_reported(self) -> None:
+        api = FakeTransport([dict(HOST)])
+        report = api.set_advanced_config(api.hosts[0], npm.long_request_config(900))
+        self.assertIn("long-request timeouts (900s)", report)
+        self.assertEqual(api.writes()[0]["advanced_config"], npm.long_request_config(900))
+
+
 class PayloadFields(unittest.TestCase):
     def test_the_rest_of_the_host_is_carried_through(self) -> None:
         # The reset this guards against is invisible: the host keeps working while
