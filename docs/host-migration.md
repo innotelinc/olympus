@@ -53,9 +53,10 @@ Confirmed here: `192.168.1.10`'s Studio held a credential Authentik rejected, an
 | Name | Served from | Move |
 | --- | --- | --- |
 | `studio.olympus.innotel.us`, `olympus.innotel.us` | ~~`.10:3001`~~ → **`172.17.0.1:3050`** (done) | ✅ re-pointed, login verified |
-| `*.studio.olympus.innotel.us` (3 sites × published + preview) | ~~`.10:20130`~~ → **`172.17.0.1:20130`** | ✅ re-pointed, every fetched byte verified |
+| `*.studio.olympus.innotel.us` (3 apps × name + preview) | ~~`.10:20130`~~ → **`172.17.0.1:20130`** | ✅ apps + data moved, API verified through every name |
 | `gateway.olympus.innotel.us` | ~~`.10:20129`~~ → **`172.17.0.1:20129`** | ✅ re-pointed, SSO gate verified |
 | `secure.innotel.us` | `.10:8088` — dead before the move | ⛔ retired; see below |
+| Studio's data volume + packaged builds | ~~`olympus_studio-data` on `.10`~~ | ✅ imported here, SHA-256-verified file for file |
 
 The Studio upstream is the **docker0 gateway**, not the LAN address, because Studio
 is no longer published on every interface: it binds `127.0.0.1` and `172.17.0.1`
@@ -74,61 +75,59 @@ Studio's own state is a **named docker volume** (`olympus_studio-data` → `/app
 which is why it does not travel with a checkout: a fresh host comes up with an
 empty Studio, and an empty Studio looks a lot like a broken one.
 
-## Moving the published sites
+## Moving the published sites — and what they turned out to be
 
-The staged directories are the awkward part of this move. A published site is not
-a build artefact in git: `package-website.py` renders it into
-`$OLYMPUS_SITES_ROOT/<slug>/` and the `sites` container serves that directory — and
-the same host holds Studio, so `make site-package` cannot be re-run here without
-Studio's projects. The published names were therefore the only copy reachable
-without shell access to `.10`, and they are HTTP.
+**Correction to an earlier version of this document.** It used to say the three
+apps were static sites and that two of the six names (the `-preview` pair) were
+"404 on `.10` too — their directories were never staged". **Both statements were
+wrong**, and the second one was only discoverable with shell access to `.10`:
 
-`scripts/mirror-published-site.py` fetches a name and writes what it serves:
+* every one of the six names is a **Studio application** — a container with an API
+  and a SQLite database — fronted by `olympus-sites` through a generated per-slug
+  vhost (`scripts/app-runtime.py`), not a staged static directory. `weight-tracker`
+  answered `/api/health` with `{"ok":true,"tables":["weigh_ins"]}`; the other two
+  answered every path with their SPA, which is what a single-page app does and not
+  evidence of a missing API.
+* the `-preview` names are **aliases of the same running app** (nginx
+  `server_name foot-fetish-site-preview…` → the same `127.0.0.1:21401`), not
+  separate previews. From the edge they answered 404 on `.10` because the edge's
+  forward went to a *different* sites server than the one that had the vhosts —
+  and from here, before the apps were moved, because this host had no vhosts at
+  all. "404" never meant "no content".
+
+The first attempt at this move used `scripts/mirror-published-site.py`, which
+fetches a name and re-serves it as static files. That preserved bytes and lost
+the product: the pages loaded, `/api/*` 404'd, and `weight-tracker`'s three real
+weigh-ins were unreachable through every name. The tool is kept as a recovery of
+last resort — its docstring now says so — but the migration is done the way the
+repo already documents it:
 
 ```bash
-# what it would copy (default is a dry run)
-python3 scripts/mirror-published-site.py \
-    --host foot-fetish-site.studio.olympus.innotel.us \
-    --dest /var/lib/olympus/sites/foot-fetish-site
+# the artifacts, from the old host (small: 87 MB of builds, 3 KB of SQLite)
+tar czf - -C <old-checkout> builds/<slug>            | tar xzf - -C <this-checkout>   # packaged sources
+tar czf - -C /var/lib/olympus/apps runtime data nginx | tar xzf - -C /var/lib/olympus/apps  # state + data
+docker save olympus-app-<slug>:latest | gzip          > apps.tgz                      # or rebuild from builds/
 
-# copy it, recording a per-path manifest beside the directory
-python3 scripts/mirror-published-site.py \
-    --host foot-fetish-site.studio.olympus.innotel.us \
-    --dest /var/lib/olympus/sites/foot-fetish-site --apply
+# here — the same three commands the repo documents, per slug
+python3 scripts/app-runtime.py --up <slug> --preview
 ```
 
-It is a **recovery** tool, not the publish path, and it says so: it cannot see a
-file the site never links to, so it records the manifest and lists anything
-unreachable rather than dropping it silently. `--verify-base https://<name>` then
-fetches each recorded path back and compares SHA-256 — which is the check that
-matters, because "the directory exists" and "the name serves the right bytes" are
-different claims.
+`--up` reuses the restored runtime record, so each app comes back on its original
+port (21400–21402), mounts its original data directory, writes both vhosts
+(name + `-preview` alias), and reloads `olympus-sites` — after which the edge
+needs no change at all, because it has always forwarded these names to the sites
+port.
 
-Recovered and verified here, **12 files across 4 directories, all byte-identical**:
+| Name | What it is | Port | Verified |
+| --- | --- | --- | --- |
+| `weight-tracker` + `-preview` | app, `weigh_ins` table | 21400 | 3 weigh-ins identical over the API |
+| `foot-fetish-site` + `-preview` | app, informational (no tables) | 21401 | serves, API behaves as on `.10` |
+| `resume-generator` + `-preview` | app (static build, no API) | 21402 | serves, form state client-side |
 
-| Name | Files |
-| --- | --- |
-| `foot-fetish-site`, `resume-generator`, `weight-tracker` | index + 2 assets each |
-| `weight-tracker-preview` | same 3 files as `weight-tracker` |
-| `foot-fetish-site-preview`, `resume-generator-preview` | **none** — 404 on `.10` too |
-
-The two preview names were already 404 before the move, because their directories
-were never staged on `.10`. They still are, which is the correct outcome: the move
-preserved what was actually being served, not what the naming scheme implies should
-be. Republishing them is `make site-publish` against live Studio sources, and it is
-a separate decision from "do not lose what is published".
-
-One honest difference survives: nginx serves `.js` as `application/javascript`
-where the origin sent `text/javascript`. The bytes and their hashes match; only the
-header differs, and both are valid JavaScript MIME types.
-
-Two operational notes for whoever finishes the move. The server is the `sites`
-profile of `docker-compose.yml`, so it starts with `make sites-up` and a bare
-`docker compose up -d` will **not** recreate it — but its restart policy is
-`unless-stopped`, so it does come back on its own after a reboot. And the staged
-directories are a read-only mount of `$OLYMPUS_SITES_ROOT` that lives outside git
-(only the vhosts and the tooling are in the repo), which is exactly why each one is
-paired with a manifest of the bytes it was recovered from.
+The static copies under `$OLYMPUS_SITES_ROOT/<slug>/` made by the mirror tool are
+still on disk. They are now shadowed — an exact `server_name` vhost beats the
+wildcard static template — and they are **stale the moment an app changes**. They
+stay only as a recovery fallback; do not treat them as the source of anything.
 
 ## Retiring `secure.innotel.us`
 
@@ -181,10 +180,12 @@ python3 scripts/verify-sso.py
 
 Then, each with its own pipeline rather than this tool:
 
-* **Published sites** — the sanctioned path is `make site-publish SLUG=<slug>` on
-  the new host, which rebuilds the container, the vhost and the NPM host (see
-  [site-publishing.md](site-publishing.md)). It needs Studio's projects, which are
-  still on `.10`, so the staged directories were recovered over HTTP instead — see
+* **Published sites** — the sanctioned path is `make app-publish SLUG=<slug>` on the
+  new host, which packages the app, runs it and wires the name (see
+  [site-publishing.md](site-publishing.md)). It needs Studio's projects, which now
+  live in the volume imported here — the artifacts came across with
+  `migrate-studio-data.py` and the apps were brought up with
+  `app-runtime.py --up <slug> --preview`; see
   [Moving the published sites](#moving-the-published-sites). Their per-app
   databases live with the app containers, so they move with them.
 * **The gateway** — `make gateway-oidc`, `gateway-sso-up`, `gateway-edge`, then
@@ -195,13 +196,17 @@ Then, each with its own pipeline rather than this tool:
 
 ## Retiring `.10`
 
-Do not decommission it until `status` shows the volume restored here. The site
-names now answer from this host and every fetched byte has been verified against
-the origin, so what `.10` still holds uniquely is **the staged sites' sources in
-Studio** — the directories were recovered, but regenerating them still needs those
-projects. Nothing else on `.10` is load-bearing any more: no proxy host names it,
-and nothing else in the estate references it.
+Everything this estate served from `.10` is now served from here and has been
+verified with `.10`'s own services **stopped**: Studio (sign-in verified end to end,
+projects list served), the three apps (all six names, APIs and the weigh-ins data),
+the gateway chain, and the sites server. The Studio volume was checked file for
+file by SHA-256. What `.10` still holds is now only history: its containers are
+stopped, its images and volume remain as a last-resort rollback, and nothing in
+the estate references it — no proxy host names it, and no compose file or `.env`
+points at it.
 
-`192.168.1.10` was also reachable for **SSH only** (port 22) — port 2375, the
-unauthenticated Docker API, was closed, which is the one thing that must stay
-true while it is still standing.
+The password given for SSH access to `.10` was shared in a chat, so rotate it (or
+disable password authentication for root there) before treating the host as
+closed. It was reachable for **SSH and ports 80/3001/20130** while being retired;
+port 2375, the unauthenticated Docker API, stayed closed throughout, which is the
+one thing that must remain true if the host is kept standing.

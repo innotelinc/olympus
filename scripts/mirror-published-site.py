@@ -14,6 +14,15 @@ records a manifest of everything it did fetch and `--verify-base` proves a name
 serves those same bytes. Anything unreachable is therefore visible as a missing
 entry rather than as a silent omission.
 
+BEFORE YOU TRUST IT, KNOW WHAT IT CANNOT DO. A published name is not necessarily a
+static site — on this deployment every name under the studio suffix was a Studio
+*application*: a container with an API and a SQLite database. This tool would have
+mirrored such an app's HTML and assets faithfully, and the result would have loaded
+while every `/api/*` call 404'd and the app's data went unserved — which is exactly
+what happened during the `.10` migration, before it was caught and redone with
+`app-runtime.py`. A name that answers `/api/health` with JSON (or whose client JS
+calls `/api/*`) is an app: move it with `app-runtime.py`, not with this tool.
+
     # what it would copy (default)
     scripts/mirror-published-site.py --host weight-tracker.studio.olympus.innotel.us \\
         --dest /var/lib/olympus/sites/weight-tracker
