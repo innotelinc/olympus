@@ -130,7 +130,56 @@ def refused_paths(advanced_config: str) -> str:
         name = parts[index].rstrip("/")
         if name and name not in paths:
             paths.append(name)
-    return f"refuses {', '.join(paths)} at the edge" if paths else "advanced_config set"
+    if paths:
+        return f"refuses {', '.join(paths)} at the edge"
+    seconds = long_request_seconds(advanced_config)
+    if seconds:
+        return f"long-request timeouts ({seconds}s) at the edge"
+    return "advanced_config set"
+
+
+# Nginx's read timeout is 60s, and this deployment's NPM answers with 90s. Both are
+# shorter than a Studio build, which is not an edge bug — it is a synchronous model
+# call behind a proxy sized for a page load.
+DEFAULT_LONG_REQUEST_SECONDS = 900
+
+
+def long_request_config(seconds: int = DEFAULT_LONG_REQUEST_SECONDS) -> str:
+    """Nginx for a proxy host whose upstream answers slowly, and streams.
+
+    WHY A STUDIO HOST NEEDS THIS. `POST /api/plan` waits for a whole completion
+    before it answers anything — a plan is deliberately not a stream — and a
+    2,000-token plan through the gateway's `auto/*` router is not a sub-minute
+    operation. Measured through the edge on `studio.olympus.innotel.us`: the request
+    was cut at 90s and the browser was handed nginx's own HTML
+    ("504 Gateway Time-out"), which the UI can only report as the bare
+    "Request failed with status 504." — no model name, no reason, nothing to act on.
+
+    `proxy_buffering off` is the other half: generation streams token-by-token and
+    must reach the browser as it arrives, rather than being collected until the
+    response ends (which is the same as a timeout for a long build).
+
+    900s rather than "infinite": the ceiling should belong to the model, not to the
+    proxy in front of it, but a connection that is genuinely wedged must still end.
+    """
+    return "\n".join(
+        (
+            f"proxy_read_timeout {seconds}s;",
+            f"proxy_send_timeout {seconds}s;",
+            "proxy_buffering off;",
+        )
+    )
+
+
+def long_request_seconds(advanced_config: str) -> int | None:
+    """The read timeout a snippet sets, or None — read back, never assumed."""
+    for line in advanced_config.splitlines():
+        parts = line.strip().rstrip(";").split()
+        if len(parts) == 2 and parts[0] == "proxy_read_timeout":
+            value = parts[1]
+            if value.endswith("s") and value[:-1].isdigit():
+                return int(value[:-1])
+    return None
 
 
 def payload_fields(host: dict, advanced_config: str) -> dict:
