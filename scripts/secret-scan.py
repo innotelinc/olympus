@@ -21,7 +21,8 @@ secret it found.
 Usage:
     python3 scripts/secret-scan.py                 # scan tracked files
     python3 scripts/secret-scan.py path...         # scan specific paths
-    python3 scripts/secret-scan.py --stdin         # scan piped content
+    python3 scripts/secret-scan.py --stdin [label]  # scan piped content,
+                                  # labelled as `label` (e.g. the file name)
     python3 scripts/secret-scan.py --history       # scan every blob in history
 
 Exit codes: 0 clean, 1 findings.
@@ -55,6 +56,10 @@ NAMESPACED_IDENTIFIER_VALUE = re.compile(r"^[a-z0-9]+(\.[a-z0-9]+)+$")
 # underscores, and nothing else: real secrets are mixed-case and include digits
 # or symbols, so this cannot swallow one.
 FIELD_NAME_VALUE = re.compile(r"^[A-Z]+(_[A-Z]+)+$")
+
+# A vault:// reference names the secret to fetch at runtime (scheme, path,
+# optional #field) — the value in the file is a pointer, not the secret.
+VAULT_REFERENCE = re.compile(r"^vault://", re.IGNORECASE)
 
 # Values that look like configuration rather than credentials.
 PLACEHOLDER_HINTS = (
@@ -144,6 +149,8 @@ def scan_text(label: str, text: str) -> list[Finding]:
                 continue
             if FIELD_NAME_VALUE.match(value):
                 continue
+            if VAULT_REFERENCE.match(value):
+                continue
             findings.append((label, number, f"literal-secret ({name})", mask(value)))
 
     return findings
@@ -202,7 +209,12 @@ def main() -> int:
     findings: list[Finding] = []
 
     if use_stdin:
-        findings.extend(scan_text("<stdin>", sys.stdin.read()))
+        # `--stdin [label]` — a label names the file the content came from (used
+        # by the pre-commit hook), which also activates the test-path relaxation
+        # for that file, matching the path-based behaviour exactly.
+        label_args = [a for a in args if a != "--stdin" and not a.startswith("-")]
+        label = label_args[0] if label_args else "<stdin>"
+        findings.extend(scan_text(label, sys.stdin.read()))
     elif use_history:
         for label, text in history_blobs():
             findings.extend(scan_text(label, text))

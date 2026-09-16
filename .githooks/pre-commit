@@ -15,6 +15,13 @@
 set -uo pipefail
 
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Secret gate first: blocks the commit when staged added lines carry
+# credential-shaped content (findings block; missing toolchain fails open).
+# Runs as a separate process so its exit path can't short-circuit this hook.
+if ! "$HOOK_DIR/secret-scan.sh"; then
+  exit 1
+fi
 # shellcheck source=.githooks/guard-lib
 # shellcheck disable=SC1091
 source "$HOOK_DIR/guard-lib"
