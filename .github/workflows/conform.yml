@@ -13,10 +13,10 @@ jobs:
     name: Conformity audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Fetch the stack repo (standard + audit script)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: innotelinc/innotel-platform-stack
           path: .stack

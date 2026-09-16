@@ -19,7 +19,7 @@ jobs:
       found: ${{ steps.spec.outputs.found }}
     steps:
       - name: 📁 Checkout Olympus Workspace
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Need history to diff the pushed range, not just the tip.
           fetch-depth: 0
@@ -60,7 +60,7 @@ jobs:
 
       - name: ⚙️ Setup Monolithic Runtimes (Node & Python)
         if: steps.spec.outputs.found == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
       - name: 🍞 Setup Bun
@@ -68,7 +68,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
       - name: 🐍 Setup Python
         if: steps.spec.outputs.found == 'true'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
@@ -161,7 +161,7 @@ jobs:
         # On failure as well as success, which is the point: a log you only get when
         # nothing went wrong is not evidence.
         if: always() && steps.spec.outputs.found == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: manufacture-${{ github.sha }}-${{ github.run_id }}
           path: |
