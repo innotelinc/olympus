@@ -68,6 +68,13 @@ class FakeApi:
                     "pk": 30,
                     "name": "OmniRoute Gateway",
                     "client_id": "omniroute",
+                    # Reported the way a real Authentik provider reports it, and the
+                    # fixture gets to override it: a provider that is "fully configured"
+                    # is confidential, so that is the honest default. Sending nothing here
+                    # would make every provider look public and the script's repair would
+                    # fire on all of them — which is how this test used to pass while the
+                    # branch it guards was never exercised at all.
+                    "client_type": (self._provider or {}).get("client_type", "confidential"),
                     "grant_types": list(self._grant_types),
                     "redirect_uris": [
                         {"matching_mode": "strict", "url": url} for url in self._redirect_uris
@@ -150,6 +157,9 @@ class RotateSecret(unittest.TestCase):
         self.assertNotIn("client_secret:", out)
 
     def test_a_fully_configured_provider_is_left_untouched(self) -> None:
+        # "Fully configured" includes HOW the client authenticates: the fake reports
+        # client_type `confidential` unless a fixture says otherwise, because a
+        # provider that works is confidential. See the `public` case below.
         api = FakeApi(provider={"pk": 30}, redirect_uris=[REDIRECT])
         original_argv = app.sys.argv
         app.sys.argv = argv_for()
@@ -177,6 +187,25 @@ class RotateSecret(unittest.TestCase):
         _, body = api.patched[0]
         self.assertEqual(body["grant_types"], ["authorization_code", "refresh_token"])
         self.assertIn("client_secret", body)
+
+    def test_a_public_client_is_repaired_to_confidential(self) -> None:
+        # A provider left as `public` still sends its secret, and Authentik answers
+        # `400 invalid_client` at the token endpoint. This was the Olympus sign-in
+        # failure, and no other repair in the script looks at HOW the client
+        # authenticates — so it needs its own test rather than riding on one.
+        api = FakeApi(provider={"pk": 30, "client_type": "public"}, redirect_uris=[REDIRECT])
+        original_argv = app.sys.argv
+        app.sys.argv = argv_for()
+        try:
+            code, out = run_main(api, app.sys.argv)
+        finally:
+            app.sys.argv = original_argv
+
+        self.assertEqual(code, 0)
+        _, body = api.patched[0]
+        self.assertEqual(body["client_type"], "confidential")
+        self.assertNotIn("client_secret", body)
+        self.assertIn("invalid_client", out)
 
     def test_dry_run_reports_the_rotation_without_sending_it(self) -> None:
         api = FakeApi(provider={"pk": 30}, redirect_uris=[REDIRECT])
