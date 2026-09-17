@@ -105,8 +105,10 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
       Cerulean service key. Delivery now takes the checked-out `CERULEAN_*`, `SITE_*`,
       and `OLYMPUS_*` settings instead of a stale service environment.
 - [ ] **Provider capacity** — a configured model can still return HTTP 429 or fail to
-      call tools. The next operational check is `make build-model-check`; a model that
-      does not pass the two-turn tool probe must not be used as the primary build model.
+      call tools. Planning now retries transient 502/503/504 gateway failures with a
+      short bounded backoff, while skipping known cooldown responses. The next
+      operational check is `make build-model-check`; a model that does not pass the
+      two-turn tool probe must not be used as the primary build model.
 
 ## Next — 0.3
 
