@@ -41,6 +41,9 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
       commands, the port and the files, and it is shown for confirmation before any
       code is written (`lib/plan.ts`, `scripts/project_plan.py`). The hardcoded
       React + Node/SQLite scaffold is gone.
+- [x] **Live draft preview** — render the files currently arriving from the model in
+      a sandboxed frame, including the block in flight, without queueing a delivery
+      or registering a name.
 - [x] **Preview It** — package the files on screen, run them, and frame the running
       project on `<slug>-preview.<suffix>` — a real runtime under a name of its own,
       without registering the project's name.

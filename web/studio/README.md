@@ -75,13 +75,13 @@ browser ──POST /api/projects/<id>/build──▶ build-queue file
                                      runner started the project on
 ```
 
-The preview is host-side, and it has to be: the project is a process in its own
-container, so the frame holds that container's address rather than anything the
-browser could build itself. **Preview It** packages the files on screen, runs
-them and registers `<slug>-preview.<suffix>` at the edge; **Publish It** does the
-same and registers the project's own name instead. Nothing is framed until one of
-them has run — a frame pointed at a hostname nobody was told to answer on is the
-blank pane this replaced.
+The Studio pane has two preview modes. While generation is streaming, it renders a
+sandboxed `srcDoc` from the files currently on screen and refreshes automatically;
+no delivery action is required. **Preview It** is still available when you need the
+full host-side runtime: it packages the files, runs them in their own container and
+registers `<slug>-preview.<suffix>` at the edge. **Publish It** does the same and
+registers the project's own name instead. The live draft never publishes a name and
+cannot reach Studio's cookies or storage.
 
 The gateway key lives only in the route handler. It is never sent to the browser
 and never appears in the client bundle.
@@ -134,12 +134,13 @@ failing obscurely.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OMNIROUTE_BASE_URL` | `http://127.0.0.1:20128/v1` | Gateway root. Use `http://omniroute:20128/v1` from inside the compose network. |
+| `OMNIROUTE_BASE_URL` | `http://192.168.1.46:20129/v1` | Gateway root — the Authentik SSO proxy in front of the platform's one OmniRoute, which exempts `/v1` for API clients. The gateway's own `:20128` answers on its host's loopback and bridge alone. The topology table below has the per-host rows. |
 | `OMNIROUTE_API_KEY` | — | Bearer key for the gateway. Required. |
 | `OMNIROUTE_MODEL` | `auto/coding` | Model routed through the gateway. `.env.example` pins a concrete, tool-calling model instead — `auto/coding` is a combo that walks the whole catalogue, so which brain answers is luck (see the root README). |
 | `OMNIROUTE_CHAT_PATH` | `/chat/completions` | Override only if the gateway exposes the route elsewhere. |
 | `STUDIO_PORT` | `3001` | Host port for the dev server. |
 | `STUDIO_ACCESS_TOKEN` | — | When set, every route requires an `x-studio-token` header. Empty = open. |
+| `OLYMPUS_ADMIN_GROUPS` | — | Groups allowed to read `/admin` (comma-separated, exact match, re-checked per request). Empty = any Studio user, which is right for a single-operator deployment and is reported on the page. See *The deployment panel* below. |
 | `STUDIO_PUBLIC_HOST` | — | Public host the edge serves Studio on. Read by `make studio-oidc`, which registers `https://<host>/api/auth/callback` as a redirect URI; Studio itself derives the callback from the request. |
 | `BASE_DOMAIN` | — | The stack's root host. Read by `make studio-oidc` too: the root name serves a landing screen with a sign-in button, so its callback is registered alongside the studio host's — sign-in works from whichever host the visitor arrived on. |
 | `STUDIO_DATA_DIR` | `<repo>/data/studio` | Where saved apps live. The compose service points it at a named volume. |
@@ -246,8 +247,9 @@ file" from "I meant to remove it", and guessing wrong loses work the user cannot
 get back. If a development turn ever needs to remove a file it will need its own
 explicit marker.
 
-The parser tolerates streamed fragments — an unterminated block simply does not
-match yet, so the preview only updates once a file is complete.
+The parser tolerates streamed fragments. The live preview uses the current file
+blocks (including the block being written), so it updates as the model writes;
+completed files remain the source of truth for saving and host-side packaging.
 
 It is also forgiving at the end of a stream, because the model does not always
 close the last block. The gateway drops the trailing `</file>` on an ordinary
@@ -317,6 +319,18 @@ OIDC_ALLOWED_GROUPS=Cerulean,authentik Agent-Users
   8-hour session expires.
 - It fails closed: if the token has no `groups` claim, this is a denial, not a
   pass. Setting it to a group nobody is in locks everyone out — including you.
+
+`OLYMPUS_ADMIN_GROUPS` is the same mechanism for a different privilege, and the
+two lists are deliberately separate: an operator may reasonably let everyone build
+and only some read deployment state.
+
+```bash
+OLYMPUS_ADMIN_GROUPS=authentik Admins,olympus-operators
+```
+
+A signed-in user outside it gets the panel page's own refusal screen (`403` from
+`/api/admin/status`), not a redirect to the provider — bouncing them to sign in
+again would loop, because signing in again does not add a group.
 
 ### Registering the application
 
@@ -554,12 +568,17 @@ environment allow-list that keeps the Vault and Authentik tokens out of a build.
 > runner's installer. If it is root-owned the button answers `503` with the
 > command to run.
 
-## Preview it — the project running, without publishing it
+## Preview it — live drafts and the full runtime
 
-**Preview It** takes the files on screen, packages them, runs them and frames the
-result. It is a third queue action, not a flag on a publish, because the two end
-differently: a publish registers the project's own name at the edge, a preview
-does not.
+The Preview tab updates automatically while the model writes. It builds a sandboxed
+self-contained document from the current files, including the file block in flight,
+so a first visual result does not wait for a queue write or a push. This is a draft
+preview: it never publishes a name and cannot access Studio's origin.
+
+**Preview It** remains the full-runtime delivery. It takes the files on screen,
+packages them, runs them and frames the result. It is a third queue action, not a
+flag on a publish, because the two end differently: a publish registers the
+project's own name at the edge, a preview does not.
 
 ```
 package-project.py <slug>              # the Dockerfile from the plan, install, build
@@ -590,6 +609,44 @@ the next publish — the container is one container. And a website with no plan 
 refused by the runner with `publish it to see it`: static files are not a process,
 so there is nothing to run and framing the published site is the behaviour the
 preview replaced.
+
+## The deployment panel (`/admin`)
+
+Every failure this deployment has actually had — "generation does nothing", "the
+queue is empty", "the runner is gone", "the plan isn't set up for billing" — had a
+**script** that already diagnosed it (`factory/doctor.py`,
+`gateway-edge-check.py`, `build-model-check.py`, `build-runner.py --list`,
+`stripe-relink.py`). None of them was reachable from a browser, so the person who
+noticed the symptom was rarely the person who could run the script.
+
+`/admin` is that answer as a page. It is **read-only** — nothing there sets a
+variable, restarts a container or spends a turn.
+
+| What it shows | Where it comes from |
+| --- | --- |
+| **Checks** — pass / attention / failing, with the fix named | The rules this repository already documents, evaluated in code (`lib/admin.ts`) |
+| **Gateway** — base URL, door, latency, catalogue size, the model a turn would use | One `GET /v1/models` (the cheapest request that proves the path end to end) plus `resolveModel` |
+| **Runner and queue** — heartbeat age, host, pid, busy-with, running/finished counts, paths | `.factory/build-queue/` — the same files the builder reads |
+| **Recent jobs** — the queue itself, newest first, running pinned to the top | The status files, with published/preview URLs where a job produced one |
+| **Built apps** — slug, size, whether a plan exists, and whether `site.zip` / `project.zip` is present | `builds/`, read from disk rather than inferred from a status that may have been pruned |
+| **Access and tenancy** — issuer, both group lists, whether per-user keys are on | The same config every route reads |
+
+**The door check is the one that earns it.** `OMNIROUTE_BASE_URL` pointing at the
+gateway's own `:20128` on loopback compiles, resolves, and fails with an empty
+gateway log — inside the container that address is Studio itself. The panel says
+that sentence out loud, and points at the SSO proxy in front of the gateway
+(`:20129`) instead.
+
+Two details worth knowing before reading the page:
+
+- **The page is a shell; the data is behind the API.** The page applies the same
+  session + group gate `app/page.tsx` does, because a browser navigation cannot
+  send the `x-studio-token` header and gating the shell on it would lock a
+token-mode deployment out of its own panel. `GET /api/admin/status` applies the
+  strict gate (`authorizeAdmin`) and answers `no-store`, so the shell leaks
+  nothing — it is chrome until the fetch answers.
+- **It polls every 20 s**, because a heartbeat ages and jobs finish on their own.
+  The probe is one request to the gateway, not a generation.
 
 ## Security posture
 
@@ -646,13 +703,16 @@ looked fine because Studio's healthcheck only asks whether Studio answers.
 
 | Topology | `OMNIROUTE_BASE_URL` |
 | --- | --- |
-| Shared gateway, another host (the platform default) | `http://<gateway-host>:20128/v1` — the mesh value, `http://10.10.2.1:20128/v1`. OmniRoute serves its API and dashboard on that one port |
-| Gateway behind this stack's Authentik SSO proxy | `http://<gateway-host>:20129/v1` — the proxy's door, which is `GATEWAY_SSO_PORT` below |
-| Gateway is loopback-published on THIS host | Run Studio with host networking, then `http://127.0.0.1:20128/v1` — `make docker-studio-up` |
-| Gateway is published on `0.0.0.0` on this host | `http://host.docker.internal:20128/v1` |
+| Shared gateway, another host (the platform default) | `http://192.168.1.46:20129/v1` — the SSO proxy in front of the gateway, whose port is `GATEWAY_SSO_PORT` below |
+| Gateway on the same host as this stack | `http://host.docker.internal:20129/v1` — the docker0 alias reaches the proxy's listener |
+| Host-mode caller on the gateway's host | `http://127.0.0.1:20129/v1` — run it with host networking, `make docker-studio-up` |
+| The gateway's own port, deliberately | `http://127.0.0.1:20128/v1` — for a host-mode process *on the gateway's host* only; a bridge container resolves it to itself |
 
-The old "sibling container" row (`http://omniroute:20128/v1`) is gone with the
-`omniroute` service: this stack starts no gateway, so there is no sibling to name.
+Two rows are gone. `http://omniroute:20128/v1` went with the `omniroute` service —
+this stack starts no gateway, so there is no sibling to name — and the
+`host.docker.internal:20128` row described a binding that no longer exists: the
+gateway's own port is on its host's loopback and docker0 alone, and every caller
+off that host goes through the proxy.
 
 ## Deploying behind Cerulean + NPM Edge
 
@@ -693,6 +753,8 @@ make studio-test      # or: cd web/studio && npm test
 | `tests/factory-spec.test.ts` | The spec: slug safety from hostile titles, the template's headings, stack and verification inference, the bounded appendix, determinism, and the writer's refusal to clobber, its traversal containment, and its `503` message |
 | `tests/export-route.test.ts` | The export route: attachment headers, gating and `404`s, the write into `build-requests/`, `409` then overwrite, a hostile title staying inside the directory, `503` when unwritable, and the download path surviving that |
 | `tests/page.test.ts` | The host split: the root host shows the landing screen, the studio host redirects to the provider, a session gets the builder on either host, and an unconfigured deployment gates nothing |
+| `tests/admin.test.ts` | The panel's own rules: `:20129` is the door and `:20128` on loopback is the caller, which artefacts count as packaged, the collected state on a healthy deployment (and on a gateway that is down, refusing the key, or absent), a stale or never-seen runner, a de-linked model, and that no secret reaches the payload |
+| `tests/admin-route.test.ts` | The panel's gates: `401` without a session, `403` outside `OLYMPUS_ADMIN_GROUPS` (including a token with no `groups` claim at all), the build allow-list staying separate from the admin list, the shared access token, `no-store`, and the page's three outcomes — provider redirect, refusal screen, panel |
 
 The mock provider (`tests/helpers/mock-oidc.ts`) serves a real discovery
 document, JWKS, and token endpoint over localhost and mints genuinely signed

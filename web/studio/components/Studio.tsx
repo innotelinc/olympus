@@ -1,8 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import type { BuildLog, BuildStatus, RunnerState } from "@/lib/build-queue";
-import { currentFileFrom, mergeFiles, parseFiles, type GeneratedFile } from "@/lib/files";
+import type { BuildAction, BuildLog, BuildStatus, RunnerState } from "@/lib/build-queue";
+import {
+  buildPreviewDocument,
+  currentFileFrom,
+  mergeFiles,
+  parseFiles,
+  type GeneratedFile,
+} from "@/lib/files";
 import { missingPlannedFiles, type BuildPlan } from "@/lib/plan";
 import type { ProjectKind } from "@/lib/projects";
 import CodeView from "./CodeView";
@@ -96,6 +102,10 @@ function kilobytes(bytes: number): string {
  * true age, not the tab's.
  */
 function buildStateLabel(build: BuildStatus): string {
+  // Queued, not "not started": the job exists and the runner will read it. "not
+  // started" belongs to a project no job was ever queued for.
+  if (build.state === "queued") return "queued";
+
   if (build.state !== "running") {
     if (build.state === "succeeded") return "succeeded";
     // A stop the operator asked for is not a failure, and labelling it one is
@@ -107,6 +117,229 @@ function buildStateLabel(build: BuildStatus): string {
   if (!Number.isFinite(since)) return "running";
 
   return `running — ${clock(Math.max(0, Math.round((Date.now() - since) / 1000)))}`;
+}
+
+/**
+ * What a delivery does, said as steps a person can count.
+ *
+ * These mirror the commands the runner actually runs, because that is the only
+ * thing that can be reported honestly: a bar that advances on a timer would keep
+ * moving through a build that died, and the previous version of this panel could
+ * say "running" for half an hour without contradicting itself.
+ *
+ * A `build` is one step in this list rather than three because the factory's own
+ * steps happen inside `make app`, whose progress only the runner's log can say.
+ */
+const DELIVERY_STEPS: Record<BuildAction, readonly string[]> = {
+  preview: ["Package the files", "Build and start it", "Serve it on the preview name"],
+  publish: ["Package the files", "Build and start it", "Register the name at the edge"],
+  build: ["Manufacture from the spec", "Package what it wrote", "Leave it ready to run"],
+};
+
+/** The command each step starts, in the order the runner runs them. */
+const DELIVERY_COMMANDS: ReadonlyArray<readonly [string, number]> = [
+  ["package-project.py", 0],
+  ["package-app.py", 0],
+  ["package-website.py", 0],
+  ["app-runtime.py", 1],
+  ["studio-sites.py", 2],
+];
+
+/**
+ * Which step the runner's own log says it is on.
+ *
+ * Read from the `$ <command>` lines the runner writes before it runs each step,
+ * and from the last one: a log holds every step it has reached, so the step in
+ * progress is the highest one seen. A job that has written nothing yet is step
+ * zero — waiting to be picked up, not failed.
+ */
+function deliveryStepIndex(log: BuildLog | null, action: BuildAction): number {
+  if (action === "build") return 0;
+
+  let index = 0;
+  for (const line of (log?.text ?? "").split("\n")) {
+    if (!line.trim().startsWith("$ ")) continue;
+    for (const [marker, position] of DELIVERY_COMMANDS) {
+      if (line.includes(marker) && position > index) index = position;
+    }
+  }
+  return index;
+}
+
+/** The last thing the runner wrote, which is what "live" means here. */
+function lastLogLine(log: BuildLog | null): string {
+  const lines = (log?.text ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.length > 0 ? lines[lines.length - 1].slice(0, 240) : "";
+}
+
+/** `2m 14s` — long enough to sit through, so minutes are the unit that matters. */
+function duration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+/**
+ * How long a running job has been going, from the runner's own `started_at`.
+ *
+ * Read from the status file rather than from when this tab noticed the job: a
+ * reload halfway through a build should show the build's age, not the tab's.
+ */
+function buildAgeSeconds(build: BuildStatus | null): number | null {
+  if (!build) return null;
+  const stamp = build.state === "running" ? build.startedAt : build.finishedAt ?? build.startedAt;
+  const since = stamp ? Date.parse(stamp) : Number.NaN;
+  if (!Number.isFinite(since)) return null;
+  return Math.max(0, Math.round((Date.now() - since) / 1000));
+}
+
+/**
+ * What to call the job while it runs and after it stops.
+ *
+ * The verb is the action the operator chose, not "building" for all three: a
+ * preview of a project nobody published is not a build, and saying it is one is
+ * how the panel stops matching the button that was pressed.
+ */
+function deliveryVerb(action: BuildAction, tense: "ing" | "done"): string {
+  const verbs: Record<BuildAction, readonly [string, string]> = {
+    preview: ["Previewing", "Preview ready"],
+    publish: ["Publishing", "Published"],
+    build: ["Building", "Built"],
+  };
+  return verbs[action][tense === "ing" ? 0 : 1];
+}
+
+/**
+ * The live state of the last delivery, where the buttons that start one are.
+ *
+ * WHY THIS EXISTS. The panel that reports a build sits under the library, which
+ * is below the fold at the moment somebody clicks Build It or Preview It — so the
+ * honest answer to "what happened?" was several hundred pixels away, and a run
+ * that had only just been queued looked like nothing at all. This is the same
+ * facts in the place the click happened: which job, which step, how long, and the
+ * last line the runner wrote. Nothing here is invented — every field comes from
+ * the runner's status file or its log, and a job that has said nothing yet says
+ * exactly that.
+ */
+function DeliveryStrip({
+  build,
+  log,
+  error,
+  runner,
+  cancelBusy,
+  logHidden,
+  onCancel,
+  onToggleLog,
+}: {
+  build: BuildStatus | null;
+  log: BuildLog | null;
+  error: string | null;
+  runner: RunnerState | null;
+  cancelBusy: boolean;
+  logHidden: boolean;
+  onCancel: () => void;
+  onToggleLog: () => void;
+}) {
+  if (!build && !error) return null;
+
+  const action = build?.action ?? "build";
+  const running = build?.state === "running";
+  const steps = DELIVERY_STEPS[action];
+  const stepIndex = running ? deliveryStepIndex(log, action) : 0;
+  const age = buildAgeSeconds(build);
+  const waiting = running && !(log?.text ?? "").trim();
+  const detail = waiting
+    ? "Queued — the runner has not written anything yet."
+    : running
+      ? lastLogLine(log) || build?.message || ""
+      : build?.message ?? "";
+
+  // A determinate bar only where the steps are real: the fraction is the work
+  // finished, and the step in flight stays animated inside it.
+  const percent = running
+    ? Math.round((stepIndex / steps.length) * 100)
+    : build?.state === "succeeded"
+      ? 100
+      : 0;
+
+  return (
+    <div
+      className={`delivery-strip ${build?.state ?? "failed"}${running ? " running" : ""}`}
+      role="status"
+      aria-live="polite"
+    >
+      <div className="delivery-strip-head">
+        <span className={`dot ${running ? "live" : build?.state === "succeeded" ? "idle" : "wait"}`} />
+        <span className="produced-head">
+          {build
+            ? `${running ? deliveryVerb(action, "ing") : deliveryVerb(action, "done")}${build.slug ? ` ${build.slug}` : ""}`
+            : "Delivery"}
+        </span>
+        <span className="topbar-spacer" />
+        {age !== null ? (
+          <span className={running ? "progress-clock" : "hint"}>
+            {running ? `${duration(age)} so far` : `took ${duration(age)}`}
+          </span>
+        ) : null}
+        {running ? (
+          <button
+            type="button"
+            className="danger"
+            onClick={onCancel}
+            disabled={cancelBusy}
+            title="Stop this job on the host runner"
+          >
+            {cancelBusy ? "Stopping…" : "Stop"}
+          </button>
+        ) : null}
+        {build?.job ? (
+          <button type="button" className="link-button" onClick={onToggleLog}>
+            {logHidden ? "Show log" : "Hide log"}
+          </button>
+        ) : null}
+      </div>
+
+      {running ? (
+        <ol className="steps compact" aria-label="Delivery steps">
+          {steps.map((step, index) => (
+            <li
+              key={step}
+              className={`step ${
+                index < stepIndex ? "done" : index === stepIndex ? "active" : "todo"
+              }`}
+              aria-current={index === stepIndex ? "step" : undefined}
+            >
+              <span className="step-mark">{index < stepIndex ? "✓" : index + 1}</span>
+              <span className="step-body">
+                <span className="step-name">{step}</span>
+              </span>
+            </li>
+          ))}
+        </ol>
+      ) : null}
+
+      <div
+        className="progress-bar"
+        role="progressbar"
+        aria-label="Delivery progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={running ? percent : undefined}
+      >
+        <div
+          className={`progress-fill ${waiting ? "stalled" : ""} ${running && !waiting ? "determinate" : ""}`}
+          style={running && !waiting ? { width: `${Math.max(percent, 6)}%` } : undefined}
+        />
+      </div>
+
+      <span className="hint delivery-detail">
+        {error ?? detail}
+        {runner && !runner.live && !running ? " No build runner is responding — start olympus-build-runner." : ""}
+      </span>
+    </div>
+  );
 }
 
 async function readFailure(response: Response): Promise<string> {
@@ -255,9 +488,14 @@ export default function Studio({
   const [planModel, setPlanModel] = useState("");
   const [planBusy, setPlanBusy] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
-  // Non-fatal: the plan said it would write a file and the turn did not. Worth
-  // saying, not worth discarding a whole generation over.
-  const [planWarning, setPlanWarning] = useState<string | null>(null);
+  // Non-fatal: the plan said it would write files and the turn did not. Worth
+  // saying, not worth discarding a whole generation over — and worth an action,
+  // because the build that follows fails on the first missing one and reports it
+  // as a missing module. The names are kept beside the sentence so the button can
+  // ask for exactly them.
+  const [planWarning, setPlanWarning] = useState<{ message: string; files: string[] } | null>(
+    null,
+  );
   const [projectPlan, setProjectPlan] = useState<BuildPlan | null>(null);
   // Bumped to force the preview frame to reload; a frame's `src` is not re-fetched by
   // re-rendering, and after a republish the old document is what is on screen.
@@ -387,12 +625,15 @@ export default function Studio({
   }, []);
 
   // Re-render once a second while streaming so the elapsed counter and the
-  // waiting indicator move without waiting for stream data.
+  // waiting indicator move without waiting for stream data — and while a
+  // delivery is running, for the same reason. A delivery is polled every 3s, and a
+  // clock that only moves every third second reads as a stalled job rather than as
+  // a live one.
   useEffect(() => {
-    if (status !== "streaming") return;
+    if (status !== "streaming" && build?.state !== "running") return;
     const id = window.setInterval(() => setNowTick((tick) => tick + 1), 1000);
     return () => window.clearInterval(id);
-  }, [status]);
+  }, [status, build?.state]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -1402,8 +1643,14 @@ export default function Studio({
         // message there would be about a missing module.
         const missing = missingPlannedFiles(produced, plan);
         setPlanWarning(
-          missing
-            ? `The plan listed ${missing} and this turn did not write it, so the build will probably fail there. Ask for it again, naming that file.`
+          missing.length > 0
+            ? {
+                message:
+                  missing.length === 1
+                    ? `The plan listed ${missing[0]} and this turn did not write it, so the build will probably fail there.`
+                    : `The plan listed ${missing.length} files this turn did not write, so the build will probably fail there: ${missing.join(", ")}.`,
+                files: missing,
+              }
             : null,
         );
 
@@ -1510,6 +1757,41 @@ export default function Studio({
   }, [build, buildError, generate]);
 
   /**
+   * Ask the model for the planned files this turn did not write.
+   *
+   * The warning used to end at "ask for it again, naming that file" with only a
+   * Dismiss button beside it: the person then had to re-describe the plan's own
+   * filenames in their own words, and a name they got wrong is a file the next
+   * build still does not have. So the ask is made here, with the names the plan
+   * used, and it is the same shape a confirmed plan produces — a plan, the
+   * instruction answering it, the project it belongs to — which is why generation
+   * needs no special case. The stack is not re-planned: the plan is unchanged, only
+   * the files it promised are missing.
+   */
+  const askForMissingFiles = useCallback(() => {
+    const plan = projectPlanRef.current;
+    const missing = planWarning?.files ?? [];
+    if (!plan || missing.length === 0 || busyRef.current) return;
+
+    const list = missing.map((path) => `- ${path}`).join("\n");
+    const instruction = [
+      "This project is missing files the confirmed plan promised. Write them now, in full, keeping every file that already exists and every feature that already works.",
+      "",
+      `Missing, under the exact names the plan used:\n${list}`,
+      "",
+      "Return the missing files — and only the files that need to change — in full. Do not rename them and do not restructure the project to avoid them.",
+    ].join("\n");
+
+    planRef.current = plan;
+    planPromptRef.current = instruction;
+    setPlan(plan);
+    setPlanPrompt(instruction);
+    setProjectPlan(plan);
+    setPlanWarning(null);
+    void generate();
+  }, [generate, planWarning]);
+
+  /**
    * Submit: plan, confirm, or queue.
    *
    * One button, three meanings, and which one it has is decided by what is
@@ -1572,6 +1854,22 @@ export default function Studio({
   // address in the history, so reopening an app shows its last run rather than
   // forgetting it ever had one.
   const previewUrl = build?.previewUrl ?? build?.publishedUrl ?? latestDeliveryUrl(buildHistory);
+  // The browser preview is intentionally independent of the host runner. It uses
+  // the files currently arriving from the model, so the pane is useful before a
+  // package/run job exists and refreshes as each file block grows.
+  const livePreviewFiles = useMemo(() => {
+    const streamed = parseFiles(raw, { allowUnterminatedLast: true });
+    return streamed.length > 0 ? streamed : activeFiles;
+  }, [activeFiles, raw]);
+  const livePreviewDocument = useMemo(
+    () => buildPreviewDocument(livePreviewFiles),
+    [livePreviewFiles],
+  );
+  // A job the runner has claimed but not yet written a line about. Distinct from
+  // "nothing is happening": the request is on disk and this is the few seconds
+  // before the first command runs, which is exactly when a panel that says
+  // nothing looks broken.
+  const waitingOnLog = build?.state === "running" && !(buildLog?.text ?? "").trim();
   // A job that packages and runs the files on screen and stops before the name. The
   // pane has to tell this apart from a factory build: one ends in a frame, the other
   // in a directory, and they take about the same time to get there.
@@ -1820,10 +2118,29 @@ export default function Studio({
             </div>
           ) : null}
 
+          {/*
+            * THE WARNING WAS A DEAD END.
+            *
+            * It said "ask for it again, naming that file" and then offered only
+            * Dismiss — leaving the person to re-describe in their own words what
+            * the plan had already said in the plan's own names. The ask is a
+            * button: it sends one instruction naming every missing file, through
+            * the same path a confirmed plan uses, so nothing about the stack or
+            * the confirmed plan changes.
+            */}
           {planWarning ? (
             <div className="alert note" role="status">
-              <span>{planWarning}</span>
+              <span>{planWarning.message}</span>
               <span className="topbar-spacer" />
+              <button
+                type="button"
+                className="primary"
+                onClick={askForMissingFiles}
+                disabled={busy || libraryBusy}
+                title="Ask the model for exactly these files, by the names the plan used"
+              >
+                {busy ? "Asking…" : "Ask again"}
+              </button>
               <button type="button" className="ghost" onClick={() => setPlanWarning(null)}>
                 Dismiss
               </button>
@@ -2287,6 +2604,20 @@ export default function Studio({
               </button>
             </div>
 
+            {/* The answer to "what did that button do?" next to the buttons.
+                The panel below the library says the same thing in more detail;
+                this is the part that has to be in view at the click. */}
+            <DeliveryStrip
+              build={build}
+              log={buildLog}
+              error={buildError}
+              runner={runner}
+              cancelBusy={cancelBusy}
+              logHidden={logHidden}
+              onCancel={() => void cancelBuild()}
+              onToggleLog={() => setLogHidden((hidden) => !hidden)}
+            />
+
             {savedApps.length > 0 ? (
               <ul className="library-list">
                 {savedApps.map((app) => (
@@ -2516,21 +2847,75 @@ export default function Studio({
                     sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
                   />
                 </div>
+              ) : livePreviewFiles.length > 0 ? (
+                <div className="preview">
+                  <div className="preview-bar">
+                    <span className="preview-url" title="Live generated preview">
+                      Live generated preview
+                    </span>
+                    <span className="topbar-spacer" />
+                    <span className="hint">
+                      {status === "streaming" ? "Updating as files arrive" : "Generated source"}
+                    </span>
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => setPreviewNonce((nonce) => nonce + 1)}
+                    >
+                      Reload
+                    </button>
+                  </div>
+                  <iframe
+                    key={previewNonce}
+                    className="preview-frame"
+                    srcDoc={livePreviewDocument}
+                    title={`${projectPlan?.name ?? "project"} live preview`}
+                    sandbox="allow-forms allow-modals allow-popups allow-scripts"
+                  />
+                </div>
               ) : (
                 <div className="site-note">
+                  {/*
+                   * LIVE, NOT A SENTENCE ABOUT WHAT WOULD HAPPEN.
+                   *
+                   * This pane is where somebody looks after pressing Preview It,
+                   * so it is where the job's own state belongs. The step comes
+                   * from the runner's log and the clock from its status file; a
+                   * stalled job is said to be stalled rather than described as
+                   * arriving.
+                   */}
                   <strong>
-                    {previewing
-                      ? "Previewing — the project appears when it answers"
-                      : build?.state === "running"
-                        ? "Building — the preview appears if this run puts it on a name"
+                    {build?.state === "running"
+                      ? `${deliveryVerb(build.action, "ing")} — ${
+                          DELIVERY_STEPS[build.action][deliveryStepIndex(buildLog, build.action)]
+                        }${waitingOnLog ? " (waiting for the first line)" : ""}`
+                      : previewing
+                        ? "Previewing — the project appears when it answers"
                         : "Nothing is running yet"}
                   </strong>
+                  {build?.state === "running" ? (
+                    <>
+                      <div className="progress-bar" role="progressbar" aria-label="Delivery progress">
+                        <div
+                          className={`progress-fill ${waitingOnLog ? "stalled" : "determinate"}`}
+                          style={
+                            waitingOnLog
+                              ? undefined
+                              : { width: `${Math.max(Math.round((deliveryStepIndex(buildLog, build.action) / DELIVERY_STEPS[build.action].length) * 100), 6)}%` }
+                          }
+                        />
+                      </div>
+                      <span className="preview-live-line">
+                        {lastLogLine(buildLog) || "The runner has not written anything yet."}
+                      </span>
+                    </>
+                  ) : null}
                   <span>
-                    The preview is the project itself, served from its own container. Use{" "}
-                    <em>Preview It</em> to package these files, run them and show them here —
-                    that registers no name and publishes nothing. Use <em>Publish It</em> to do
-                    the same and put the name in front of it. Read the source under <em>Code</em>
-                    meanwhile.
+                    The live preview renders generated files immediately in a sandboxed frame.
+                    It updates as the model writes. Use <em>Preview It</em> when you need the
+                    full packaged runtime and its host URL; that registers no name and publishes
+                    nothing. Use <em>Publish It</em> to do the same and put the name in front of it.
+                    Read the source under <em>Code</em> meanwhile.
                     {projectPlan ? (
                       <>
                         {" "}
