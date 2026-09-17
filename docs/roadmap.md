@@ -104,12 +104,13 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
 - [x] **Runner pickup and preview delivery** — the host runner is active, queued jobs
       are claimed, packaged, started, and preview names are registered through the
       Cerulean service key. Delivery now takes the checked-out `CERULEAN_*`, `SITE_*`,
-      and `OLYMPUS_*` settings instead of a stale service environment.
+      and `OLYMPUS_*` settings instead of a stale service environment. Verified live
+      with `resume-generator`: build succeeded and its preview returned HTTP 200.
 - [ ] **Provider capacity** — a configured model can still return HTTP 429 or fail to
       call tools. Planning now retries transient 502/503/504 gateway failures with a
-      short bounded backoff, while skipping known cooldown responses. The next
-      operational check is `make build-model-check`; a model that does not pass the
-      two-turn tool probe must not be used as the primary build model.
+      short bounded backoff, while skipping known cooldown responses. The latest build
+      succeeded after gateway recovery; `make build-model-check` remains the guard
+      before selecting a primary model with sustained capacity.
 
 ## Next — 0.3
 
