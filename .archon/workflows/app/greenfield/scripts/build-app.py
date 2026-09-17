@@ -164,7 +164,7 @@ DEFAULT_GATEWAY = "http://192.168.1.46:20129/v1"
 # sent a request. The explicit provider config below cannot win against an endpoint
 # the process is told to use by its environment.
 INHERIT = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR", "USER", "SHELL",
-           "CODEX_HOME", "XDG_RUNTIME_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR")
+           "XDG_RUNTIME_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR")
 
 # Variables that redirect the agent somewhere other than the configured provider.
 # Stripped even when present, because inheriting them is never intended.
@@ -572,6 +572,13 @@ def main() -> int:
 
     gateway = setting("OMNIROUTE_BASE_URL") or DEFAULT_GATEWAY
     child_env = agent_env(gateway)
+    # Archon runs this node with its own provider environment. Do not let that
+    # environment's CODEX_HOME override the explicit OmniRoute configuration above:
+    # it can contain an Archon/Claude config that makes Codex exit cleanly without
+    # ever reaching the coding model. The agent gets only the gateway key and the
+    # explicit -c provider settings, which is also how the verified runner smoke
+    # invocation behaves.
+    child_env.pop("CODEX_HOME", None)
     chain = model_chain()
 
     note(f"agent       {codex}")
@@ -606,6 +613,8 @@ def main() -> int:
 
         exit_code, output = run_agent(argv, app_dir, child_env)
         note(f"agent exit={exit_code} attempt={attempt} model={model}")
+        if not has_artifact(app_dir) and output:
+            note(f"agent output (no artifact yet): {output[-1200:]}")
 
         if has_artifact(app_dir):
             # Stop here even when the exit code is non-zero: an agent whose last
@@ -617,12 +626,19 @@ def main() -> int:
     # nothing exists and the reason is a rate limit, because the run's failure will say
     # "the agent wrote nothing" and the operator would otherwise have to read the log to
     # learn that the gateway refused every turn rather than that the model failed.
-    if not has_artifact(app_dir) and looked_rate_limited(output):
-        note(
-            "every attempt was rate-limited (HTTP 429) — the free pool was busy. This is "
-            "not a fault in the spec or the prompt: re-run the workflow, or pin a model "
-            "with quota in OMNIROUTE_MODEL."
-        )
+    if not has_artifact(app_dir):
+        if looked_rate_limited(output):
+            note(
+                "every attempt was rate-limited (HTTP 429) — the free pool was busy. This is "
+                "not a fault in the spec or the prompt: re-run the workflow, or pin a model "
+                "with quota in OMNIROUTE_MODEL."
+            )
+        else:
+            note(
+                "all agent attempts produced no project files; the final agent exit/log "
+                "is recorded above. Verify will refuse this empty artifact. Check model "
+                "tool-call capability, gateway credentials, and the captured agent output."
+            )
 
     # Written, but does it build? The retry above stopped the moment a file existed, so
     # this is the first and only point where the plan's own commands run against the tree

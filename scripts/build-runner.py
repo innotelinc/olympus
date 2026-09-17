@@ -826,7 +826,12 @@ class Runner:
         env = dict(os.environ)
         for key, value in self.dotenv.items():
             if key.startswith(("CERULEAN_", "SITE_", "OLYMPUS_", "APP_")):
-                env.setdefault(key, value)
+                # Delivery must use the same checked-out deployment configuration
+                # that the runner was started for. A stale service environment can
+                # retain the template Cerulean password and mask a real service key
+                # in .env, causing a build to package successfully and fail only at
+                # preview registration.
+                env[key] = value
         env.setdefault("PATH", os.defpath)
         env.setdefault("HOME", os.path.expanduser("~"))
         return env
