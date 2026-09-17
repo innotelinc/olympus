@@ -50,12 +50,21 @@ Reads (env):
     INPUTS_TITLE                the app's title
     OMNIROUTE_MODEL             primary model (default "auto/coding")
     OMNIROUTE_MODEL_FALLBACK    second attempt (default "oc/big-pickle")
-    OMNIROUTE_BASE_URL          the gateway (default "http://127.0.0.1:20128/v1")
+    OMNIROUTE_BASE_URL          the gateway (default "http://192.168.1.46:20129/v1",
+                                the SSO proxy in front of it — `:20128` is the
+                                gateway's own port, published on its host's
+                                loopback and bridge alone)
+    OMNIROUTE_API_KEY           the gateway's key, passed to the agent as
+                                OPENAI_API_KEY (the agent never sees the
+                                `.env` variable itself)
 
 Each `OMNIROUTE_*` is read from this node's environment and then from the checkout's
 `.env` — Archon strips the repo `.env` keys before the node runs, so the file is the copy
-that survives (see `repo_omniroute`). Set the model to a concrete id that can call tools:
-the auto policy can land on a free member that answers in prose and writes nothing.
+that survives (see `repo_omniroute`). That includes the key: read from `os.environ` alone
+it is always empty under Archon, and the gateway then refuses every attempt with
+"Missing environment variable: `OMNIROUTE_API_KEY`" while this node reports that the
+agent wrote nothing. Set the model to a concrete id that can call tools: the auto policy
+can land on a free member that answers in prose and writes nothing.
 
 Emits {exit_code, model, attempts, log}.
 """
@@ -142,7 +151,9 @@ def prompt_template() -> str:
     return text.strip()
 
 
-DEFAULT_GATEWAY = "http://127.0.0.1:20128/v1"
+# The door, not the gateway's own port: this node runs inside a container, where
+# `127.0.0.1:20128` is the container itself. See `.env.example`.
+DEFAULT_GATEWAY = "http://192.168.1.46:20129/v1"
 
 # What the agent is allowed to inherit. Deliberately NOT the whole environment:
 # a workflow node runs inside whatever the caller had, and the caller's variables
@@ -284,10 +295,25 @@ def agent_env(gateway: str) -> dict[str, str]:
     for key in HIJACKS:
         env.pop(key, None)
     env.setdefault("HOME", os.path.expanduser("~"))
-    # The gateway key, when the stack exports one. The agent's own credentials live in
-    # CODEX_HOME/auth.json, which is what the operator's working setup uses.
-    key = (os.environ.get("OMNIROUTE_API_KEY") or "").strip()
+    # The gateway key: this node's environment first, then the checkout's `.env`, for
+    # the same reason the model and the base URL are read that way — Archon strips the
+    # stack's `.env` keys out of the node's environment, so `os.environ` alone finds
+    # nothing. Measured: with the key unset the agent exited 1 on all three attempts
+    # having written nothing, printing only "ERROR: Missing environment variable:
+    # `OMNIROUTE_API_KEY`." — which `verify` then reported as "the agent wrote
+    # nothing", reading as a model failure when the model was never reached.
+    #
+    # BOTH NAMES, because two different layers read them. `OMNIROUTE_API_KEY` is the
+    # name in the provider's `env_key` in the operator's `$CODEX_HOME/config.toml`
+    # (`[model_providers.omniroute] env_key = "OMNIROUTE_API_KEY"`), and the `-c`
+    # overrides below *merge* with that file rather than replacing it — so a runner
+    # invoked against such a config, as on this host, needs the name it declares.
+    # `OPENAI_API_KEY` is what an Archon-supplied CODEX_HOME falls back to (it gets
+    # an `auth.json` and no `config.toml`). Neither is ever wrong: it is the same
+    # gateway credential.
+    key = setting("OMNIROUTE_API_KEY")
     if key:
+        env["OMNIROUTE_API_KEY"] = key
         env["OPENAI_API_KEY"] = key
     return env
 
