@@ -106,6 +106,13 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
       Cerulean service key. Delivery now takes the checked-out `CERULEAN_*`, `SITE_*`,
       and `OLYMPUS_*` settings instead of a stale service environment. Verified live
       with `resume-generator`: build succeeded and its preview returned HTTP 200.
+- [x] **Estate capacity pass and nightly cleanup (17 September 2026)** — the host's
+      leftover smoke and sample app containers were stopped (`olympus-app-runner-smoke`,
+      `olympus-app-untitled-app`), reclaiming build cache and unreferenced images
+      (10 → 8.2 GB). `scripts/docker-cleanup.sh` (mirrored from ips, canonical there)
+      now runs nightly at 04:17 via cron: build cache with a 2 GB floor, dangling and
+      unreferenced images, containers exited for more than a day, and oversized logs —
+      never volumes, and never a same-day parked container.
 - [ ] **Provider capacity** — a configured model can still return HTTP 429 or fail to
       call tools. Planning now retries transient 502/503/504 gateway failures with a
       short bounded backoff, while skipping known cooldown responses. The latest build
@@ -116,6 +123,9 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
 
 - [ ] **Autonomy L1 — dispatch.** Arm the dispatcher after a watched lap:
       queued accepted issues → watched implement runs, still at a manual gate.
+      The unblocked prerequisite list is now short: the runner picks up, the DAG
+      completes, previews publish and answer 200 — dispatch has no infrastructure
+      blocker left, only the gate policy and the watched lap itself.
 - [ ] **Publish-time observability.** A publish that is not checked is a publish
       nobody knows about — fold `site-check` / `gateway-edge-check` evidence into
       the panel and the job record. Preview edge registration should use the same
