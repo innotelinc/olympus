@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Olympus — The AI Software Factory — FactoryOps</title>
-  <meta name="description" content="Olympus is the repository-local AI software factory that turns GitHub issues into validated pull requests — deterministic, gated, and self-hosted. One clone, one command, and a coding agent is wired to your OmniRoute gateway.">
+  <meta name="description" content="Olympus is the repository-local AI software factory: GitHub issues into validated pull requests, and a prompt into a running app — plan first, deterministic, gated, and self-hosted. One clone, one command, and a coding agent is wired to your OmniRoute gateway.">
   <meta property="og:title" content="Olympus — The AI Software Factory — FactoryOps">
-  <meta property="og:description" content="GitHub issue → validated pull request automation for the repo it lives in. Deterministic workflows, independent validation, and a cold CPU — heavy inference behind the OmniRoute gateway.">
+  <meta property="og:description" content="GitHub issue → validated pull request automation for the repo it lives in, and a browser builder that takes a prompt to a running app. Deterministic workflows, independent validation, one gateway door, and a cold CPU.">
   <meta property="og:type" content="website">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b0d10'/%3E%3Ctext x='32' y='44' font-size='22' text-anchor='middle'%3E🏭%3C/text%3E%3C/svg%3E">
   <style>
@@ -300,6 +300,12 @@
     .mile .state.done { color: var(--p-success); border: 1px solid rgba(61, 220, 132, 0.3); }
     .mile .state.next { color: var(--p-warning); border: 1px solid rgba(245, 181, 68, 0.3); }
     .mile .state.later { color: var(--p-text-muted); border: 1px solid var(--p-border); }
+    .roadmap-title {
+      font-size: 0.82rem; letter-spacing: 0.1em; text-transform: uppercase;
+      color: var(--p-text-muted); font-weight: 650;
+      margin: 32px 0 12px;
+    }
+    .roadmap-title:first-of-type { margin-top: 0; }
 
     /* ---- Footer ----------------------------------------------------------- */
     footer {
@@ -348,15 +354,15 @@
     <!-- Hero -->
     <div class="hero">
       <div class="wrap hero-inner">
-        <p class="kicker"><span class="pulse" aria-hidden="true"></span> FactoryOps · Issue → validated PR · Prompt → running app</p>
+        <p class="kicker"><span class="pulse" aria-hidden="true"></span> FactoryOps · Issue → validated PR · Plan → running app</p>
         <h1>The repo that ships<br>its own factory<span class="accent">.</span></h1>
         <p class="lede">
           Olympus is a repository-local AI software factory — deterministic
           <em>issue → validated pull request</em> automation that lives inside the repo it
           automates. One clone, one command, and a coding agent is wired to your OmniRoute
           gateway, ready to run gated factory workflows with a cold CPU — and
-          <em>Studio</em> puts the same gateway in the browser: describe an app, watch it
-          build, iterate in plain language.
+          <em>Studio</em> puts the same gateway in the browser: agree a plan, describe an
+          app, watch it build, run it, iterate in plain language.
         </p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://github.com/innotelinc/olympus#quick-start">Get started</a>
@@ -369,8 +375,9 @@
         <div class="stats">
           <div class="stat"><b>5 workflows</b><span>prime · implement · validate · regress · triage</span></div>
           <div class="stat"><b>~35 min</b><span>Issue → Fix PR (fast lane)</span></div>
-          <div class="stat"><b>Studio</b><span>prompt → files → live preview</span></div>
-          <div class="stat"><b>Cold CPU</b><span>Codex auto/coding + Hermes 3 via OmniRoute</span></div>
+          <div class="stat"><b>Plan first</b><span>the stack is agreed before code is written</span></div>
+          <div class="stat"><b>Preview It</b><span>package, run, frame — under its own name</span></div>
+          <div class="stat"><b>/admin</b><span>the deployment's own state, read-only</span></div>
           <div class="stat"><b>L0 by default</b><span>manual until a lap is watched</span></div>
         </div>
       </div>
@@ -408,7 +415,7 @@
           <div class="card">
             <span class="icon" aria-hidden="true">🧭</span>
             <h3>Observable</h3>
-            <p><code>factory/doctor.py</code> and <code>factory/trigger.py --status</code> tell you what is ready, what is blocked, and what is held — every rung.</p>
+            <p><code>factory/doctor.py</code>, <code>factory/trigger.py --status</code>, and Studio's read-only <code>/admin</code> panel tell you what is ready, what is blocked, and what is held — each check naming its own fix.</p>
           </div>
           <div class="card">
             <span class="icon" aria-hidden="true">✋</span>
@@ -489,6 +496,7 @@ $ <span class="p">python3</span> <span class="o">scripts/vault-bootstrap.py</spa
           <div class="surface"><b>Regress</b><small>holdout + mutation checks for auto-merge quality</small></div>
           <div class="surface"><b>Triage</b><small>classify and route incoming issues</small></div>
           <div class="surface"><b>Doctor</b><small>checklist + blockers + autonomy at a glance</small></div>
+          <div class="surface"><b><code>/admin</code></b><small>the deployment's state, one read-only page</small></div>
         </div>
       </div>
     </section>
@@ -496,16 +504,24 @@ $ <span class="p">python3</span> <span class="o">scripts/vault-bootstrap.py</spa
     <!-- Studio -->
     <section id="studio">
       <div class="wrap">
-        <h2>Describe it, and it builds<span class="accent">.</span></h2>
+        <h2>Plan it, then it builds<span class="accent">.</span></h2>
         <p class="section-sub">
-          Studio is the browser front door to the same gateway — prompt in, a running app out, iterated in plain language.
+          Studio is the browser front door to the same gateway — a plan you confirm, then a running app out, iterated in plain language.
         </p>
         <div class="split">
           <div>
             <div class="grid" style="gap:14px">
               <div class="card">
+                <h3>Plan first <span style="color:var(--p-text-muted);font-weight:400">· nothing is guessed</span></h3>
+                <p>A planning turn decides the language, the install / build / start commands, the port and the files, and names the data target — its own container's database, or the self-hosted Convex Atlas runs. Confirm it and the code is written against it.</p>
+              </div>
+              <div class="card">
                 <h3>Prompt → preview <span style="color:var(--p-text-muted);font-weight:400">· live</span></h3>
                 <p>The model answers with complete files as <code>&lt;file path="…"&gt;</code> blocks. Studio parses them as they stream and renders the result immediately — partial blocks are simply ignored until they close.</p>
+              </div>
+              <div class="card">
+                <h3>Preview It <span style="color:var(--p-text-muted);font-weight:400">· a real runtime</span></h3>
+                <p>Packages <em>what is on screen</em>, runs it and frames it on <code>&lt;slug&gt;-preview.&lt;suffix&gt;</code> — a real container, seconds to serve, under a name of its own. The project's own name is never registered by a preview.</p>
               </div>
               <div class="card">
                 <h3>Sandboxed <span style="color:var(--p-text-muted);font-weight:400">· untrusted output</span></h3>
@@ -528,9 +544,13 @@ $ <span class="p">make</span> <span class="o">studio-install</span> &amp;&amp; <
 <span class="cmt"># or bring up the stack</span>
 $ <span class="p">docker</span> <span class="o">compose up -d</span> studio
 
+<span class="cmt"># the deployment's own state, read-only</span>
+$ <span class="p">open</span> <span class="o">https://studio.olympus.innotel.us/admin</span>
+<span class="ok">checks · gateway · runner · queue · builds</span>
+
 <span class="cmt"># prove it still works</span>
 $ <span class="p">make</span> <span class="o">studio-test</span>
-<span class="ok">100 passing</span></pre>
+<span class="ok">all passing</span></pre>
         </div>
       </div>
     </section>
@@ -539,7 +559,35 @@ $ <span class="p">make</span> <span class="o">studio-test</span>
     <section id="roadmap">
       <div class="wrap">
         <h2>Roadmap<span class="accent">.</span></h2>
-        <p class="section-sub">Autonomy is earned — each rung needs a watched lap and explicit evidence before it is configured.</p>
+        <p class="section-sub">
+          Shipped, in development, and next. The full list lives in
+          <a href="https://github.com/innotelinc/olympus/blob/main/docs/roadmap.md">docs/roadmap.md</a> —
+          and autonomy is earned: each rung needs a watched lap and explicit evidence before it is configured.
+        </p>
+        <div class="roadmap">
+          <div class="mile">
+            <span class="tag">0.1<em>“The builder”</em></span>
+            <p>Studio, the Olympus TUI, and the plan → stream → package → run → publish engine, with the build runner and the saved-app store.</p>
+            <span class="state done">shipped</span>
+          </div>
+          <div class="mile">
+            <span class="tag">0.2<em>“Operator surface”</em></span>
+            <p><code>/admin</code>, plan-before-build, Preview It, one gateway door, tenancy through Distro's control plane, and build-runner hardening. Open: the gateway / model-chain convergence.</p>
+            <span class="state next">in development</span>
+          </div>
+          <div class="mile">
+            <span class="tag">0.3<em>“Dispatch”</em></span>
+            <p>Arm the dispatcher after a watched lap, and fold publish-time observability into the job record and the panel.</p>
+            <span class="state later">next</span>
+          </div>
+          <div class="mile">
+            <span class="tag">Later<em>“Validate · holdout”</em></span>
+            <p>Independent validation on its own branch and deterministic merge; the hidden holdout + mutation ratchet as the auto-merge contract. ONYX storage stays on hold.</p>
+            <span class="state later">later</span>
+          </div>
+        </div>
+
+        <h3 class="roadmap-title">Autonomy ladder</h3>
         <div class="roadmap">
           <div class="mile">
             <span class="tag">L0 <em>“Manual”</em></span>
@@ -549,7 +597,7 @@ $ <span class="p">make</span> <span class="o">studio-test</span>
           <div class="mile">
             <span class="tag">L1 <em>“Dispatch”</em></span>
             <p>Dispatcher armed only after a watched lap — queued accepted issues → watched implement runs.</p>
-            <span class="state next">next</span>
+            <span class="state next">0.3</span>
           </div>
           <div class="mile">
             <span class="tag">L2 <em>“Validate”</em></span>
@@ -572,6 +620,7 @@ $ <span class="p">make</span> <span class="o">studio-test</span>
       <span class="foot-links">
         <a href="https://github.com/innotelinc/olympus">GitHub</a>
         <a href="https://innotelinc.github.io/olympus">Pages</a>
+        <a href="https://github.com/innotelinc/olympus/blob/main/docs/roadmap.md">Roadmap</a>
         <a href="https://github.com/innotelinc/olympus/blob/main/docs/stack.md">Stack doc</a>
         <a href="https://github.com/innotelinc/olympus/blob/main/web/studio/README.md">Studio</a>
         <a href="https://github.com/innotelinc/innotel-platform-stack">Innotel Platform Stack</a>
