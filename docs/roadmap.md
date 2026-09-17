@@ -83,11 +83,28 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
 
 ## Open — 0.2
 
-- [ ] **One gateway, one model chain** — Studio and the factory point at the shared
+- [x] **One gateway, one model chain** — Studio and the factory point at the shared
       Group 2 OmniRoute; the local profile stays retired and `make build-model-check`
-      guards the transition. (convergence §4.4)
+      guards the transition. The DAG now reads the checkout configuration and keeps
+      Archon's provider environment from overriding the explicit Codex gateway.
+      (convergence §4.4)
 - [ ] **Build-model convergence** — one chain configured once
-      ([build-model.md](build-model.md)); the front-door count stays at two.
+      ([build-model.md](build-model.md)); the front-door count stays at two. The
+      remaining work is selecting a provider with sustained tool-call capacity rather
+      than relying on free-tier cooldowns.
+
+## Current reliability status — 17 September 2026
+
+- [x] **DAG empty-output guard** — `build-app.py` retries only while the artifact is
+      empty, records agent output, and `verify-app.py` refuses an empty project rather
+      than allowing a false success.
+- [x] **Runner pickup and preview delivery** — the host runner is active, queued jobs
+      are claimed, packaged, started, and preview names are registered through the
+      Cerulean service key. Delivery now takes the checked-out `CERULEAN_*`, `SITE_*`,
+      and `OLYMPUS_*` settings instead of a stale service environment.
+- [ ] **Provider capacity** — a configured model can still return HTTP 429 or fail to
+      call tools. The next operational check is `make build-model-check`; a model that
+      does not pass the two-turn tool probe must not be used as the primary build model.
 
 ## Next — 0.3
 
