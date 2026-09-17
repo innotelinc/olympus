@@ -133,6 +133,14 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
       unavailable.
 - [ ] **Operator actions in the panel** — deliberately read-only today; anything
       that writes is a separate decision with its own gate.
+- [ ] **Build-plane quotas surfaced per project.** Distro resolves the identity
+      and holds the quota decision; the job record should show the quota state
+      alongside the build state so a 429 mid-build is visible in the panel, not
+      only in the log tail.
+- [ ] **Retire the parked sample apps for good.** The capacity pass stopped
+      `olympus-app-runner-smoke` and `olympus-app-untitled-app`; give the runner a
+      `--prune-samples` mode (and the panel a row for them) so finished sample
+      containers are cleaned up by the job that started them.
 
 ## Later
 
