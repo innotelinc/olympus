@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 import unicodedata
 import urllib.error
 import urllib.request
@@ -597,6 +598,26 @@ def request_plan(
 # run on free tiers that go into cooldown, and when both are cooling down the choice is
 # between no plan and a route that tries the rest of the catalogue.
 DEFAULT_MODEL = "auto/coding"
+# A proxy 502/503/504 is transient; retry that model briefly before moving on.
+# A 429/model cooldown is capacity state, not a network blip, so it is skipped
+# immediately and the next configured model gets a chance.
+PLAN_TRANSIENT_RETRIES = 2
+PLAN_RETRY_DELAY_SECONDS = 5
+
+
+def transient_gateway_failure(error: PlanError) -> bool:
+    """Whether a planning failure is safe to retry on the same model."""
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "http 502",
+            "http 503",
+            "http 504",
+            "could not reach the gateway",
+            "timed out",
+        )
+    ) and "http 429" not in message and "cooldown" not in message
 
 
 def model_chain(settings: dict[str, str]) -> list[str]:
@@ -661,11 +682,21 @@ def plan_for_spec(
 
     failure: PlanError | None = None
     for model in model_chain(settings):
-        try:
-            return request_plan(base_url, api_key, model, messages, timeout=timeout)
-        except PlanError as error:
-            failure = error
-            print(f"planning with {model} did not produce a plan: {error}", file=sys.stderr, flush=True)
+        attempts = 0
+        while True:
+            try:
+                return request_plan(base_url, api_key, model, messages, timeout=timeout)
+            except PlanError as error:
+                failure = error
+                attempts += 1
+                print(
+                    f"planning with {model} did not produce a plan (attempt {attempts}): {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if attempts > PLAN_TRANSIENT_RETRIES or not transient_gateway_failure(error):
+                    break
+                time.sleep(PLAN_RETRY_DELAY_SECONDS * attempts)
 
     raise failure or PlanError("no model could produce a plan")
 
