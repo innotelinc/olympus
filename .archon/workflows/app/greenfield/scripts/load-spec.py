@@ -20,6 +20,10 @@ import sys
 from pathlib import Path
 
 MAX_SPEC_BYTES = 400_000
+# Files written by workflow nodes, not by the coding agent. A directory that
+# contains only these is an interrupted pre-build and is safe to resume; any
+# project file remains protected by the overwrite guard.
+WORKFLOW_CONTROL_FILES = {"plan.json"}
 
 
 def note(*parts: object) -> None:
@@ -116,12 +120,23 @@ def main() -> int:
     app_dir = out / slug
 
     # A previous manufacture is evidence someone was looking at it. Replacing it
-    # silently loses the comparison they were about to make.
-    if app_dir.is_dir() and any(app_dir.iterdir()):
-        fail(
-            f"{app_dir} already exists and is not empty. Remove it to rebuild, or "
-            f"export the app under a different title."
-        )
+    # silently loses the comparison they were about to make. The one exception is
+    # an interrupted plan node: `plan.json` is workflow control state, not an app
+    # file, and leaving it behind used to block every retry after a planning/build
+    # failure. Remove only those control files and preserve the guard for any real
+    # project output.
+    if app_dir.is_dir():
+        entries = list(app_dir.iterdir())
+        project_entries = [entry for entry in entries if entry.name not in WORKFLOW_CONTROL_FILES]
+        if not project_entries:
+            for entry in entries:
+                if entry.name in WORKFLOW_CONTROL_FILES:
+                    entry.unlink(missing_ok=True)
+        elif entries:
+            fail(
+                f"{app_dir} already exists and is not empty. Remove it to rebuild, or "
+                f"export the app under a different title."
+            )
 
     note(f"spec        {spec_path}")
     note(f"app         {app_dir}")

@@ -92,6 +92,28 @@ class NodeFixture(unittest.TestCase):
         return path
 
 
+class TheLoaderAndStalePlan(unittest.TestCase):
+    def test_only_workflow_plan_is_classified_as_reusable_state(self) -> None:
+        node = load_node("load-spec")
+        self.assertEqual(node.WORKFLOW_CONTROL_FILES, {"plan.json"})
+        with tempfile.TemporaryDirectory() as directory:
+            app_dir = Path(directory)
+            (app_dir / "plan.json").write_text("{}", encoding="utf-8")
+            entries = list(app_dir.iterdir())
+            project_entries = [entry for entry in entries if entry.name not in node.WORKFLOW_CONTROL_FILES]
+            self.assertEqual(project_entries, [])
+
+    def test_a_real_file_remains_protected(self) -> None:
+        node = load_node("load-spec")
+        with tempfile.TemporaryDirectory() as directory:
+            app_dir = Path(directory)
+            (app_dir / "plan.json").write_text("{}", encoding="utf-8")
+            (app_dir / "index.html").write_text("<html />", encoding="utf-8")
+            entries = list(app_dir.iterdir())
+            project_entries = [entry for entry in entries if entry.name not in node.WORKFLOW_CONTROL_FILES]
+            self.assertEqual([entry.name for entry in project_entries], ["index.html"])
+
+
 class TheBuilderAndThePlan(NodeFixture):
     def setUp(self) -> None:
         super().setUp()
