@@ -17,22 +17,31 @@
 # it was removed once the shared one held the provider connections (see
 # ips/docs/convergence-onyx-olympus-distro-atlas.md §4.4).
 #
-# `OMNIROUTE_BASE_URL` still has to survive the topology it is used from. READ THE
-# CAVEAT: `host.docker.internal:20128` only works when the gateway is bound to a
-# routable address, and a gateway published as 127.0.0.1:20128 (loopback-only) is
-# NOT reachable from a bridge network — verified. Pick the row that matches:
-#   shared gateway over the mesh  OMNIROUTE_BASE_URL=http://10.10.2.1:20128/v1 (default below)
-#                                 (OmniRoute serves its API and dashboard on that one port;
-#                                  the :20129 door is this stack's own SSO proxy, below)
-#   loopback-published on host    run the services with network_mode: host, use http://127.0.0.1:20128/v1
-#   published on 0.0.0.0          OMNIROUTE_BASE_URL=http://host.docker.internal:20128/v1
+# `OMNIROUTE_BASE_URL` still has to survive the topology it is used from, and the
+# topology it has to survive CHANGED: the gateway no longer answers on the LAN at
+# all. `make gateway-auth-mode` turned its own login off, so the reachability of
+# 20128 is the whole control and it is published on loopback + docker0 only. The
+# routable door is the SSO proxy in front of it, `:20129`, which exempts `/v1` for
+# API clients. Pick the row that matches where the gateway runs:
+#   on the gateway's host        OMNIROUTE_BASE_URL=http://host.docker.internal:20129/v1
+#   on any OTHER host            OMNIROUTE_BASE_URL=http://<gateway host>:20129/v1
+#                                (that host's LAN address — this is what `.50` uses:
+#                                 http://192.168.1.46:20129/v1)
+#   host-networked caller        OMNIROUTE_BASE_URL=http://127.0.0.1:20129/v1
+#
+# The old `10.10.2.1:20128` mesh form and `host.docker.internal:20128` are both
+# dead ends now: the first is the ceremony of a binding that was deliberately
+# removed, the second resolves to the caller's *own* docker0, where nothing
+# listens (it was already silently wrong after the split, for n8n and dashboard-api
+# on `.30` alike). `docs/gateway-sso.md` has the evidence.
 #
 # Nothing here picks the URL for a service: `OMNIROUTE_BASE_URL` is read from the
-# same `.env` the host-side build runner uses. Whenever the gateway is published
-# on THIS host's loopback, every service that talks to it runs with
-# `compose.host-gateway.yml`. `make docker-studio-up` is how Studio gets there;
-# starting Studio without it is silent — Studio resolves `127.0.0.1:20128` to
-# itself and every generation fails ECONNREFUSED.
+# same `.env` the host-side build runner uses. A caller on the same host as the
+# gateway still needs `compose.host-gateway.yml` for the loopback *proxy* only if
+# it dials `127.0.0.1:20129`; through the docker0 alias the bridge is enough.
+# `make docker-studio-up` is how Studio gets there; starting Studio without it is
+# silent — Studio resolves `127.0.0.1:20128` to itself and every generation fails
+# ECONNREFUSED.
 
 # Project name is pinned so container/volume names never depend on where this
 # repo is checked out (the mesh puts it in 5-dev/olympus).
@@ -58,7 +67,7 @@ services:
       - path: .env
         required: false
     environment:
-      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://${MESH_GATEWAY_HOST:-10.10.2.1}:20128/v1}
+      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://192.168.1.46:20129/v1}
       OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       SPEC: ${SPEC:-}
@@ -109,7 +118,7 @@ services:
         required: false
     # See the OmniRoute caveat at the top of this file before changing the base URL.
     environment:
-      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://${MESH_GATEWAY_HOST:-10.10.2.1}:20128/v1}
+      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://192.168.1.46:20129/v1}
       OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
       OMNIROUTE_MODEL: ${OMNIROUTE_MODEL:-auto/coding}
       STUDIO_ACCESS_TOKEN: ${STUDIO_ACCESS_TOKEN:-}
@@ -142,6 +151,16 @@ services:
       # download button serves the exact archive the publish step staged; without
       # it, Studio falls back to zipping the saved source itself.
       STUDIO_BUILDS_DIR: ${STUDIO_BUILDS_DIR:-/app/builds}
+      # The port Studio listens on, and the ONLY place it is decided. The image
+      # carries PORT=3001 for a bare `docker run`, so without this the knob below
+      # would set the *published* port while the app stayed on 3001 — invisible on
+      # the bridge network, where the mapping bridges the two, and a silent 502
+      # under `compose.host-gateway.yml`, which discards published ports and so
+      # leaves nothing listening on STUDIO_PORT at all (measured on .50: Studio
+      # answered 3050 nowhere, while the edge forwarded there and every page
+      # 502'd). `make studio-dev` already reads STUDIO_PORT this way, so both
+      # modes now agree on what the number means.
+      PORT: ${STUDIO_PORT:-3001}
     volumes:
       - studio-data:/app/data
       # The packaged builds, read-only. Only the archive route reads this.
@@ -164,8 +183,8 @@ services:
     # docker0 gateway instead, which is the same pattern the DNS console uses.
     # STUDIO_EDGE_HOST is the address the NPM proxy hosts must point at.
     ports:
-      - "127.0.0.1:${STUDIO_PORT:-3001}:3001"
-      - "${STUDIO_EDGE_HOST:-172.17.0.1}:${STUDIO_PORT:-3001}:3001"
+      - "127.0.0.1:${STUDIO_PORT:-3001}:${STUDIO_PORT:-3001}"
+      - "${STUDIO_EDGE_HOST:-172.17.0.1}:${STUDIO_PORT:-3001}:${STUDIO_PORT:-3001}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -178,7 +197,7 @@ services:
       # 2xx = running with auth disabled; 3xx = running, redirecting to login.
       test:
         - CMD-SHELL
-        - node -e "fetch('http://127.0.0.1:3001/',{redirect:'manual'}).then(r=>process.exit(r.status>=200&&r.status<400?0:1)).catch(()=>process.exit(1))"
+        - node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3001)+'/',{redirect:'manual'}).then(r=>process.exit(r.status>=200&&r.status<400?0:1)).catch(()=>process.exit(1))"
       interval: 30s
       timeout: 5s
       retries: 3

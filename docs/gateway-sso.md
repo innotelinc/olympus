@@ -26,17 +26,21 @@ the next section — that is not a preference, it is the one path that cannot wo
 
 | | |
 | --- | --- |
-| Public name | `gateway.olympus.innotel.us` — CNAME `gateway.olympus` → `innotel.us` in zone `innotel.us` |
-| Certificate | Let's Encrypt, issued by Cerulean (its row #16), exported to NPM as certificate #174 |
-| Edge | NPM proxy host #81 → `http://172.17.0.1:20129`, TLS enforced, websockets on |
-| Proxy | `olympus-gateway-sso` (`quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine`), host networking, listens `0.0.0.0:20129` |
+| Public name | `gateway.studio.innotel.us` — CNAME `gateway.studio` → `innotel.us` in zone `innotel.us` (since [the `.46` split](#where-this-now-runs)) |
+| Second name | `gateway.olympus.innotel.us` — NPM proxy host **#179**, the *same* proxy, cert #5, `/v1` refused. Not a redirect: each name logs in on itself (see [one proxy, two names](#one-proxy-two-names)) |
+| Names served | every host in `GATEWAY_SSO_WHITELIST_DOMAIN` (`.innotel.us`) — the proxy runs without `--redirect-url`, so it derives `redirect_uri` from the request's Host |
+| Certificate | Let's Encrypt, `CN=gateway.studio.innotel.us`, issued by NPM's own certbot (HTTP-01) as certificate #49 |
+| Edge | NPM proxy host **#178** → `http://192.168.1.46:20129`, TLS enforced, websockets on, `/v1` refused (`location ^~ /v1/` + `location = /v1` → `403`) |
+| Proxy | `olympus-gateway-sso` (`quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine`), host networking, listens `0.0.0.0:20129` — on the host running the gateway |
 | Session store | `olympus-gateway-sso-sessions` (`redis:7-alpine`), loopback only on `127.0.0.1:16379`, password from `GATEWAY_SSO_REDIS_PASSWORD` |
 | Upstream | `http://127.0.0.1:20128` (the gateway's loopback binding) |
+| Gateway binding | `127.0.0.1:20128` + `172.17.0.1:20128` (this host's docker0). **No LAN binding** — see [the split](#where-this-now-runs) |
+| Gateway own login | **off** (`requireLogin=false`), live — `make gateway-auth-mode --verify` passes. The stored password is kept as the recovery path and grants nothing |
 | LAN path | `/v1/*` and `/healthz` pass through; everything else — dashboard included — requires Authentik |
 | Authentik application | `OmniRoute Gateway` (slug `omniroute`, provider pk 30) |
 | Client id | `omniroute` |
 | Issuer | `https://auth.cerulean.innotel.us/application/o/omniroute/` |
-| Callback in use | `https://gateway.olympus.innotel.us/oauth2/callback` |
+| Callbacks registered | `https://gateway.studio.innotel.us/oauth2/callback`, `…/api/auth/oidc/callback`, and the same two under `gateway.olympus.innotel.us` |
 | Access rule | any verified email clears OIDC; only group `cerulean-platform` gets in |
 
 ## Why not OmniRoute's own OIDC
@@ -224,6 +228,104 @@ as a label:
 * **`/v1` does check a key here.** `401` with no key and `401` with a bogus one, both
   direct to `20128` and through the proxy. The "key is not a gate" finding below belongs
   to the build that ran on `.10`.
+
+### The split: one host for gateway and proxy, and no LAN binding
+
+After the host split, `5-dev/olympus` moved to `192.168.1.50` while the gateway stayed
+on `192.168.1.46` (it is declared by `2-voice/capstone/docker-compose.yml`, which keeps
+it on the Cerulean/trust host). The proxy travelled with olympus, so it reached its
+upstream across the LAN — which only worked because the gateway still published a LAN
+binding (`OMNIROUTE_LAN_BIND=192.168.1.46`), and on that address the **only** gate was
+the dashboard's own password. That is the exact configuration this document exists to
+refuse: with `requireLogin=false` there is no password, so a LAN binding publishes a
+dashboard that can read every provider credential.
+
+So the two halves were put back on one host, and the LAN binding removed:
+
+```
+                   192.168.1.46
+  ┌─────────────────────────────────────────────────────────────┐
+  │  edge (NPM) ──▶ olympus-gateway-sso :20129 (0.0.0.0)        │
+  │                       │  http://127.0.0.1:20128             │
+  │                       ▼                                     │
+  │                 omniroute :20128  ◀── 127.0.0.1, 172.17.0.1 │
+  └─────────────────────────────────────────────────────────────┘
+```
+
+| | Before the split | Now |
+| --- | --- | --- |
+| Proxy host | `5-dev/olympus` on `.50` | `5-dev/olympus` on `.46`, upstream `http://127.0.0.1:20128` |
+| Gateway bindings | `127.0.0.1`, `172.17.0.1`, **`192.168.1.46`** | `127.0.0.1`, `172.17.0.1` — no LAN binding |
+| Gateway own login | on (`requireLogin=true`), protecting the LAN address | **off** (`requireLogin=false`) — Authentik is the only gate |
+| Public names | `gateway.olympus.innotel.us` → `.50:20129` | `gateway.studio.innotel.us` **and** `gateway.olympus.innotel.us` → `.46:20129`, one proxy, each name its own callback |
+| Edge hosts | #81 → `.50:20129`, cert #5 | #178 (studio, cert #49) and #179 (olympus, cert #5); #81 deleted |
+
+`/v1` is the one path the proxy exempts, so it is how every other host reaches
+inference. There is no LAN address on `20128` any more, so a client on another machine
+dials the proxy:
+
+```bash
+OMNIROUTE_BASE_URL=http://192.168.1.46:20129/v1    # from any other host
+```
+
+Consumers updated with the change: `2-voice/capstone` (n8n's
+`N8N_INSTANCE_AI_MODEL_URL` and the dashboard's `OMNIROUTE_URL` — defaults now name the
+proxy, and `.30`'s `.env` pins the LAN address) and `3-media/plutus`
+(`OMNIROUTE_BASE_URL`, which had been silently falling back to `localhost:20128` inside
+its Convex container — it was never set on the `.56` deployment). The distro control
+plane keeps `host.docker.internal:20128`: it runs on `.46` itself and the docker0
+binding remains, and `POST /api/auth/login` still answers `200` with a session cookie
+under `requireLogin=false` — measured, because that client logs in before every call
+and a `4xx` there would have broken tenant key provisioning.
+
+Verified on the split deployment: gateway answers on loopback and `172.17.0.1` only
+(the LAN address refuses, `10.10.2.1` times out); `gateway.studio.innotel.us` serves a
+valid Let's Encrypt certificate and `302`s `/`, `/dashboard`, `/api/providers` and
+`/login` to Authentik as client `omniroute`, `403`s `/v1` and `/v1/models` at the edge
+and answers `/healthz` with `200` — identically on `gateway.olympus.innotel.us`, which is
+the same proxy behind cert #5, each name presenting its own `redirect_uri`;
+`make gateway-auth-mode --verify` exits `0`.
+
+### One proxy, two names
+
+The old name was first kept alive as a `301` to the new one, because the proxy pinned
+`--redirect-url=https://${GATEWAY_PUBLIC_HOST}/oauth2/callback`. With that pinned, every
+login completes on **one** name: a request arriving on the second name is sent to
+Authentik carrying the first name's `redirect_uri`, the code comes back there, and the
+second name is left without a session — so it can redirect, but it cannot be a door.
+
+Left unset, oauth2-proxy derives the callback from the request's Host (`--reverse-proxy`
+is what makes that Host the public one). Measured on a spare port before touching the
+live proxy — same flags, no `--redirect-url`, `--whitelist-domain=.innotel.us`:
+
+```
+Host: gateway.studio.innotel.us   → redirect_uri=https://gateway.studio.innotel.us/oauth2/callback
+Host: gateway.olympus.innotel.us  → redirect_uri=https://gateway.olympus.innotel.us/oauth2/callback
+```
+
+So `--redirect-url` is gone and `--whitelist-domain=${GATEWAY_SSO_WHITELIST_DOMAIN}`
+replaced it. The whitelist is load-bearing rather than decorative: it is what turns
+"whatever Host arrived" into a decided set. Authentik matches redirect URIs **strictly**
+per provider, so a name left out of the list has its `redirect_uri` refused by the IdP
+instead of being redirected somewhere unexpected — and every name in the list needs its
+`/oauth2/callback` registered on the client (both are; see the table above).
+
+Each name gets its own host-scoped `_oauth2_proxy` cookie, so the two log in
+independently. Adding `--cookie-domain=${SSO_COOKIE_DOMAIN:-.innotel.us}` — the line the
+estate's other SSO gateways carry — makes one login cover every served name. That is
+deliberately not the default here: it sends the session cookie to every `*.innotel.us`
+host, which widens an XSS anywhere in the domain into a dashboard that can read every
+provider credential. Neither name is worse off without it.
+
+Two defects in `scripts/gateway-auth-mode.py` were fixed to get there, both of which
+made its guard fail *open* rather than closed: its `loopback_binding()` treated the
+host's own docker0 gateway as "beyond this host" (so it refused on every deployment the
+estate actually runs, and an operator's next move would have been to disable the check
+rather than the port), and `GATEWAY_CONTAINER` was hardcoded to `g2-omniroute`, which
+matches nothing here — an unreadable binding is a *warning*, not a refusal, so the check
+never ran at all. It now accepts loopback plus `docker network inspect bridge`'s gateway,
+resolves the container name (`omniroute`, then `g2-omniroute`, or `--container` /
+`GATEWAY_CONTAINER`), and says which names it tried.
 
 Everything below is the original record, taken against the `.10` deployment unless a
 row says otherwise.

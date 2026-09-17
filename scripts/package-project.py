@@ -286,11 +286,18 @@ def image_tag(slug: str) -> str:
     return f"olympus-app-{slug}:latest"
 
 
-def which_docker() -> str:
-    binary = shutil.which("docker")
-    if not binary:
-        fail("docker is not on PATH; a project cannot be packaged without it", 2)
-    return binary
+def buildx() -> Path:
+    """The repo's one image-building command.
+
+    `scripts/buildx` is where the builder is chosen — BuildKit when this host has
+    the plugin, the deprecated legacy builder otherwise — so that decision is not
+    made twice (see scripts/build-lib.sh). It also owns the "docker is not on
+    PATH" refusal, which is why this returns a path rather than a resolved binary.
+    """
+    wrapper = Path(__file__).resolve().parent / "buildx"
+    if not wrapper.is_file():
+        fail(f"{wrapper} is missing from this checkout, so nothing here can build an image", 2)
+    return wrapper
 
 
 # --- the plan ----------------------------------------------------------------
@@ -689,8 +696,12 @@ def convex_build_args(plan: dict) -> list[str]:
 
 
 def build_image(directory: Path, slug: str, plan: dict) -> int:
-    docker = which_docker()
-    command = [docker, "build", "--tag", image_tag(slug), *convex_build_args(plan), "."]
+    """Build the project's image, through the same command the runtime builds with.
+
+    Every flag is passed through unchanged: `--tag` is the name `app-runtime.py`
+    runs, and the Convex build arg is the one credential this script may pass.
+    """
+    command = [str(buildx()), "--tag", image_tag(slug), *convex_build_args(plan), "."]
     note(f"$ {' '.join(command)}  (in {directory})")
     return subprocess.call(command, cwd=str(directory))  # noqa: S603 - fixed argv
 

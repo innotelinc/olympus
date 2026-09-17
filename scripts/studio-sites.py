@@ -57,11 +57,14 @@ from cerulean_api import (  # noqa: E402 - the path insert above is what makes t
     delete_proxy_host,
     ensure_certificate,
     ensure_proxy_host,
+    connect_client,
     ensure_record,
     find_proxy_host,
     find_zone,
     list_proxy_hosts,
     looks_like_host,
+    read_cerulean_settings,
+    require_cerulean,
     select_certificate,
     setting,
     zone_relative,
@@ -109,9 +112,14 @@ class Config:
         skipped: set[str] = set()
         read = lambda name, fallback="": setting(env_path, name, fallback, skipped)  # noqa: E731
 
-        self.api_base = read("CERULEAN_DNS_API_URL")
-        self.password = read("CERULEAN_ADMIN_PASSWORD")
-        self.zone = read("CERULEAN_ZONE")
+        # The four Cerulean values are read by `cerulean_api`, so this script and
+        # `cerulean-edge.py` cannot end up with different ideas of which ones are
+        # required or of which credential is the machine one.
+        cerulean = read_cerulean_settings(env_path, skipped)
+        self.api_base = cerulean["CERULEAN_DNS_API_URL"]
+        self.token = cerulean["CERULEAN_API_TOKEN"]
+        self.password = cerulean["CERULEAN_ADMIN_PASSWORD"]
+        self.zone = cerulean["CERULEAN_ZONE"]
         self.suffix = (read("SITE_HOST_SUFFIX", DEFAULT_SUFFIX) or DEFAULT_SUFFIX).rstrip(".").lower()
         self.forward_host = read("SITE_EDGE_FORWARD_HOST")
         self.port = int(read("SITE_PORT", "20130") or 20130)
@@ -122,21 +130,20 @@ class Config:
             fail(f"SITE_HOST_SITE_SUFFIX is not a domain: {self.suffix!r}")
 
     def require_cerulean(self) -> None:
-        missing = [
-            name
-            for name, value in (
-                ("CERULEAN_DNS_API_URL", self.api_base),
-                ("CERULEAN_ADMIN_PASSWORD", self.password),
-                ("CERULEAN_ZONE", self.zone),
-            )
-            if not value
-        ]
-        if missing:
-            fail(
-                "Not configured for this: " + ", ".join(missing) + f" — set them in {self.env_path}.\n"
-                "CERULEAN_ADMIN_PASSWORD is the Cerulean host's own login, not the Authentik token.",
-                2,
-            )
+        """Refuse before the network when nothing here can authenticate.
+
+        The rule lives in `cerulean_api.require_cerulean`, beside the client that
+        makes the choice, so this script and `cerulean-edge.py` give one answer.
+        """
+        require_cerulean(
+            self.env_path,
+            {
+                "CERULEAN_DNS_API_URL": self.api_base,
+                "CERULEAN_ZONE": self.zone,
+                "CERULEAN_API_TOKEN": self.token,
+                "CERULEAN_ADMIN_PASSWORD": self.password,
+            },
+        )
 
     def require_forward(self, override: str) -> str:
         host = override or self.forward_host
@@ -172,8 +179,13 @@ def preview_hostname_for(config: Config, slug: str) -> str:
 
 
 def connect(config: Config, insecure: bool) -> Api:
-    api = Api(config.api_base, insecure)
-    api.login(config.password)
+    """An authenticated client, on whichever credential the checkout has."""
+    api = connect_client(
+        config.api_base, insecure, token=config.token, password=config.password
+    )
+    # The bridge's record routes are addressed by zone, and the client cannot know
+    # which one from the request alone — so it is told here, once.
+    api.zone = config.zone
     return api
 
 

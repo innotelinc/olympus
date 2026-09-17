@@ -44,6 +44,9 @@
 #   .env                  reads as 0600 root, so the builder gets an ACL rather
 #                         than a widened mode: the file holds the Vault and
 #                         Authentik secrets and only the runner needs those keys
+#   docker socket         the build account is added to the socket's group — a
+#                         delivery ends in a container, and that step is the last
+#                         one in the job, so failing it wastes the whole build
 #
 #   scripts/install-build-runner.sh              # install and start (probes)
 #   scripts/install-build-runner.sh --uninstall
@@ -185,6 +188,46 @@ else
         warn "uv is not available to the service account — the workflow's script nodes declare 'runtime: uv'; install it (see docs/stack.md)"
     fi
 
+    # The app runtime's own trees. `app-runtime.py` keeps Runtime state, the nginx
+    # app-conf and each app's data directory under the first one, and
+    # `package-website.py` stages published sites in the second — both run as this
+    # account, and neither exists on a fresh install. They used to be created by the
+    # build itself (a `mkdir parents=True` part-way through a publish), which fails on
+    # the first click of a host where the parent is root-owned and 0755: the job
+    # manufactures, packages, and then dies with
+    #
+    #   PermissionError: [Errno 13] Permission denied: '/var/lib/olympus/apps/data'
+    #
+    # which names neither this script nor the account. A root install needs no help
+    # here, which is why this lives in this branch.
+    #
+    # `.env` is read for the two keys rather than only the environment: they are
+    # settings the stack carries in the file, and the runner's allow-list is
+    # deliberately not what decides them.
+    runtime_root() { # key default -> prints the value the runner will use
+        local key="$1" default="$2" value=""
+        if [[ -f "$REPO_ROOT/.env" ]]; then
+            value="$(sed -n "s/^${key}=//p" "$REPO_ROOT/.env" | head -1 | tr -d '\r')"
+        fi
+        printf '%s' "${value:-${!key:-$default}}"
+    }
+
+    for runtime_dir in \
+        "$(runtime_root OLYMPUS_APPS_ROOT /var/lib/olympus/apps)" \
+        "$(runtime_root OLYMPUS_SITES_ROOT /var/lib/olympus/sites)"
+    do
+        if install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0775 "$runtime_dir"; then
+            # -R for the same reason ./builds gets it: apps and sites built before
+            # this change are root-owned inside, and a publish has to be able to
+            # replace them rather than fail silently on the first old one.
+            chown -R "$SERVICE_USER:$SERVICE_GROUP" "$runtime_dir"
+            chmod 0775 "$runtime_dir"
+            say "runtime: $runtime_dir -> $SERVICE_USER:$SERVICE_GROUP"
+        else
+            warn "could not create $runtime_dir — previews and publishes fail there"
+        fi
+    done
+
     # ./builds/ — the builder is its only writer, so it owns it outright.
     # -R, because apps built before this change are root-owned inside, and the
     # `replace` path removes a previous build before rebuilding: it would fail to,
@@ -219,6 +262,80 @@ else
     # Authentik secrets it must never pass on. An ACL keeps the 0600 mode intact.
     if [[ -f "$REPO_ROOT/.env" ]] && command -v setfacl >/dev/null 2>&1; then
         setfacl -m "u:$SERVICE_USER:r" "$REPO_ROOT/.env"
+    fi
+fi
+
+# ---- the docker daemon ---------------------------------------------------------
+# Every delivery ends in containers: `package-project.py` builds an image,
+# `app-runtime.py` runs it and reloads the sites container's nginx, and
+# `studio-sites.py` does the same for a preview. All of them shell out to `docker`.
+#
+# A build account that cannot reach the daemon therefore fails at the LAST step of
+# a job that has already spent minutes manufacturing and packaging, with
+#
+#   permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
+#
+# which reads as a broken install rather than as a missing group. Root reaches the
+# socket by owning it; the build account needs the socket's group, and that is not
+# something the account's own creation can know — it is a fact about this host.
+DOCKER_SOCKET="${DOCKER_SOCKET:-/var/run/docker.sock}"
+if [[ ! -S "$DOCKER_SOCKET" ]]; then
+    warn "no docker socket at $DOCKER_SOCKET — a build will manufacture and package,"
+    warn "  then fail at the step that runs the container"
+elif $run_as_root; then
+    say "docker: root ${USER:-} — the socket's owner, so containers are reachable"
+else
+    socket_owner=$(stat -c %U "$DOCKER_SOCKET" 2>/dev/null || true)
+    socket_group=$(stat -c %G "$DOCKER_SOCKET" 2>/dev/null || true)
+    if [[ -z "$socket_group" ]]; then
+        warn "could not read the group on $DOCKER_SOCKET — check that $SERVICE_USER can"
+        warn "  run containers, or previews and publishes will fail at the last step"
+    elif id -nG "$SERVICE_USER" | tr ' ' '\n' | grep -qx -- "$socket_group"; then
+        say "docker: $SERVICE_USER is already in $socket_group — containers are reachable"
+    else
+        # The group is added here rather than left to the operator because the
+        # failure it prevents is minutes away and does not name this script.
+        usermod -aG "$socket_group" "$SERVICE_USER"
+        say "docker: added $SERVICE_USER to $socket_group (socket ${socket_owner:-?}:$socket_group)"
+        say "  so a build can run the container it packages"
+    fi
+fi
+
+# ---- the image builder --------------------------------------------------------
+# `docker buildx` is what makes the first line of every generated Dockerfile
+# (`# syntax=docker/dockerfile:1`) mean anything. Without the plugin docker still
+# builds, with the deprecated legacy builder, and says so on every build:
+#
+#   DEPRECATED: The legacy builder is deprecated and will be removed in a future
+#               release. Install the buildx component to build images with BuildKit
+#
+# The frontend that directive asks for is also what makes `RUN --mount=type=cache`
+# and a multi-stage `COPY --from` behave as written, so a host without it is not
+# merely noisy — it disagrees with the file it is building. Installed here when the
+# package manager can, because this script exists to make builds work; a failure to
+# install is a warning with the exact command rather than a refusal, and
+# `python3 scripts/build-runner.py --check` reports the gap either way.
+# Both package names are tried, in order: Docker's apt repository ships the plugin
+# as `docker-buildx-plugin`, Ubuntu's own `docker.io` ships it as `docker-buildx`,
+# and a host told only the other name reports "Unable to locate package" — which
+# reads as a distribution without buildx rather than as a name to try instead.
+if docker buildx version >/dev/null 2>&1; then
+    say "buildx: $(docker buildx version 2>/dev/null | head -1)"
+else
+    buildx_installed=false
+    if command -v apt-get >/dev/null 2>&1; then
+        for package in docker-buildx-plugin docker-buildx; do
+            if apt-get install -y "$package" >/dev/null 2>&1; then
+                say "buildx: installed (apt-get install -y $package)"
+                buildx_installed=true
+                break
+            fi
+        done
+    fi
+    if ! $buildx_installed; then
+        warn "docker buildx is missing — builds fall back to the deprecated legacy builder"
+        warn "  and ignore the BuildKit frontend their Dockerfile asks for."
+        warn "  Install it with: apt-get install -y docker-buildx-plugin   (or docker-buildx)"
     fi
 fi
 

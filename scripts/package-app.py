@@ -801,9 +801,21 @@ def image_tag(slug: str) -> str:
     return f"olympus-app-{slug}:latest"
 
 
+def buildx() -> Path:
+    """The repo's one image-building command.
+
+    `scripts/buildx` decides between BuildKit and the deprecated legacy builder —
+    the daemon here has no buildx plugin more often than not, and that is exactly
+    the case worth being loud about (see scripts/build-lib.sh).
+    """
+    wrapper = Path(__file__).resolve().parent / "buildx"
+    if not wrapper.is_file():
+        fail(f"{wrapper} is missing from this checkout, so no image can be built", 2)
+    return wrapper
+
+
 def build_image(app_dir: Path, slug: str, sink=None) -> int:
-    docker = which_docker()
-    command = [docker, "build", "--tag", image_tag(slug), "."]
+    command = [str(buildx()), "--tag", image_tag(slug), "."]
     note(f"$ {' '.join(command)}  (in {app_dir})")
 
     if sink is None:

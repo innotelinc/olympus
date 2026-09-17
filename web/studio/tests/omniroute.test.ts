@@ -62,9 +62,12 @@ describe("isPlaceholderSecret", () => {
 });
 
 describe("readConfig", () => {
-  it("falls back to localhost and the default model", () => {
+  it("falls back to the gateway door and the default model", () => {
     const config = readConfig();
-    expect(config.baseUrl).toBe("http://127.0.0.1:20128/v1");
+    // The door (:20129), never the gateway's own port: inside this container
+    // `127.0.0.1:20128` is Studio itself, which is how a rebuild once turned
+    // every generation into ECONNREFUSED with nothing in the gateway's log.
+    expect(config.baseUrl).toBe("http://192.168.1.46:20129/v1");
     expect(config.model).toBe("auto/coding");
     expect(config.chatPath).toBe("/chat/completions");
   });
@@ -79,7 +82,7 @@ describe("readConfig", () => {
     process.env.OMNIROUTE_CHAT_PATH = "responses";
     const config = readConfig();
     expect(config.model).toBe("auto/fast");
-    expect(chatCompletionsUrl(config)).toBe("http://127.0.0.1:20128/v1/responses");
+    expect(chatCompletionsUrl(config)).toBe("http://192.168.1.46:20129/v1/responses");
   });
 });
 
@@ -362,5 +365,31 @@ describe("completeChat", () => {
     });
 
     await expect(completeChat(config, { model: "m", messages: [] })).rejects.toThrow(/Could not reach the gateway/);
+  });
+
+  it("reports the gateway's own reason for stopping", async () => {
+    // The text still comes back — it is the caller that decides a `length` answer
+    // is unusable, which is what lets the plan route say "cut off" rather than
+    // reporting its own half-parsed object as a malformed request.
+    stub(() => Response.json({ choices: [{ finish_reason: "length", message: { content: '{"a":' } }] }));
+
+    const reasons: string[] = [];
+    const text = await completeChat(config, {
+      model: "m",
+      messages: [],
+      onFinishReason: (reason) => reasons.push(reason),
+    });
+
+    expect(text).toBe('{"a":');
+    expect(reasons).toEqual(["length"]);
+  });
+
+  it("stays quiet when the gateway names no reason", async () => {
+    stub(() => Response.json({ choices: [{ message: { content: '{"ok":true}' } }] }));
+
+    const onFinishReason = vi.fn();
+    await completeChat(config, { model: "m", messages: [], onFinishReason });
+
+    expect(onFinishReason).not.toHaveBeenCalled();
   });
 });

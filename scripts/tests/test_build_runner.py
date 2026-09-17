@@ -16,6 +16,8 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -155,6 +157,22 @@ class TestEnvAllowList(unittest.TestCase):
     def test_path_is_not_duplicated(self) -> None:
         env = runner.allowed_env({}, {"PATH": "/usr/local/bin:/usr/bin"})
         self.assertEqual(env["PATH"].count("/usr/local/bin"), 1)
+
+    def test_delivery_env_keeps_scoped_edge_credentials_outside_agent_env(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            queue = repo / ".factory" / "build-queue"
+            queue.mkdir(parents=True)
+            build_runner = runner.Runner(repo, queue)
+            build_runner.dotenv = {
+                "CERULEAN_API_TOKEN": "ceru_test_service_key",
+                "SITE_EDGE_FORWARD_HOST": "192.168.1.50",
+                "SITE_HOST_SUFFIX": "studio.example.test",
+            }
+            env = build_runner.delivery_env()
+            self.assertEqual(env["CERULEAN_API_TOKEN"], "ceru_test_service_key")
+            self.assertEqual(env["SITE_HOST_SUFFIX"], "studio.example.test")
+            self.assertNotIn("CERULEAN_API_TOKEN", build_runner.build_env())
 
 
 class TestResolveSpec(RepoFixture):
@@ -1278,3 +1296,146 @@ class TestProjectManifest(RepoFixture):
         site = runner.read_packaged(directory, "app")
         assert site is not None
         self.assertEqual(site["dist_files"], 2)
+
+
+class TestArchonResolution(unittest.TestCase):
+    """Where the check looks for the Archon CLI, and why it is not PATH alone.
+
+    The check reported MISSING on a deployment whose builds work because it asked
+    `shutil.which("archon")` and nothing else, while `.env`, `setup.sh` and
+    `.archon/config.yaml` all point at a build inside the checkout. These tests pin
+    the order and the "present is not runnable" rule that `manufacture.sh` applies.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name)
+        (self.repo / "core-modules" / "archon" / "bin").mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def executable(self, relative: str, body: str = "#!/bin/sh\nexit 0\n") -> Path:
+        """A stub CLI at `relative`, executable and answering `--version`."""
+        path = self.repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def test_the_env_name_wins_and_is_read_relative_to_the_repo(self) -> None:
+        # The `.env` form is relative, and the runner's working directory is the
+        # repo — but the check must not depend on that.
+        built = self.executable("core-modules/archon/bin/archon")
+        env = {"ARCHON_BINARY": "./core-modules/archon/bin/archon", "PATH": "/usr/bin"}
+        found, source, _tried = runner.resolve_archon(self.repo, env)
+        self.assertEqual(found, str(built))
+        self.assertEqual(source, "ARCHON_BINARY")
+
+    def test_the_older_name_is_honoured_too(self) -> None:
+        other = self.executable("opt/archon")
+        env = {"ARCHON_BIN": str(other), "PATH": "/usr/bin"}
+        found, source, _tried = runner.resolve_archon(self.repo, env)
+        self.assertEqual(found, str(other))
+        self.assertEqual(source, "ARCHON_BIN")
+
+    def test_the_checkout_build_is_found_without_any_env(self) -> None:
+        built = self.executable("core-modules/archon/bin/archon")
+        found, source, _tried = runner.resolve_archon(self.repo, {"PATH": "/usr/bin"})
+        self.assertEqual(found, str(built))
+        self.assertEqual(source, "in this checkout")
+
+    def test_a_file_that_cannot_run_is_not_a_finding(self) -> None:
+        # An unbuilt checkout leaves `bin/archon` present and unusable; claiming it
+        # works would be the same class of mistake as claiming it is absent.
+        broken = self.executable("core-modules/archon/bin/archon", "#!/bin/sh\nexit 3\n")
+        found, _source, tried = runner.resolve_archon(self.repo, {"PATH": "/usr/bin"})
+        self.assertIsNone(found)
+        self.assertIn(str(broken), tried)
+
+    def test_a_directly_configured_path_that_cannot_run_falls_through(self) -> None:
+        self.executable("missing/archon", "#!/bin/sh\nexit 1\n")
+        built = self.executable("core-modules/archon/bin/archon")
+        env = {"ARCHON_BINARY": "./missing/archon", "PATH": "/usr/bin"}
+        found, source, _tried = runner.resolve_archon(self.repo, env)
+        self.assertEqual(found, str(built))
+        self.assertEqual(source, "in this checkout")
+
+    def test_a_candidate_that_never_answers_is_skipped(self) -> None:
+        # "Present and executable" is not "runnable": a CLI that hangs on
+        # `--version` must not stop the check from finding the next one.
+        self.executable("core-modules/archon/bin/archon", "#!/bin/sh\nsleep 60\n")
+        runner.ARCHON_VERSION_TIMEOUT_SECONDS = 1
+        self.addCleanup(setattr, runner, "ARCHON_VERSION_TIMEOUT_SECONDS", 20)
+        found, _source, _tried = runner.resolve_archon(self.repo, {"PATH": "/usr/bin"})
+        self.assertIsNone(found)
+
+    def test_nothing_anywhere_lists_what_was_tried(self) -> None:
+        found, source, tried = runner.resolve_archon(
+            self.repo, {"ARCHON_BINARY": "./core-modules/archon/bin/archon", "PATH": "/usr/bin"}
+        )
+        self.assertIsNone(found)
+        self.assertEqual(source, "")
+        self.assertEqual(tried[0], str(self.repo / "core-modules" / "archon" / "bin" / "archon"))
+
+
+class CheckReportsTheEndOfTheJobTest(RepoFixture):
+    """`--check` names what the END of a job needs, not only the beginning.
+
+    A job reaches docker after a model run has already been paid for, and it reaches
+    the app runtime's own trees after manufacturing and packaging. Both are a second
+    to check here and a whole job to discover in the log — which is why they are in
+    the check, and why they are asserted rather than assumed.
+    """
+
+    def run_check(self, **overrides: str) -> subprocess.CompletedProcess:
+        # manufacture.sh present, so the only findings left are the ones under test.
+        script = self.repo / "scripts" / "manufacture.sh"
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+        env = dict(os.environ)
+        env.update(overrides)
+        return subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [
+                sys.executable,
+                str(RUNNER_PATH),
+                "--check",
+                "--repo",
+                str(self.repo),
+                "--queue",
+                str(self.queue),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+    def test_docker_and_the_buildx_plugin_are_both_reported(self) -> None:
+        result = self.run_check()
+
+        self.assertIn("docker", result.stdout)
+        self.assertIn("buildx", result.stdout)
+
+    def test_a_data_root_the_build_cannot_write_is_a_finding_with_the_fix(self) -> None:
+        # A path that does not exist is not writable by anyone, root and container
+        # root included — so this asserts the same thing wherever it runs, which a
+        # mode-based test would not.
+        never_made = self.repo / "runtime-that-was-never-made"
+
+        result = self.run_check(OLYMPUS_APPS_ROOT=str(never_made))
+
+        self.assertIn("NOT WRITABLE", result.stdout)
+        self.assertIn(str(never_made), result.stdout)
+        self.assertIn("install-build-runner.sh", result.stdout)
+        self.assertEqual(result.returncode, 1)
+
+    def test_a_writable_data_root_is_reported_and_not_found_missing(self) -> None:
+        result = self.run_check(OLYMPUS_APPS_ROOT=str(self.repo))
+
+        line = next(
+            entry for entry in result.stdout.splitlines() if entry.strip().startswith("apps")
+        )
+        self.assertIn(str(self.repo), line)
+        self.assertIn("writable", line)
+        self.assertNotIn("NOT WRITABLE", line)

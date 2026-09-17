@@ -14,7 +14,17 @@
 # checkout (.archon/workflows/app/greenfield/), run through the Archon CLI directly:
 # the factory keeps owning issue → PR, and this owns spec → app.
 #
-# Env: ARCHON_BIN      the archon CLI to use (else core-modules/archon/bin/archon, else PATH)
+# Env: ARCHON_BIN      the archon CLI to use, an operator override
+#      ARCHON_BINARY   the same, under the name `.env` and setup.sh write
+#                      (else core-modules/archon/bin/archon, else PATH)
+#
+# Both names are honoured, and both are new relative to what this script used to
+# accept. It read `ARCHON_BIN` only — while `.env` sets `ARCHON_BINARY`, the build
+# runner allow-lists `ARCHON_BINARY`, and setup.sh writes `ARCHON_BINARY`. So the
+# setting an operator changed was inert, and builds worked only because the
+# fallback below happens to resolve to the same file when the CLI is built in the
+# checkout. A relative value is taken relative to this repo, so it means the same
+# thing whether the script is run from the root or from a subdirectory.
 #      ARCHON_RUN_ARGS extra args for `archon workflow run` (e.g. --detach)
 set -euo pipefail
 
@@ -79,7 +89,13 @@ say "manufacture: spec: $SPEC"
 # path can exist without being usable (an unbuilt checkout, a partial clone) and
 # "the binary is present" is not the same claim as "the binary runs".
 candidates=()
-[ -n "${ARCHON_BIN:-}" ] && candidates+=("$ARCHON_BIN")
+for configured in "${ARCHON_BIN:-}" "${ARCHON_BINARY:-}"; do
+  [ -n "$configured" ] || continue
+  case "$configured" in
+    /*) candidates+=("$configured") ;;
+    *)  candidates+=("$ROOT_DIR/$configured") ;;
+  esac
+done
 candidates+=("$ROOT_DIR/core-modules/archon/bin/archon")
 command -v archon >/dev/null 2>&1 && candidates+=("$(command -v archon)")
 

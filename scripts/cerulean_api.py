@@ -41,6 +41,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 DEFAULT_CERT_WAIT_SECONDS = 180
 DEFAULT_RENEW_DAYS = 30
@@ -265,6 +266,137 @@ def looks_like_host(value: str) -> bool:
     return bool(value) and all(c.isalnum() or c in "-." for c in value)
 
 
+# ── what every caller needs from .env ───────────────────────────────────────
+
+CERULEAN_SETTINGS = (
+    "CERULEAN_DNS_API_URL",
+    "CERULEAN_ZONE",
+    "CERULEAN_API_TOKEN",
+    "CERULEAN_ADMIN_PASSWORD",
+)
+
+
+def read_cerulean_settings(
+    env_path: Path,
+    skipped: set[str] | None = None,
+    zone_override: str = "",
+) -> dict[str, str]:
+    """The Cerulean values, read once. `zone_override` is an explicit `--zone`."""
+    values = {name: setting(env_path, name, "", skipped) for name in CERULEAN_SETTINGS}
+    if zone_override:
+        values["CERULEAN_ZONE"] = zone_override
+    return values
+
+
+def require_cerulean(env_path: Path, values: dict[str, str]) -> None:
+    """Refuse before the network when an unattended caller cannot authenticate.
+
+    **One credential or the other, and the service key is the one that works.**
+    Cerulean signs people in through Authentik and mints its own sessions only
+    from that browser flow, so the admin password is break-glass and off by
+    default: sending it gets `403 Password sign-in is disabled`, which names the
+    flag rather than the problem. The path that exists for machines is a scoped
+    service key (`ceru_…`, see Cerulean docs/stack.md "Service API"), and this is
+    where a caller is told that.
+
+    Shared by both callers rather than repeated, because the two had the same
+    three required names and the same advice — and the advice is what went stale.
+    """
+    missing = [name for name in ("CERULEAN_DNS_API_URL", "CERULEAN_ZONE") if not values[name]]
+    if missing:
+        sys.exit("Not configured for this: " + ", ".join(missing) + f" — set them in {env_path}.")
+
+    if not values["CERULEAN_API_TOKEN"] and not values["CERULEAN_ADMIN_PASSWORD"]:
+        sys.exit(
+            f"No Cerulean credential in {env_path}. Set CERULEAN_API_TOKEN to a service key "
+            "(`ceru_…`; scopes `domains:read`, `dns:write`, `certs:*`, `npm:*`), which "
+            "Cerulean mints under Platform → Service API keys.\n"
+            "CERULEAN_ADMIN_PASSWORD is only the break-glass login, and Cerulean refuses it "
+            "unless BREAKGLASS_LOGIN=1 is set on the Cerulean host."
+        )
+
+    if not values["CERULEAN_API_TOKEN"]:
+        print(
+            "  note:       no CERULEAN_API_TOKEN — signing in with the break-glass admin "
+            "password, which Cerulean refuses unless BREAKGLASS_LOGIN=1 is set.",
+            file=sys.stderr,
+        )
+
+
+# ── the two ways in ─────────────────────────────────────────────────────────
+#
+# Cerulean answers on one path space for a signed-in session (`/api/domains`, …)
+# and another for a service key (`/api/service/domains`, …). The service half is
+# the one an unattended caller must use: sessions exist only for the browser OIDC
+# flow, and the admin password is break-glass and refused unless the host sets
+# BREAKGLASS_LOGIN=1.
+#
+# The translation is a table rather than a second set of call sites, because both
+# halves do the same work on the same records and two copies is how a publish
+# ends up doing half of it on one path and half on the other — which is exactly
+# what happened: DNS was bridge-reachable and the edge was not.
+SERVICE_PATHS: list[tuple[str, str]] = [
+    ("/api/certificates", "/api/service/certificates"),
+    ("/api/domains", "/api/service/domains"),
+    ("/api/npm/export-cert", "/api/service/npm/export-cert"),
+    ("/api/npm/hosts", "/api/service/npm/hosts"),
+]
+
+# Zone-addressed rather than id-addressed on the bridge: `/api/domains/<id>/records`
+# becomes `/api/service/dns/records?zone=<zone>`, because a key carries a tenant
+# and a tenant has many zones — the id would have to be resolved to a name anyway.
+RECORDS_PATH = "/api/domains/{zone_id}/records"
+SERVICE_RECORDS_PATH = "/api/service/dns/records"
+
+
+def service_path(path: str) -> str:
+    """The service-bridge path for a session path, or a refusal naming it.
+
+    A path this does not know is an error rather than a pass-through: passing it
+    through sends it to a session-only route, which answers `401 Unauthorized`
+    and says nothing about the cause. That is the failure that costs an afternoon.
+    """
+    for session_prefix, service_prefix in SERVICE_PATHS:
+        if path == session_prefix:
+            return service_prefix
+        if path.startswith(session_prefix + "/"):
+            return service_prefix + path[len(session_prefix):]
+    sys.exit(
+        f"{path} has no service-bridge equivalent, so a service key cannot reach it. "
+        "Add the route to Cerulean's bridge (server/src/routes.ts) or use "
+        "CERULEAN_ADMIN_PASSWORD with BREAKGLASS_LOGIN=1 on the Cerulean host."
+    )
+
+
+def connect_client(
+    base: str,
+    insecure: bool = False,
+    *,
+    token: str = "",
+    password: str = "",
+) -> "Api":
+    """An authenticated client: the service key when one is configured, else the
+    break-glass password.
+
+    One function so both callers (`studio-sites.py`, `cerulean-edge.py`) make the
+    same choice, and so the choice is made in one place when the password path is
+    finally removed.
+    """
+    api = Api(base, insecure)
+    if token:
+        if not token.startswith("ceru_"):
+            sys.exit(
+                "CERULEAN_API_TOKEN does not look like a Cerulean service key (they start "
+                "with `ceru_`). Mint one under Platform → Service API keys."
+            )
+        api.use_service_key(token)
+        return api
+
+    # `require_cerulean` has already said out loud that this is the fallback path.
+    api.login(password)
+    return api
+
+
 class Api:
     """A thin Cerulean client.
 
@@ -277,6 +409,28 @@ class Api:
         self.base = base.rstrip("/")
         self.context = ssl._create_unverified_context() if insecure else None
         self.token = ""
+        # Which path space the token belongs to, and the zone the bridge's
+        # zone-addressed record route needs. Both are set by the way in.
+        self.service = False
+        self.zone = ""
+
+    def use_service_key(self, token: str) -> None:
+        """Authenticate as a machine, against the service bridge."""
+        self.token = token
+        self.service = True
+
+    def path_for(self, path: str) -> str:
+        """Where this path lives for the credential in hand."""
+        if not self.service:
+            return path
+        if path.startswith("/api/domains/") and path.endswith("/records"):
+            if not self.zone:
+                sys.exit(
+                    "the zone must be known before zone records can be read over the "
+                    "service bridge; this is a bug in the caller, not in .env"
+                )
+            return f"{SERVICE_RECORDS_PATH}?zone={quote(self.zone)}"
+        return service_path(path)
 
     def call(self, path: str, method: str = "GET", body: dict | None = None, timeout: int = 60):
         headers = {"Accept": "application/json"}
@@ -285,7 +439,9 @@ class Api:
         data = json.dumps(body).encode() if body is not None else None
         if data is not None:
             headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(f"{self.base}{path}", data=data, method=method, headers=headers)
+        request = urllib.request.Request(
+            f"{self.base}{self.path_for(path)}", data=data, method=method, headers=headers
+        )
 
         try:
             with urllib.request.urlopen(request, timeout=timeout, context=self.context) as response:
@@ -397,10 +553,15 @@ def ensure_record(
     if dry_run:
         return f"would create {fqdn} {record_type} -> {value}"
 
+    body: dict = {"type": record_type, "name": record_name, "value": value, "ttl": 300}
+    if api.service:
+        # The bridge is addressed by zone, not by id, because a service key carries
+        # a tenant and a tenant has many zones (see `Api.path_for`).
+        body["zone"] = api.zone
     status, payload = api.call(
         f"/api/domains/{zone_id}/records",
         "POST",
-        {"type": record_type, "name": record_name, "value": value, "ttl": 300},
+        body,
     )
     if status not in (200, 201):
         sys.exit(f"Could not create the record (HTTP {status}): {payload}")

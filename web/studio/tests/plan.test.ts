@@ -322,14 +322,29 @@ describe("parsePlanObject", () => {
 describe("missingPlannedFiles", () => {
   const plan = parsePlan(validPlan());
 
-  it("is null when every planned file was written", () => {
-    expect(
-      missingPlannedFiles([{ path: "package.json" }, { path: "src/App.tsx" }], plan),
-    ).toBeNull();
+  it("is empty when every planned file was written", () => {
+    expect(missingPlannedFiles([{ path: "package.json" }, { path: "src/App.tsx" }], plan)).toEqual(
+      [],
+    );
   });
 
-  it("names the first planned file that is missing", () => {
-    expect(missingPlannedFiles([{ path: "src/App.tsx" }], plan)).toBe("package.json");
+  it("names the planned file that is missing", () => {
+    expect(missingPlannedFiles([{ path: "src/App.tsx" }], plan)).toEqual(["package.json"]);
+  });
+
+  it("names every missing file, in the plan's order", () => {
+    // The caller asks for all of them in one turn, so a file left out of the list
+    // is a file the next build still does not have.
+    const three = parsePlan(
+      validPlan({
+        files: [{ path: "package.json" }, { path: "src/App.tsx" }, { path: "src/index.css" }],
+      }),
+    );
+
+    expect(missingPlannedFiles([{ path: "src/index.css" }], three)).toEqual([
+      "package.json",
+      "src/App.tsx",
+    ]);
   });
 
   it("accepts a superset, because writing extra files honours the plan", () => {
@@ -338,16 +353,18 @@ describe("missingPlannedFiles", () => {
         [{ path: "package.json" }, { path: "src/App.tsx" }, { path: "src/index.css" }],
         plan,
       ),
-    ).toBeNull();
+    ).toEqual([]);
   });
 
   it("tolerates a leading ./ in a generated path", () => {
-    expect(missingPlannedFiles([{ path: "./package.json" }, { path: "./src/App.tsx" }], plan)).toBeNull();
+    expect(
+      missingPlannedFiles([{ path: "./package.json" }, { path: "./src/App.tsx" }], plan),
+    ).toEqual([]);
   });
 
   it("has nothing to report when the plan listed no files", () => {
     const noFiles = parsePlan(validPlan({ files: [] }));
-    expect(missingPlannedFiles([], noFiles)).toBeNull();
+    expect(missingPlannedFiles([], noFiles)).toEqual([]);
   });
 });
 
@@ -368,6 +385,16 @@ describe("generationMessages", () => {
     expect(system).toContain("port 3000");
     expect(system).toContain("package.json");
     expect(system).toContain("src/App.tsx");
+  });
+
+  it("makes each planned path binding, not a suggested layout", () => {
+    // Measured: given `Files the plan listed: - index.html`, a model returned
+    // `src/index.html` — a tidier structure, and a website whose healthcheck at
+    // `/` answered 404 because the promised file was one directory down. The
+    // warning on the panel named it, but the prompt never asked for it.
+    const system = systemOf(generationMessages("a shop", [], plan));
+    expect(system).toMatch(/at exactly the path it lists/);
+    expect(system).toMatch(/never move, rename or re-nest/);
   });
 
   it("says the project is the model's to write, with no scaffold", () => {

@@ -31,7 +31,22 @@ export type TokenUsage = {
   tokensOut: number;
 };
 
-const DEFAULT_BASE_URL = "http://127.0.0.1:20128/v1";
+/**
+ * The platform gateway's **door**, not the gateway.
+ *
+ * This default used to be `http://127.0.0.1:20128/v1`, and inside this container
+ * that is Studio talking to itself: the gateway is a group-2 service on its own
+ * host, published on that host's loopback and bridge alone because
+ * `requireLogin=false` makes reaching `20128` the whole control. The routable
+ * address is the identity-aware proxy in front of it (`20129`), which exempts
+ * `/v1` for API clients — they send a key, not a session cookie.
+ *
+ * A deployment sets `OMNIROUTE_BASE_URL` either way; the default is what an
+ * unset one gets, and a fallback that resolves to nothing is worse than a
+ * fallback that names the one address every host can reach. On the gateway's own
+ * host, `http://host.docker.internal:20129/v1` is the same door.
+ */
+const DEFAULT_BASE_URL = "http://192.168.1.46:20129/v1";
 const DEFAULT_CHAT_PATH = "/chat/completions";
 const DEFAULT_MODEL = "auto/coding";
 
@@ -314,6 +329,17 @@ export async function completeChat(
      * branch on whether accounting is configured.
      */
     onUsage?: (usage: TokenUsage) => void;
+    /**
+     * Called with the gateway's own reason for stopping, when it reports one.
+     *
+     * `length` is the one worth knowing about. This deployment's default model is
+     * a reasoning one, and its hidden reasoning is billed as output tokens against
+     * `max_tokens` — measured on the plan turn, 1,255–1,919 of a 2,000-token budget
+     * went to reasoning alone. So a `length` answer is a *truncated* answer, and
+     * the caller that reads a JSON object out of it can say "cut off" instead of
+     * reporting its own half-parsed object as a bad request.
+     */
+    onFinishReason?: (reason: string) => void;
   },
 ): Promise<string> {
   const url = chatCompletionsUrl(config);
@@ -373,6 +399,10 @@ export async function completeChat(
   const first = (choices[0] ?? {}) as Record<string, unknown>;
   const message = (first.message ?? {}) as Record<string, unknown>;
   const content = message.content;
+
+  if (typeof first.finish_reason === "string" && options.onFinishReason) {
+    options.onFinishReason(first.finish_reason);
+  }
 
   if (typeof content === "string" && content.trim()) return content;
 

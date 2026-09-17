@@ -2,28 +2,33 @@
 #
 # WHY THIS EXISTS
 # ---------------
-# The gateway this stack talks to is published on the host's loopback only
-# (`127.0.0.1:20128`), and Docker publishes a loopback binding to the loopback
-# interface alone. A bridge container therefore cannot reach it. All four
-# candidate addresses were probed from a bridge container and all four failed:
+# The gateway's own port (`:20128`) is published on the gateway host's loopback
+# and docker0 only — `make gateway-auth-mode` makes Cerulean Authentik its only
+# gate, so that port's reachability is the whole control. Docker publishes a
+# loopback binding to the loopback interface alone, so a bridge container cannot
+# reach it at all; measured from a bridge container, all of these fail:
 #
 #   http://host.docker.internal:20128/v1   -> no connection
 #   http://172.17.0.1:20128/v1             -> no connection
-#   http://192.168.1.10:20128/v1           -> no connection
+#   http://192.168.1.46:20128/v1           -> no connection
 #
-# This is the topology docker-compose.yml documents as "loopback-published on
-# host" — the sanctioned answer is host networking plus
-# `OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1`, which is what this file does.
+# Everything that is not a host-mode process on the gateway host goes through the
+# SSO proxy in front of the gateway instead, `:20129`, which exempts `/v1` for API
+# clients. That door IS reachable from a bridge container — it is what the base
+# file's default now names — so this overlay is needed only by a caller that pins
+# the *loopback* door: host networking plus
+# `OMNIROUTE_BASE_URL=http://127.0.0.1:20129/v1`.
 #
 # WHO NEEDS IT
 # ------------
-# Every service here that talks to the gateway, not just `olympus`: `studio` too.
-# The failure is silent and it was measured on this deployment — Studio was rebuilt
-# from the base file alone, landed on the bridge network, and resolved its own
-# `OMNIROUTE_BASE_URL` (`http://127.0.0.1:20128/v1`) to itself:
+# `make docker-studio-up` still uses it, and that is how the gateway host's copy
+# of this stack is run. The failure it prevents is silent, and it was measured on
+# this deployment — Studio was rebuilt from the base file alone, landed on the
+# bridge network, and resolved its own `OMNIROUTE_BASE_URL`
+# (`http://127.0.0.1:20128/v1`) to itself:
 #
-#   http://127.0.0.1:20128/healthz -> FAIL ECONNREFUSED   (from inside Studio)
-#   http://10.10.2.1:20128/healthz -> 200                 (the shared gateway, over the mesh)
+#   http://127.0.0.1:20128/healthz    -> FAIL ECONNREFUSED   (from inside Studio)
+#   http://192.168.1.46:20129/healthz -> 200                 (the door, from the bridge network)
 #
 # That second probe is what identifies this case rather than a gateway that is
 # simply down: the address that works is NOT the one in `OMNIROUTE_BASE_URL`.
@@ -35,10 +40,10 @@
 #
 # WHEN NOT TO USE IT
 # ------------------
-# Leave it out if the gateway is published on 0.0.0.0, if it is the shared one on
-# another host (then the base file's mesh default already covers you), or if this
-# stack talks to it only from shell scripts. Read the caveat at the top of
-# docker-compose.yml before changing anything here.
+# Leave it out when the door in `.env` is a routable address — `192.168.1.46:20129`
+# for any other host, which is what `.50` uses, or `host.docker.internal:20129` on
+# the gateway's own host — because a bridge container reaches both directly. Read
+# the caveat at the top of docker-compose.yml before changing anything here.
 #
 # USAGE
 # -----
