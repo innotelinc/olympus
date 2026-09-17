@@ -7,7 +7,7 @@ import {
   queueBuild,
   queuePreview,
   queuePublish,
-  readBuildStatus,
+  readJobStatus,
   readRunnerState,
 } from "@/lib/build-queue";
 import { specSlug } from "@/lib/factory-spec";
@@ -55,8 +55,14 @@ export async function GET(request: Request, context: Context): Promise<Response>
   const job = new URL(request.url).searchParams.get("job");
   if (job !== null) {
     // A malformed id is a 400 rather than a 404: it is a caller bug, not a
-    // missing build, and readBuildStatus refuses to use it as a path.
-    const status = readBuildStatus(job);
+    // missing build, and the reader refuses to use it as a path.
+    //
+    // A job that exists but has no status yet is not missing either: the runner
+    // writes the first status when it claims the request, so a browser polling one
+    // it queued a moment ago used to be told "No such build job" about work that
+    // was already on its way. `readJobStatus` answers with the queue's own marker
+    // instead, and only a job with no marker at all is a 404.
+    const status = readJobStatus(job);
     if (!status) return fail("No such build job.", 404);
     return Response.json(
       { build: status, history: listBuildHistory(slug), runner: readRunnerState() },
@@ -157,7 +163,9 @@ export async function POST(request: Request, context: Context): Promise<Response
         kind: queued.kind,
         replaced: queued.replaced,
         runner: queued.runner,
-        build: readBuildStatus(queued.job),
+        // The queued status, so the panel says "queued" from the click rather than
+        // "not started" until the runner's first write.
+        build: readJobStatus(queued.job),
         // What the runner will actually do, said out loud — a website build ends
         // with a packaging step an app's never has.
         next:

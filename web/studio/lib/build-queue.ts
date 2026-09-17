@@ -49,8 +49,15 @@ export const RUNNER_STALE_SECONDS = 60;
  * `cancelled` is its own state, not a flavour of `failed`: the operator asked for
  * it, and a panel that reports a deliberate stop as a failure trains people to
  * ignore failures.
+ *
+ * `queued` is the one state the RUNNER never writes. It describes a job the queue
+ * is carrying that no status file exists for yet — the request has been written and
+ * the runner has not claimed it. It exists because the alternative was a 404: the
+ * panel asked for the job it had just queued, found no status file, and said "No
+ * such build job" about work that was about to run. Read from the queue's own
+ * markers (`readJobStatus`), never from a file.
  */
-export type BuildState = "running" | "succeeded" | "failed" | "cancelled";
+export type BuildState = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 /**
  * Which job the queue is carrying.
@@ -437,6 +444,8 @@ function toBuildStatus(raw: unknown): BuildStatus | null {
   const job = asString(record.job);
   if (!job || !JOB_ID_PATTERN.test(job)) return null;
 
+  // `queued` is deliberately not in this list: no runner writes it, so a file
+  // claiming it is a file this module does not understand.
   const state = asString(record.state);
   if (state !== "running" && state !== "succeeded" && state !== "failed" && state !== "cancelled") {
     return null;
@@ -506,6 +515,80 @@ export function readBuildStatus(job: string): BuildStatus | null {
   return toBuildStatus(readJson(join(buildQueueDir(), `${job}.status.json`)));
 }
 
+/** The queue's own markers for a job, in the order a job moves through them. */
+const QUEUE_MARKERS = [".request.json", ".running.json"] as const;
+
+/** The job a marker file names, or null when it names something else. */
+function jobFromMarker(name: string): string | null {
+  if (name.startsWith(".")) return null;
+  for (const suffix of QUEUE_MARKERS) {
+    if (!name.endsWith(suffix)) continue;
+    const job = name.slice(0, -suffix.length);
+    return JOB_ID_PATTERN.test(job) ? job : null;
+  }
+  return null;
+}
+
+/**
+ * A job the queue is carrying but has no status for yet, as a status.
+ *
+ * The marker file is the evidence that the job exists, and which marker says how
+ * far it has got: a request the runner has not claimed is queued, and one it has
+ * claimed (`running`) is starting — the runner renames the request and writes its
+ * first status in two separate steps, so a poll can land between them.
+ *
+ * Reported with the request's own fields, so the panel can say what was queued and
+ * when without re-reading the request itself.
+ */
+function queuedStatus(job: string): BuildStatus | null {
+  if (!JOB_ID_PATTERN.test(job)) return null;
+
+  const dir = buildQueueDir();
+  const claimed = existsSync(join(dir, `${job}.running.json`));
+  const raw = readJson(join(dir, `${job}.${claimed ? "running" : "request"}.json`));
+  // Neither marker, or one that will not parse: there is no such job here.
+  if (typeof raw !== "object" || raw === null) return null;
+
+  const record = raw as Record<string, unknown>;
+  return {
+    job,
+    state: "queued",
+    action: parseAction(record.action),
+    slug: asString(record.slug),
+    title: asString(record.title),
+    spec: asString(record.spec),
+    requestedAt: asString(record.requested_at),
+    requestedBy: asString(record.requested_by),
+    language: null,
+    startedAt: null,
+    finishedAt: null,
+    // The marker's own mtime is not read: `requestedAt` is when work was asked for,
+    // which is what the panel orders and says, and a second clock would disagree.
+    updatedAt: asString(record.requested_at),
+    exitCode: null,
+    message: claimed
+      ? "The runner has picked this up — no output recorded yet."
+      : "Queued — waiting for the build runner to pick it up.",
+    artifact: null,
+    site: null,
+    publishedUrl: null,
+    previewUrl: null,
+    logTail: "",
+  };
+}
+
+/**
+ * One job as the queue knows it, claimed by the runner or not.
+ *
+ * This is what the routes answer a `?job=` with. `readBuildStatus` stays the
+ * question "what did the runner record", for the callers that need exactly that;
+ * a browser asking about the job it just queued needs "does this job exist", and
+ * the request file is the answer. Only a job with no marker at all is missing.
+ */
+export function readJobStatus(job: string): BuildStatus | null {
+  return readBuildStatus(job) ?? queuedStatus(job);
+}
+
 /**
  * The most recent finished or in-progress build for an app, so reopening it
  * shows the last result instead of forgetting that one ever ran.
@@ -531,17 +614,38 @@ function allStatuses(): BuildStatus[] {
 
   let names: string[];
   try {
-    names = readdirSync(dir);
+    // turbopackIgnore: the queue directory is runtime state (bind-mounted, or
+    // `STUDIO_BUILD_QUEUE_DIR`), so the tracer cannot scope it statically and
+    // otherwise pulls the whole project — public folder included — into the
+    // standalone server bundle. The same annotation `lib/env.ts` carries for its
+    // upward walk, for the same reason.
+    names = readdirSync(/* turbopackIgnore: true */ dir);
   } catch {
     return [];
   }
 
   const statuses: BuildStatus[] = [];
+  const recorded = new Set<string>();
   for (const name of names) {
     if (!name.endsWith(".status.json") || name.startsWith(".")) continue;
     const status = toBuildStatus(readJson(join(dir, name)));
-    if (status) statuses.push(status);
+    if (status) {
+      statuses.push(status);
+      recorded.add(status.job);
+    }
   }
+
+  // Jobs the queue is carrying that the runner has not written anything about yet.
+  // They are real work — the operator watched them go in — and a history that omits
+  // them reads as an empty panel a moment after a click, which is the same bug as
+  // answering 404 for them, one screen along.
+  for (const name of names) {
+    const job = jobFromMarker(name);
+    if (!job || recorded.has(job)) continue;
+    const waiting = queuedStatus(job);
+    if (waiting) statuses.push(waiting);
+  }
+
   return statuses;
 }
 
@@ -550,6 +654,25 @@ function recency(status: BuildStatus): number {
   const stamp = status.updatedAt ?? status.finishedAt ?? status.startedAt ?? status.requestedAt;
   const parsed = stamp ? Date.parse(stamp) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Every job the queue knows about, newest first, capped.
+ *
+ * The admin panel wants the queue itself rather than one app's history, and it
+ * must not re-implement `toBuildStatus` to get it: two parsers of the same file
+ * is how a status the runner wrote becomes "unknown" in one view and "failed" in
+ * another. Running jobs are pinned to the top here too, so the panel shows what is
+ * happening before what happened.
+ */
+export function recentBuildStatuses(limit = 20): BuildStatus[] {
+  const statuses = allStatuses();
+  statuses.sort((left, right) => {
+    if (left.state === "running" && right.state !== "running") return -1;
+    if (right.state === "running" && left.state !== "running") return 1;
+    return recency(right) - recency(left);
+  });
+  return statuses.slice(0, Math.max(1, limit));
 }
 
 /**
@@ -660,7 +783,7 @@ export type BuildLog = {
 export function readBuildLog(job: string, limitBytes: number = MAX_LOG_BYTES): BuildLog | null {
   if (!JOB_ID_PATTERN.test(job)) return null;
 
-  const status = readBuildStatus(job);
+  const status = readJobStatus(job);
   if (!status) return null;
 
   const path = join(buildQueueDir(), `${job}.log`);

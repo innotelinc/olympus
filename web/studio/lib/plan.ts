@@ -276,7 +276,7 @@ export function parsePlanObject(payload: unknown): BuildPlan {
 }
 
 /**
- * The first planned file the generated set did not write.
+ * The planned files the generated set did not write, in the plan's own order.
  *
  * The plan's file list is the contract the user confirmed, so a plan that says it
  * will write `package.json` and a reply that does not is a mismatch worth naming
@@ -285,19 +285,27 @@ export function parsePlanObject(payload: unknown): BuildPlan {
  * that was promised.
  *
  * A **superset** is fine: a model that writes extra files has still honoured the
- * list, and refusing them would punish thoroughness. Only a missing planned file
- * is reported, and only the first, because one sentence naming one file is
- * actionable where a list is noise.
+ * list, and refusing them would punish thoroughness. Only missing planned files
+ * are reported — every one of them, because the caller's next move is to ask for
+ * them by name in a single turn, and a file left out of that ask is a build that
+ * fails anyway.
  */
 export function missingPlannedFiles(
   files: { path: string }[],
   plan: BuildPlan,
-): string | null {
-  if (plan.files.length === 0) return null;
+): string[] {
+  if (plan.files.length === 0) return [];
 
   const written = new Set(files.map((file) => file.path.replace(/^\.?\//, "")));
-  const missing = plan.files.find((file) => !written.has(file.path));
-  return missing ? missing.path : null;
+
+  // Every one, in the plan's order — not the first. The plan is the contract, and a
+  // turn that wrote one of two named files has the same problem twice; asking for
+  // them one at a time would be three model runs for a mistake that fits in one.
+  const missing: string[] = [];
+  for (const file of plan.files) {
+    if (!written.has(file.path)) missing.push(file.path);
+  }
+  return missing;
 }
 
 function readFiles(value: unknown): PlanFile[] {
@@ -547,6 +555,12 @@ export function generationMessages(
     "- Reply with file blocks and nothing else. No prose, no preamble, no explanation, no markdown fences.",
     '- Wrap every file exactly like this:\n<file path="src/main.ts">\n...file contents...\n</file>',
     "- Rewrite each file you send in full. Never emit patches, diffs, or partial edits.",
+    // Measured: a model given `Files the plan listed: - index.html` returned
+    // `src/index.html`, `src/style.css`, `src/script.js` — a tidier layout, and a
+    // website whose healthcheck at `/` answered 404 because the file the plan
+    // promised was one directory down. The plan's list is what the person
+    // confirmed, so a path is part of the contract and not a suggestion.
+    "- Write every file the plan lists at exactly the path it lists. A file that lands somewhere else is a file the build cannot find: `src/index.html` is not `index.html`. Add files when the project needs them, but never move, rename or re-nest one the plan named.",
     isAddOn
       ? "- Return every file you are adding or changing. A file you do not mention is kept exactly as it is, so do not re-send a file just to keep it — and do not drop a feature by leaving its file out."
       : "- Write every file the project needs to install, build and run. Nothing exists yet.",
