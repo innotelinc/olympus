@@ -97,7 +97,9 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
 
 - [x] **DAG empty-output guard** — `build-app.py` retries only while the artifact is
       empty, records agent output, and `verify-app.py` refuses an empty project rather
-      than allowing a false success.
+      than allowing a false success. The installer now probes the complete Codex
+      bubblewrap namespace (`user + network`) so it selects root when an unprivileged
+      account cannot create the network namespace.
 - [x] **Runner pickup and preview delivery** — the host runner is active, queued jobs
       are claimed, packaged, started, and preview names are registered through the
       Cerulean service key. Delivery now takes the checked-out `CERULEAN_*`, `SITE_*`,
