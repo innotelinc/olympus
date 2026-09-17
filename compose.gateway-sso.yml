@@ -10,21 +10,28 @@
 # evidence. So the dashboard is fronted by a conformant client instead, and
 # OmniRoute's own `oidcEnabled` stays off.
 #
-#   browser ──https──▶ edge (NPM, another host)
-#                          │  gateway.olympus.innotel.us
-#                          ▼  http://<this host>:20129
+#   browser ──https──▶ edge (NPM, this host)
+#                          │  gateway.studio.innotel.us      (and the older
+#                          │  gateway.olympus.innotel.us, same door, same proxy)
+#                          ▼  http://192.168.1.46:20129
 #                    gateway-sso (oauth2-proxy) ──▶ Authentik OIDC + group check
 #                          │  http://127.0.0.1:20128
 #                          ▼
-#                       omniroute (dashboard, still loopback-only)
+#                       omniroute (dashboard, loopback + docker0 only)
 #
 # USAGE
 # -----
 #   make gateway-sso-up      # or, by hand:
 #   docker compose -f docker-compose.yml -f compose.gateway-sso.yml up -d gateway-sso
 #
+# EVERY NAME IN GATEWAY_SSO_WHITELIST_DOMAIN IS SERVED, each with its own derived
+# callback — see the note at `--whitelist-domain` below. The proxy and the gateway
+# must share a host, because the gateway is loopback-published and a bridge cannot
+# reach that: a proxy on another machine has no door to it at all.
+#
 # HOST NETWORKING IS NOT OPTIONAL HERE. The gateway is published on the host's
-# loopback only (`127.0.0.1:20128`), and Docker publishes a loopback binding to
+# loopback (`127.0.0.1:20128`, plus `172.17.0.1:20128` for containers on this host),
+# and Docker publishes a loopback binding to
 # the loopback interface alone — a bridge container cannot reach it at all. This
 # is the case `docker-compose.yml` calls "loopback-published on host", whose
 # sanctioned answer is host networking; `compose.host-gateway.yml` already makes
@@ -130,9 +137,33 @@ services:
       # Authentik.
       - --skip-auth-route=^/v1/
       - --skip-auth-route=^/healthz$
-      - --redirect-url=https://${GATEWAY_PUBLIC_HOST}/oauth2/callback
+      # NO --redirect-url, AND THAT IS THE FEATURE. With it pinned, this proxy
+      # completes every login on ONE name: a request that arrives on a second name
+      # is sent to Authentik with the first name's `redirect_uri`, so the callback
+      # lands there and the second name has no session — which is why
+      # `gateway.olympus.innotel.us` had to be a 301 instead of a door. Left unset,
+      # oauth2-proxy derives the callback from the request's Host (`--reverse-proxy`
+      # is what makes that Host the public one), so each served name logs in on
+      # itself. Measured on this deployment before changing it: a probe on a spare
+      # port with these flags and no `--redirect-url` answered
+      # `redirect_uri=https://gateway.studio.innotel.us/oauth2/callback` for a
+      # studio Host and `…gateway.olympus.innotel.us…` for an olympus Host.
+      #
+      # A DERIVED CALLBACK IS ONLY AS GOOD AS THIS LIST — it is what turns
+      # "whatever Host header arrived" into a decided set, so a name left out here
+      # gets `redirect_uri` refused by Authentik (whose matching is strict per
+      # provider) rather than silently redirected somewhere unexpected.
+      - --whitelist-domain=${GATEWAY_SSO_WHITELIST_DOMAIN:-.innotel.us}
       # The edge terminates TLS, so the session cookie is only ever sent over
       # HTTPS even though this listener speaks plain HTTP.
+      #
+      # Each served name gets its OWN host-scoped `_oauth2_proxy` cookie, so the
+      # two names log in independently. Adding --cookie-domain=${SSO_COOKIE_DOMAIN:-.innotel.us}
+      # here (the line the other SSO gateways in this estate carry) makes one login
+      # cover every served name — trade a second login for a session cookie sent to
+      # every *.innotel.us host. Deliberately not the default: it widens the blast
+      # radius of an XSS anywhere in the domain to a dashboard that can read every
+      # provider credential, and neither name is worse off without it.
       - --cookie-secure=true
       - --cookie-samesite=lax
       # Honours X-Forwarded-Proto/Host, which is how the session cookie stays

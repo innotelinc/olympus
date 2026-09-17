@@ -81,6 +81,9 @@ LOCK_NAME = "runner.lock"
 
 # DEFAULTS
 DEFAULT_POLL_SECONDS = 5
+# How long a candidate Archon CLI gets to answer `--version` before the check
+# moves on. A binary that hangs is not the one the build should use either.
+ARCHON_VERSION_TIMEOUT_SECONDS = 20
 DEFAULT_TIMEOUT_SECONDS = 1800
 STATUS_EVERY_SECONDS = 5
 HEARTBEAT_EVERY_SECONDS = 10
@@ -264,6 +267,84 @@ def resolve_slug(payload: dict, spec_rel: str) -> str:
             f"slug {slug!r} does not match the spec name {Path(spec_rel).stem!r}"
         )
     return slug
+
+
+# The Archon CLI, by the names and locations a deployment puts it in. Ordered to
+# match `scripts/manufacture.sh`, which is the code that actually runs it: an
+# `ARCHON_BIN` an operator exported, the `ARCHON_BINARY` this stack's `.env` and
+# `setup.sh` write, the in-checkout build, then PATH.
+ARCHON_CANDIDATES = (
+    ("ARCHON_BIN", "env"),
+    ("ARCHON_BINARY", "env"),
+    ("core-modules/archon/bin/archon", "repo"),
+    ("archon", "path"),
+)
+
+
+def archon_candidates(repo: Path, env: dict[str, str]) -> list[tuple[str, str]]:
+    """Every place the Archon CLI could be, as (path, source) pairs, in order.
+
+    The check used to ask `shutil.which("archon")` and nothing else, and that is
+    the wrong question on every host this stack installs itself on: the CLI lives
+    in the checkout (`core-modules/archon/bin/archon`, where `setup.sh` looks and
+    where `.archon/config.yaml` points), and PATH is the *last* resort rather than
+    the only one. Reporting MISSING for a deployment whose builds work is worse
+    than not checking: it sends the operator to install something they already have.
+
+    A relative value is resolved against the repo, because `.env` carries the
+    repo-relative form and the runner is started with the repo as its working
+    directory, not a subdirectory of it.
+    """
+    found: list[tuple[str, str]] = []
+
+    for value, kind in ARCHON_CANDIDATES:
+        if kind == "path":
+            located = shutil.which(value, path=env.get("PATH"))
+            if located:
+                found.append((located, "on PATH"))
+            continue
+
+        if kind == "env":
+            configured = (env.get(value) or "").strip()
+            if not configured:
+                continue
+            candidate = Path(configured).expanduser()
+            if not candidate.is_absolute():
+                candidate = repo / candidate
+            found.append((str(candidate), value))
+            continue
+
+        found.append((str(repo / value), "in this checkout"))
+
+    return found
+
+
+def resolve_archon(repo: Path, env: dict[str, str]) -> tuple[str | None, str, list[str]]:
+    """The first candidate that runs, its source, and everything that was tried.
+
+    "Is present" is not the claim being made here — an unbuilt checkout leaves a
+    file that cannot answer. Each candidate has to execute and answer `--version`,
+    which is the same test `manufacture.sh` applies before it picks one.
+    """
+    tried: list[str] = []
+    for candidate, source in archon_candidates(repo, env):
+        tried.append(candidate)
+        if not os.access(candidate, os.X_OK):
+            continue
+        try:
+            result = subprocess.run(  # noqa: S603 - a fixed argv, no shell
+                [candidate, "--version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=ARCHON_VERSION_TIMEOUT_SECONDS,
+                stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0:
+            return candidate, source, tried
+
+    return None, "", tried
 
 
 def resolve_build_dir(repo: Path, slug: str) -> Path:
@@ -733,6 +814,23 @@ class Runner:
     def build_env(self) -> dict[str, str]:
         return allowed_env(self.dotenv, dict(os.environ), self.repo)
 
+    def delivery_env(self) -> dict[str, str]:
+        """Environment for packaging/runtime/edge delivery commands, not the agent.
+
+        The model receives only the build allow-list. Delivery commands are different:
+        `studio-sites.py` needs the scoped Cerulean service key and the runtime needs
+        `SITE_*`/`OLYMPUS_*` settings. Using `build_env()` here silently removed the
+        service key, so previews reached `studio-sites.py` with only the template
+        break-glass password and stopped after the container was already running.
+        """
+        env = dict(os.environ)
+        for key, value in self.dotenv.items():
+            if key.startswith(("CERULEAN_", "SITE_", "OLYMPUS_", "APP_")):
+                env.setdefault(key, value)
+        env.setdefault("PATH", os.defpath)
+        env.setdefault("HOME", os.path.expanduser("~"))
+        return env
+
     # ---- queue plumbing -------------------------------------------------
 
     def requests(self) -> list[Path]:
@@ -1180,7 +1278,7 @@ class Runner:
                 # not given, so a plan written first would not survive it.
                 write_plan(build_dir, plan)
             except OSError as error:
-                return 1, f"Could not write the files into builds/{slug}: {error}", None, None
+                return 1, f"Could not write the files into builds/{slug}: {error}", None, None, None
 
             for command in steps:
                 sink.write(f"\n$ {' '.join(command)}\n".encode())
@@ -1188,7 +1286,7 @@ class Runner:
                 code = subprocess.call(  # noqa: S603 - fixed argv, no shell
                     command,
                     cwd=str(self.repo),
-                    env=self.build_env(),
+                    env=self.delivery_env(),
                     stdin=subprocess.DEVNULL,
                     stdout=sink,
                     stderr=subprocess.STDOUT,
@@ -1520,13 +1618,16 @@ def main() -> int:
 
     if args.check:
         missing = [p for p in (repo / "scripts" / "manufacture.sh",) if not p.is_file()]
-        env = allowed_env(
+        # Parsed once and kept: the runtime roots below are read from the file rather
+        # than from `env`, because the allow-list deliberately does not carry them
+        # into a build (they are not the build's business) — but whether this host
+        # can *write* them is the check's business.
+        dotenv = (
             parse_env_file((repo / ".env").read_text(encoding="utf-8"))
             if (repo / ".env").is_file()
-            else {},
-            dict(os.environ),
-            repo,
+            else {}
         )
+        env = allowed_env(dotenv, dict(os.environ), repo)
         # Reported because the runner no longer has to be root: an operator
         # checking a fresh install wants to see *which* account is about to run
         # builds, and whether it can read the .env containing the gateway key.
@@ -1539,14 +1640,73 @@ def main() -> int:
         print(f"gateway     {env.get('OMNIROUTE_BASE_URL', '<unset>')}")
         print(f"model       {env.get('OMNIROUTE_MODEL', '<unset>')}")
         print(f"fallback    {env.get('OMNIROUTE_MODEL_FALLBACK', '<unset>')}")
-        for tool in ("archon", "codex", "uv", "bash"):
+        archon, archon_source, archon_tried = resolve_archon(repo, env)
+        label = f"  {'archon':<9} "
+        if archon:
+            print(f"{label}{archon}" + (f"  ({archon_source})" if archon_source else ""))
+        else:
+            print(f"{label}MISSING")
+            for candidate in archon_tried:
+                print(f"  {'':<9}   tried {candidate}")
+            missing.append("the Archon CLI (ARCHON_BINARY, core-modules/archon/bin/archon or PATH)")
+        for tool in ("codex", "uv", "bash"):
             found = shutil.which(tool, path=env["PATH"])
             print(f"  {tool:<9} {found or 'MISSING'}")
-        if missing:
-            for path in missing:
-                print(f"missing: {path}")
-            return 1
-        return 0
+
+        # Docker, and the one plugin the delivery needs, are checked because a job
+        # reaches them LAST: the image is built — and for a publish or a preview a
+        # container is run — only after a model run has already been paid for.
+        # Learning it here costs a second; learning it in the job log costs the job.
+        docker_bin = shutil.which("docker", path=env["PATH"])
+        print(f"  {'docker':<9} {docker_bin or 'MISSING'}")
+        if not docker_bin:
+            missing.append("docker — the image is built and the container is run at the end of every job")
+        else:
+            # The only honest test for the plugin: `docker buildx` can be absent, and
+            # it can be present but refuse to run. Without it docker falls back to the
+            # deprecated legacy builder, which ignores the `# syntax=docker/dockerfile:1`
+            # every generated Dockerfile starts with — the file then asks for the
+            # BuildKit frontend and the builder does something else.
+            buildx = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                [docker_bin, "buildx", "version"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            buildx_version = (buildx.stdout or "").strip().splitlines()
+            if buildx.returncode == 0 and buildx_version:
+                print(f"  {'buildx':<9} {buildx_version[0]}")
+            else:
+                print(f"  {'buildx':<9} MISSING")
+                missing.append(
+                    "the docker buildx plugin — otherwise every image is built by the "
+                    "deprecated legacy builder (apt-get install -y docker-buildx-plugin)"
+                )
+
+        # The app runtime's own trees, which live outside the checkout and are handed
+        # to the build account by scripts/install-build-runner.sh. A build that cannot
+        # write them fails at the last step of a job that has already manufactured and
+        # packaged — the most expensive place to find out, and the exact failure this
+        # check exists to move forward by twenty minutes.
+        for label, key, default in (
+            ("apps", "OLYMPUS_APPS_ROOT", "/var/lib/olympus/apps"),
+            ("sites", "OLYMPUS_SITES_ROOT", "/var/lib/olympus/sites"),
+        ):
+            root = Path(dotenv.get(key) or os.environ.get(key) or default)
+            writable = os.access(root, os.W_OK)
+            print(f"  {label:<9} {root} — {'writable' if writable else 'NOT WRITABLE'}")
+            if not writable:
+                # `os.access`, not a mode read: the question is whether THIS account
+                # can write it, and answering it as someone else is how a host ends up
+                # green on the check and red on the next build.
+                missing.append(
+                    f"{root} writable by uid {os.geteuid()} ({key}) — scripts/"
+                    "install-build-runner.sh creates it and hands it to the build account"
+                )
+
+        for path in missing:
+            print(f"missing: {path}")
+        return 1 if missing else 0
 
     if args.submit:
         code, payload = submit(queue, repo, args.submit, replace=args.replace)

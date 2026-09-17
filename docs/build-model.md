@@ -1,5 +1,17 @@
 # The build model
 
+> **17 Sep 2026 — the pool moved again, and the pin moved with it.** Every `oc/*`
+> model now answers `403 OpenCode's free tier can only be used from within OpenCode`:
+> a provider-policy change, so the model measured to build this stack in September
+> cannot serve it at all. Re-probed the field, and the surviving chain is
+> `gemini/gemini-3-flash-preview` → `auto/coding`. The gemini entry passes the
+> two-turn probe and then `429`s Codex's real request while its free tier is
+> burst-locked — in about seven seconds, not a hang — so the retry lands on the
+> combo, which was the only thing here that wrote a file under Codex's own payload.
+> The section below is left as it was measured, because how a model *stops* working
+> is the part worth keeping. `.env.example` and the pin at the bottom carry the
+> current state.
+
 Why this page exists: the most expensive failure in this stack has no error
 message. A build can run for ten minutes, exit **0**, and write nothing at all —
 and the log does not say why, because nothing failed.
@@ -237,10 +249,14 @@ concrete second entry for when the first goes quiet, and let
 comes out empty. Never the combo — a combo member is chosen by the gateway, which
 is how a turn ends up on a provider that refuses Codex's tool calls.
 
-*Current pin:* `OMNIROUTE_MODEL=oc/mimo-v2.5-free`,`OMNIROUTE_MODEL_FALLBACK=gemini/gemini-3-flash-preview`.
-The first is the model measured to build; the second is the better model, kept for
-when the first writes nothing. *Cost:* the free pool has no quota guarantee.
-*Fixes:* the silence.
+*Current pin (17 Sep 2026, re-measured):* `OMNIROUTE_MODEL=gemini/gemini-3-flash-preview`,
+`OMNIROUTE_MODEL_FALLBACK=auto/coding` — and `auto/coding` once more as
+`build-app.py`'s own last attempt, so the chain a build actually walks is three deep.
+The order is the same argument as before with the free pool removed: a concrete model
+first, because a named model keeps the turn off the combo path; the combo after it,
+because by the second attempt a coin toss beats stopping. Measured today, attempt one
+is a seven-second `429` and attempt two writes the file. *Cost:* the free pool has no
+quota guarantee. *Fixes:* the silence.
 
 ## Changing the model
 
@@ -259,10 +275,23 @@ make build-model-check ARGS="--model <provider>/<candidate>"
 
 Known-bad on this deployment, so nobody re-measures them:
 
+* **every `oc/*` and `opencode/*` model — `403 OpenCode's free tier can only be used
+  from within OpenCode`** (measured 17 Sep 2026). This is the one entry on this page
+  that invalidates an earlier one: `oc/mimo-v2.5-free` and `oc/big-pickle` were the
+  models measured to build, and the provider now refuses the gateway outright. It is a
+  policy refusal rather than a quota one, so it is not something waiting for a reset.
 * `gemini/gemini-2.5-flash` — answers a hand-made tool request, then returns
   `400 Function calling config is set without function_declarations` under the tool
   payload Codex actually sends. A gateway-side translation gap.
 * `gemini/gemini-2.5-pro` — `404 This model is no longer available to new users`.
+* `gemini/gemini-3-flash-preview`, `gemini/gemini-3.1-flash-lite` — **not** known-bad,
+  with a caveat that matters: both pass `make build-model-check` (two turns, a tool
+  call each) and then answer `429` to the request Codex actually sends, because the
+  payload is far larger than the probe's. Measured 17 Sep 2026: the probe returned in
+  1.9s and 6.4s, the `codex exec` invocation `429`ed in 7s and 0s. The first is
+  therefore still the pin — it is the better model and it is the entry that recovers
+  when the tier's burst lock clears — but "the check passed" is not evidence a build
+  will run.
 * Everything in the sweep table above that is not `oc/`, with its reason. The
   refusals are provider-account facts, not model-quality judgements: re-check the
   account before concluding a model is bad.

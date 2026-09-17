@@ -11,6 +11,27 @@ const MAX_PROMPT_CHARS = 8_000;
 const MAX_PRIOR_FILES = 20;
 const MAX_FILE_CHARS = 200_000;
 
+/**
+ * The planner's output budget, in tokens.
+ *
+ * It was 2,000, chosen when "a plan is a small object" was the whole story. It is
+ * not: on the model this deployment pins (`gemini/gemini-3-flash-preview`) the
+ * hidden reasoning is billed as output tokens against this same cap, so a plain
+ * "tip calculator" request was measured spending 1,255–1,919 of the 2,000 on
+ * reasoning and **cut off mid-object** — which arrives here as an unterminated
+ * `{…` with no closing brace, and used to be reported to the person as "the
+ * planner did not return a JSON plan. Try rephrasing the request." That message
+ * blamed their phrasing for a budget that the model's own thinking had already
+ * spent, and it was roughly a coin flip per request.
+ *
+ * The plan itself is genuinely small (~500 tokens for three files), so this cap is
+ * room for reasoning plus a plan, not room for a plan. It is a ceiling rather than
+ * a spend — the provider bills what is generated — so raising it costs nothing on
+ * the requests that finish. `onFinishReason` below is what keeps a truncation
+ * legible if some future model reasons even longer.
+ */
+const PLAN_MAX_TOKENS = 8_000;
+
 function fail(message: string, status: number): Response {
   return Response.json({ error: message }, { status, headers: { "cache-control": "no-store" } });
 }
@@ -107,20 +128,23 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   let usage: TokenUsage | null = null;
+  let finishReason = "";
   let reply: string;
   try {
     reply = await completeChat(config, {
       model: chosen.model,
       messages: planMessages(prompt, priorFiles),
       signal: request.signal,
-      // A plan is a small object. The cap keeps a chatty model from spending a
-      // generation's worth of tokens on it, and is generous enough that a long
-      // file list still fits.
-      maxTokens: 2_000,
+      maxTokens: PLAN_MAX_TOKENS,
       temperature: 0.2,
       // The gateway's own count, when it reports one. Recorded below.
       onUsage: (reported) => {
         usage = reported;
+      },
+      // Read so a truncated answer can be told apart from a malformed one; see
+      // the parse failure below.
+      onFinishReason: (reason) => {
+        finishReason = reason;
       },
     });
   } catch (error) {
@@ -147,9 +171,26 @@ export async function POST(request: Request): Promise<Response> {
   try {
     plan = parsePlan(reply);
   } catch (error) {
-    // A malformed plan is a real failure with a real next step for the user
-    // ("try rephrasing"), so the message is the planner's own, not a generic 500.
-    if (error instanceof PlanError) return fail(error.message, 422);
+    if (error instanceof PlanError) {
+      // A reply the gateway stopped for length is not a malformed request, and
+      // saying so is the difference between "try again" and "rephrase it". With a
+      // reasoning model this is the whole budget being spent before the JSON
+      // closes, and the fix is a retry (reasoning length varies) or a model
+      // without extended thinking — not different wording from the person.
+      if (finishReason === "length") {
+        return fail(
+          `The planner was cut off at ${PLAN_MAX_TOKENS.toLocaleString("en-US")} tokens before the ` +
+            "plan closed — with a reasoning model most of that budget goes to the model's own " +
+            "thinking rather than to the plan. Nothing was written. Try again, or pick a model " +
+            "without extended thinking.",
+          422,
+        );
+      }
+
+      // A malformed plan is a real failure with a real next step for the user
+      // ("try rephrasing"), so the message is the planner's own, not a generic 500.
+      return fail(error.message, 422);
+    }
     throw error;
   }
 

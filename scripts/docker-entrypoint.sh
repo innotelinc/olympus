@@ -29,9 +29,11 @@ mkdir -p builds build-requests .archon/cache factory 2>/dev/null || true
 # gateway, while the machine that matters (the build runner, the SSO proxy, anything
 # else pointed at a gateway) may find *it* instead of the deployment's real
 # gateway — with none of the credentials. The gateway is the shared Group 2
-# service now (`2-voice/`, mesh 10.10.2.1), so the single-owner rule holds by
-# construction: exactly one OmniRoute exists, and this container is not it.
-OMNIROUTE_BASE_URL="${OMNIROUTE_BASE_URL:-http://10.10.2.1:20128/v1}"
+# service now (`2-voice/`, on its own host), so the single-owner rule holds by
+# construction: exactly one OmniRoute exists, and this container is not it. The
+# door is the SSO proxy in front of it (:20129); the gateway's own port answers
+# on the gateway host's loopback and bridge alone.
+OMNIROUTE_BASE_URL="${OMNIROUTE_BASE_URL:-http://192.168.1.46:20129/v1}"
 if curl -fsS -m 5 "${OMNIROUTE_BASE_URL%/v1}/healthz" >/dev/null 2>&1; then
   say "OmniRoute reachable at ${OMNIROUTE_BASE_URL}"
 else

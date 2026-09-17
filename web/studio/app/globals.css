@@ -1278,6 +1278,82 @@ pre.code-body {
   background: var(--panel-2);
 }
 
+/* ---- the delivery, where the buttons are -------------------------------- */
+
+/* Sits directly under the delivery row, because the panel that reports a build
+   is under the library and therefore below the fold at the moment somebody
+   clicks. A run that has just been queued has to look like something started. */
+.delivery-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.delivery-strip.running {
+  border-left-color: var(--accent);
+}
+
+.delivery-strip.succeeded {
+  border-left-color: #6fd6a0;
+}
+
+.delivery-strip.failed {
+  border-left-color: var(--danger, #ff6b6b);
+}
+
+.delivery-strip.cancelled {
+  border-left-color: #ffc46b;
+}
+
+.delivery-strip-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The step list is the same vocabulary as the streaming one, at the size a
+   status line can carry. */
+.steps.compact {
+  gap: 4px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.steps.compact .step {
+  padding: 2px 0;
+}
+
+.steps.compact .step-detail {
+  display: none;
+}
+
+/* The last line the runner wrote — the difference between a bar that moves and
+   a bar that is working. Truncated rather than wrapped so the strip never grows
+   the delivery row out from under the buttons. */
+.delivery-detail,
+.preview-live-line {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.preview-live-line {
+  max-width: 100%;
+  color: var(--muted, inherit);
+}
+
 /* ---- what to build (app vs website) ------------------------------------ */
 
 .kind-picker {
@@ -1376,6 +1452,199 @@ pre.code-body {
   color: var(--accent);
 }
 
+/* ---- the deployment panel ---------------------------------------------- */
+
+/*
+ * `/admin` reuses the shell, the chips and the pills the builder already uses, so
+ * the two screens read as one product. What is added here is the shape this page
+ * needs and the builder has no equivalent of: a scrolling column of blocks, a
+ * fact list, and two tables.
+ */
+
+.admin-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+}
+
+.admin-block {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.admin-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.admin-head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.admin-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+/* The checks list: one row per rule, the state said in a colour and a word. */
+.admin-checks {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-check {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.admin-check .dot {
+  margin-top: 6px;
+}
+
+.admin-check-title {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.admin-check-detail {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.admin-check-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--accent);
+  line-height: 1.5;
+}
+
+.check-fail {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+/* A fact list, sized so the labels line up without a table. */
+.admin-facts {
+  display: grid;
+  grid-template-columns: minmax(140px, max-content) minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.admin-facts dt {
+  color: var(--muted);
+}
+
+.admin-facts dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.admin-table-scroll {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.admin-table th {
+  position: sticky;
+  top: 0;
+  padding: 8px 10px;
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.admin-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.admin-table tr:last-child td {
+  border-bottom: none;
+}
+
+.admin-table a {
+  color: var(--accent);
+}
+
+.admin-message {
+  max-width: 420px;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+/* Paths, ids and model names: monospaced so two of them can be compared by eye. */
+.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* State colours for the dots and pills, shared by the panel's two vocabularies
+   (a passing check and a finished build are the same green). */
+.dot-ok {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.dot-warn {
+  background: #f0b429;
+  border-color: #f0b429;
+}
+
+.dot-fail {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.dot-muted {
+  background: var(--muted);
+  border-color: var(--muted);
+}
+
+.dot-ok,
+.dot-warn,
+.dot-fail,
+.dot-muted {
+  color: var(--text);
+}
+
 /* ---- responsive -------------------------------------------------------- */
 
 @media (max-width: 1000px) {
@@ -1403,5 +1672,9 @@ pre.code-body {
     flex-wrap: wrap;
     border-right: none;
     border-bottom: 1px solid var(--line);
+  }
+
+  .admin-columns {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

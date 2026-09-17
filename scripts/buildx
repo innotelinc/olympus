@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# buildx — build one Olympus app image, through BuildKit when this host has it.
+#
+# This is the command every packager runs and the one to reach for by hand:
+#
+#   scripts/buildx --tag olympus-app-foo:latest .
+#   scripts/buildx --tag olympus-app-foo:latest --build-arg CONVEX_DEPLOY_KEY=... .
+#   scripts/buildx --check          # what this host can build with
+#
+# It exists because the image build used to be spelled out in three Python files
+# as `docker build --tag <tag> .`, and the host that matters — the build runner's —
+# is the one where the deprecated legacy builder announces itself on every build.
+# One wrapper means one answer to "which builder did this use", and the answer is
+# printed into the job log rather than inferred later.
+#
+# A `docker build` equivalent, not a replacement for one: every flag is passed
+# through unchanged, and `--check` is the only thing here that is not `docker`.
+#
+# Environment:
+#   BUILDX_NAME   use (creating if needed) this named buildx builder. Unset means
+#                 the daemon's own builder — the `docker` driver, which loads the
+#                 image into the daemon exactly where `docker run` looks for it.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./build-lib.sh
+. "$DIR/build-lib.sh"
+
+usage() {
+  cat <<'USAGE'
+usage: scripts/buildx [--check] [docker build args...] <context>
+
+  --check    report what this host can build with, and exit 1 when buildx is
+             missing (the legacy builder is a fallback, not a supported answer)
+
+Anything else is passed to the build. Examples:
+
+  scripts/buildx --tag olympus-app-foo:latest .
+  scripts/buildx --tag olympus-app-foo:latest --build-arg K=V --no-cache .
+USAGE
+}
+
+if [ "${1:-}" = "--check" ]; then
+  docker="$(command -v docker || true)"
+  version="$(build_lib_buildx_version || true)"
+  printf 'docker   %s\n' "${docker:-MISSING}"
+  if [ -n "$version" ]; then
+    printf 'buildx   %s\n' "$version"
+    exit 0
+  fi
+  printf 'buildx   MISSING\n'
+  printf 'install  %s\n' "$(build_lib_buildx_install_hint)"
+  exit 1
+fi
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+if [ "$#" -eq 0 ]; then
+  usage >&2
+  exit 2
+fi
+
+build_lib_docker_build "$@"

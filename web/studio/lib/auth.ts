@@ -47,6 +47,14 @@ export type AuthConfig = {
    * deployment cannot lock itself out.
    */
   allowedGroups: string[];
+  /**
+   * Groups allowed to see the admin panel (`OLYMPUS_ADMIN_GROUPS`, comma-
+   * separated, exact match). Empty means "every Studio user", which is the right
+   * answer for the single-operator deployment this app also supports — and the
+   * panel says so on the page rather than leaving an operator to assume it is
+   * restricted.
+   */
+  adminGroups: string[];
 };
 
 export type Session = {
@@ -166,6 +174,7 @@ export function readAuthConfig(): AuthConfig | null {
     scopes: process.env.OIDC_SCOPES?.trim() || "openid email profile",
     sessionSecret,
     allowedGroups: parseGroupList(process.env.OIDC_ALLOWED_GROUPS),
+    adminGroups: parseGroupList(process.env.OLYMPUS_ADMIN_GROUPS),
   };
 }
 
@@ -225,6 +234,50 @@ export function parseGroupList(value: string | undefined): string[] {
 export function isAuthorized(session: Session, config: AuthConfig): boolean {
   if (config.allowedGroups.length === 0) return true;
   return (session.groups ?? []).some((group) => config.allowedGroups.includes(group));
+}
+
+/**
+ * Whether this session may see the admin panel.
+ *
+ * Deliberately *not* folded into `isAuthorized`: the panel reads deployment state
+ * rather than building anything, so an operator may reasonably let everyone build
+ * and only some administer. Fails closed the same way — when the list is non-empty
+ * and nothing in the session matches (including a token with no `groups` claim),
+ * the answer is no.
+ *
+ * With OIDC unconfigured there is no identity to consult and no group to check:
+ * the deployment is a single-operator tool already, so the panel is open, and it
+ * reports itself as open.
+ */
+export function isAdmin(session: Session | null, config: AuthConfig | null): boolean {
+  if (!config) return true;
+  if (!session) return false;
+  if (config.adminGroups.length === 0) return true;
+  return (session.groups ?? []).some((group) => config.adminGroups.includes(group));
+}
+
+/**
+ * The panel's gate: identity, then the admin group, then the access token.
+ *
+ * `authorizeRequest` first, so an unauthenticated caller is told to sign in rather
+ * than forbidden — the two failures need different fixes. Only then the group
+ * check, which is a 403 because signing in again will not help.
+ */
+export function authorizeAdmin(request: Request): GateResult {
+  const gate = authorizeRequest(request);
+  if (!gate.ok) return gate;
+
+  if (!isAdmin(gate.session, readAuthConfig())) {
+    return {
+      ok: false,
+      response: deny(
+        "Your account is not in a group allowed to administer this deployment.",
+        403,
+      ),
+    };
+  }
+
+  return gate;
 }
 
 export function discoveryUrl(issuer: string): string {

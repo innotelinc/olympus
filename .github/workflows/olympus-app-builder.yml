@@ -104,18 +104,24 @@ jobs:
       #
       # `scripts/manufacture.sh` is the SAME command `make app` runs, so the two
       # cannot drift into different behaviours.
-      # Reported, not enforced. This gateway has just been started by setup.sh and
-      # carries no provider credentials, so whether the model can call a tool at all
-      # is exactly the thing worth knowing *before* the build step spends minutes
-      # discovering it by producing nothing. It stays non-fatal because this job is
-      # the pipeline's demonstration path: a checkout with no gateway credentials is
-      # its normal state, and failing the job would say "the pipeline is broken"
-      # about a deployment that simply has no provider with quota.
+      # Reported, not enforced. Whether the model can call a tool at all is exactly
+      # the thing worth knowing *before* the build step spends minutes discovering it
+      # by producing nothing, and on a runner with no route to the platform gateway
+      # that is exactly what it reports — non-fatally, because a checkout that cannot
+      # reach a gateway is this job's normal state and failing would say "the
+      # pipeline is broken" about a deployment that simply is not wired to it.
+      #
+      # The URL is the gateway's DOOR (`:20129`, the SSO proxy that exempts /v1), not
+      # its own `:20128`, which is published on the gateway host's loopback and bridge
+      # alone. A self-hosted runner on that host writes
+      # `http://host.docker.internal:20129/v1`; set the `OMNIROUTE_BASE_URL` repo
+      # variable to point anywhere else. There is no bundled gateway to fall back on:
+      # the `omniroute` service was removed when the shared one took over.
       - name: 🔎 Check the build model can call a tool
         if: steps.spec.outputs.found == 'true'
         continue-on-error: true
         env:
-          OMNIROUTE_BASE_URL: http://127.0.0.1:20128/v1
+          OMNIROUTE_BASE_URL: ${{ vars.OMNIROUTE_BASE_URL || 'http://192.168.1.46:20129/v1' }}
           OMNIROUTE_MODEL: auto/coding
           OMNIROUTE_MODEL_FALLBACK: oc/big-pickle
           OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
@@ -134,13 +140,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SPECS: ${{ steps.spec.outputs.specs }}
-          OMNIROUTE_BASE_URL: http://127.0.0.1:20128/v1
-          # This gateway is started fresh by setup.sh, so it has NO provider
-          # connections and `auto/coding` has no credentialed member to route to — the
-          # free pool member is all that can answer here. It answers in prose rather
-          # than calling tools, so treat this job's output as unverified until the
-          # gateway has a provider with quota; the host runner pins a concrete model in
-          # `.env` instead (see .env.example).
+          OMNIROUTE_BASE_URL: ${{ vars.OMNIROUTE_BASE_URL || 'http://192.168.1.46:20129/v1' }}
+          # `auto/coding` is OmniRoute's own router: it survives a provider being
+          # unlinked, and what it resolves to is the gateway's business, not this
+          # job's. Treat this job's output as unverified until a gateway is reachable
+          # and a model behind it has quota — the host-side runner pins a concrete
+          # model in `.env` instead (see .env.example, docs/build-model.md).
           OMNIROUTE_MODEL: auto/coding
           OMNIROUTE_MODEL_FALLBACK: oc/big-pickle
           OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}

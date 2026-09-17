@@ -30,9 +30,13 @@ On a throwaway instance, before and after:
 
 So this does not open a second door; it removes the gateway's own. **The
 reachability of port 20128 becomes the entire control.** That is acceptable here
-and only here, because the binding is `127.0.0.1` — and this script checks that
-before it changes anything, and refuses if it cannot. If that binding widens, the
-premise of this file is gone and nothing else in the stack is holding the door.
+and only here, because the binding is this host alone — `127.0.0.1` plus the host's
+own docker0 gateway (`172.17.0.1`), which only containers on this host can dial and
+which the compose file publishes on purpose so `host.docker.internal:20128` reaches
+the gateway from n8n, studio and the distro control plane. This script reads that
+binding from Docker before it changes anything and refuses if it has widened to a
+LAN address. If it ever does, the premise of this file is gone and nothing else in
+the stack is holding the door.
 
 THE STORED PASSWORD IS KEPT, ON PURPOSE
 ---------------------------------------
@@ -61,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -72,9 +77,17 @@ from pathlib import Path
 DEFAULT_URL = "http://127.0.0.1:20128"
 # The platform's single gateway runs in Group 2 now (`2-voice/`), so this script
 # belongs on that host — it flips settings INSIDE the gateway container, which
-# means a Docker that can see it. Override with --container when the deployment
-# names it differently.
-GATEWAY_CONTAINER = "g2-omniroute"
+# means a Docker that can see it.
+#
+# The name is resolved rather than assumed, because reading the wrong container is
+# how this guard fails open: an unknown name is "unknowable", which the caller below
+# treats as a WARNING, not a refusal. `2-voice/capstone/docker-compose.yml` pins
+# `container_name: omniroute`; the pre-migration Group-2 deployment named it
+# `g2-omniroute`, and both are tried. `--container` or `GATEWAY_CONTAINER=` wins over
+# both. Measured on this deployment: the hardcoded `g2-omniroute` matched nothing, so
+# the binding check never actually ran here.
+GATEWAY_CONTAINER = os.environ.get("GATEWAY_CONTAINER", "omniroute")
+GATEWAY_CONTAINER_ALIASES = ("omniroute", "g2-omniroute")
 
 # The settings this script owns. A PATCH here is a merge, so sending a key we have
 # no opinion about is how a routing setting gets reset by a script that was only
@@ -102,30 +115,69 @@ def load_env(path: Path) -> dict[str, str]:
     return parsed
 
 
-def loopback_binding(container: str = GATEWAY_CONTAINER) -> tuple[bool | None, str]:
-    """Is the gateway published on loopback only? (None, reason) when unknowable.
+def local_container_hosts() -> set[str]:
+    """Addresses only this host's own containers can reach — the docker0 gateway.
 
-    This is the check the whole change rests on, so it is a refusal rather than a
-    warning wherever it can be answered. Answered from Docker's own record of the
-    publish, not from the URL this script was handed — `--url` is where to talk to
-    it, which is a different question from where it listens.
+    `compose.gateway-sso.yml` says the gateway is "loopback only", and the compose
+    file that actually runs it publishes two bindings, not one: `127.0.0.1` for a
+    host-mode process and `172.17.0.1` for a container, because `host.docker.internal`
+    resolves to *this* host's docker0 — that is how n8n, studio and the distro control
+    plane reach the gateway (`5-dev/distro`'s `.env` pins `host.docker.internal:20128`).
+    Nothing off-host routes to 172.17.0.0/16, so a binding there is not "reachable
+    beyond this host": it is the same host seen from inside a container.
+
+    Before this existed, the check below refused on every deployment the estate
+    actually runs — which is the worst way for a guard to fail, since the operator's
+    next move is to turn the check off instead of the port.
     """
     if not shutil.which("docker"):
-        return None, "docker is not available here, so the binding could not be read"
-
+        return set()
     try:
         result = subprocess.run(
-            ["docker", "inspect", container, "--format", "{{json .NetworkSettings.Ports}}"],
+            ["docker", "network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}"],
             capture_output=True,
             text=True,
             timeout=15,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError) as error:
-        return None, f"docker inspect failed: {error}"
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {address for address in (result.stdout or "").split() if address}
 
-    if result.returncode != 0:
-        return None, f"{container} is not running, so the binding could not be read"
+
+def loopback_binding(container: str = GATEWAY_CONTAINER) -> tuple[bool | None, str]:
+    """Is the gateway published on loopback (and the local bridge) only?
+
+    (None, reason) when unknowable. This is the check the whole change rests on, so
+    it is a refusal rather than a warning wherever it can be answered. Answered from
+    Docker's own record of the publish, not from the URL this script was handed —
+    `--url` is where to talk to it, which is a different question from where it
+    listens. "Local" is `local_container_hosts()` below: loopback plus the host's own
+    docker0 gateway, which only containers on this host can dial.
+    """
+    if not shutil.which("docker"):
+        return None, "docker is not available here, so the binding could not be read"
+
+    result = None
+    tried: list[str] = []
+    for candidate in dict.fromkeys((container, *GATEWAY_CONTAINER_ALIASES)):
+        tried.append(candidate)
+        try:
+            attempt = subprocess.run(
+                ["docker", "inspect", candidate, "--format", "{{json .NetworkSettings.Ports}}"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            return None, f"docker inspect failed: {error}"
+        if attempt.returncode == 0:
+            result = attempt
+            break
+
+    if result is None:
+        return None, f"none of {', '.join(tried)} is running, so the binding could not be read"
 
     try:
         ports = json.loads(result.stdout or "{}")
@@ -144,9 +196,11 @@ def loopback_binding(container: str = GATEWAY_CONTAINER) -> tuple[bool | None, s
 
     # An empty HostIp means every interface — the case this exists to catch.
     hosts = set(published)
-    if hosts <= {"127.0.0.1", "::1"}:
-        return True, f"published on {', '.join(sorted(hosts))}"
-    return False, f"published on {', '.join(sorted(h or '0.0.0.0 (all interfaces)' for h in hosts))}"
+    local = {"127.0.0.1", "::1"} | local_container_hosts()
+    beyond = hosts - local
+    if not beyond:
+        return True, f"published on {', '.join(sorted(hosts))} (loopback + this host's bridge)"
+    return False, f"published on {', '.join(sorted(h or '0.0.0.0 (all interfaces)' for h in beyond))}"
 
 
 def vault_secret(env: dict[str, str], field: str = "INITIAL_PASSWORD") -> str:
@@ -252,6 +306,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="report what would change; write nothing")
     parser.add_argument("--verify", action="store_true", help="change nothing; exit non-zero unless already correct")
     parser.add_argument("--password", default="", help="management password (default: resolved from Vault)")
+    parser.add_argument("--container", default=GATEWAY_CONTAINER,
+                        help=f"container holding the gateway (default {GATEWAY_CONTAINER})")
     parser.add_argument("--env-file", default="")
     args = parser.parse_args(argv)
 
@@ -268,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    bound, binding_note = loopback_binding()
+    bound, binding_note = loopback_binding(args.container)
     if bound is False:
         print(
             f"refusing: {GATEWAY_CONTAINER} is {binding_note}. Turning the gateway's own "

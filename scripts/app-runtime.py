@@ -143,6 +143,28 @@ def docker(*args: str, check: bool = False, capture: bool = True) -> subprocess.
     )
 
 
+def ensure_data_dir(runtime: "Runtime", slug: str) -> Path:
+    """Create this app's data directory, or say which account has to be able to.
+
+    The root lives outside the checkout and is handed to the build account by
+    `scripts/install-build-runner.sh` rather than created here: a run that discovers
+    it is unwritable at this point has already manufactured and packaged, and the
+    uncaught PermissionError that used to come out of here named neither the path's
+    owner nor the script that sets it — it read as a crash in this file.
+    """
+    target = runtime.data_dir(slug)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        fail(
+            f"cannot create {target} ({error}). The app data root {runtime.data} must "
+            "exist and be writable by the account builds run as — "
+            "scripts/install-build-runner.sh hands it to the build user",
+            2,
+        )
+    return target
+
+
 def port_is_free(port: int) -> bool:
     """Whether the host can bind it. A port a *previous* container holds is not free."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
@@ -483,7 +505,13 @@ def up(runtime: Runtime, args: argparse.Namespace) -> int:
                 if subprocess.call(command, cwd=str(repo_root())) != 0:  # noqa: S603
                     fail(f"{slug} did not package, so its image cannot be built", 1)
             else:
-                command = ["docker", "build", "--tag", image, "."]
+                # Through `scripts/buildx`, the same command the packagers build with:
+                # it is where BuildKit-vs-legacy is decided, and a fallback that
+                # spelled out `docker build` here would be a second answer to it.
+                buildx = repo_root() / "scripts" / "buildx"
+                if not buildx.is_file():
+                    fail(f"{buildx} is missing, so there is no command here that builds an image", 2)
+                command = [str(buildx), "--tag", image, "."]
                 note(f"$ {' '.join(command)}")
                 if subprocess.call(command, cwd=str(app_dir)) != 0:  # noqa: S603
                     fail(f"the runtime image for {slug} did not build", 1)
@@ -510,7 +538,12 @@ def up(runtime: Runtime, args: argparse.Namespace) -> int:
     # vhost would drop a name that was working before this call.
     vhost_existed = vhost_path.exists()
     preview_existed = preview_vhost_path.exists() if preview_vhost_path is not None else False
-    runtime.data_dir(slug).mkdir(parents=True, exist_ok=True)
+    # The data root lives outside the checkout and is handed to the build account by
+    # `scripts/install-build-runner.sh`, not created here — a run that discovers it
+    # is unwritable at this point has already manufactured and packaged. Reported as
+    # the path and the account rather than as an uncaught PermissionError, which
+    # reads as a crash in this script and names neither.
+    ensure_data_dir(runtime, slug)
     write_vhost(runtime, slug, port)
     if preview_vhost_path is not None:
         write_vhost(

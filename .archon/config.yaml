@@ -5,14 +5,24 @@ platforms:
     provider: "openrouter"
     model: "nousresearch/hermes-3-llama-3-70b:free"
 
+# `apiBaseUrl` used to be `http://localhost:20128/v1` — the gateway's own port,
+# which was right only while a gateway ran on the same box as the assistant. It
+# does not: the platform runs ONE OmniRoute, in Group 2 (`2-voice/`), and this
+# stack runs none. `localhost` here is the assistant itself. The address below is
+# that gateway, reached through the SSO proxy in front of it (:20129, which
+# exempts /v1 for API clients); see the OmniRoute block in .env.example.
 assistants:
   codex:
     codexBinaryPath: "codex"
-    apiBaseUrl: "http://localhost:20128/v1"
+    apiBaseUrl: "http://192.168.1.46:20129/v1"
     defaultModel: "auto/coding"
   claude:
-    claudeBinaryPath: "./core-modules/archon/bin/archon"
-    apiBaseUrl: "http://localhost:20128/v1"
+    # This is the Claude Code executable, not the Archon workflow launcher. Pointing
+    # it at Archon made the provider pass Claude-only flags such as --output-format
+    # back into Archon, so title generation retried and fell back before a build even
+    # started.
+    claudeBinaryPath: "claude"
+    apiBaseUrl: "http://192.168.1.46:20129/v1"
     defaultModel: "auto/coding"
 
 # NEW: Instructs the harness where to export freshly manufactured apps

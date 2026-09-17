@@ -31,7 +31,12 @@ OPTIONAL_FILES = ["compose.vault.yml", "UPSTREAMS.md", "docs/stack.md", "web/stu
 VENDOR_DIRS = ["omniroute", "archon", "ai-software-factory"]
 
 PLACEHOLDER_PREFIXES = ("change-me", "changeme", "your-", "xxx", "todo", "paste_")
-DEFAULT_BASE_URL = "http://127.0.0.1:20128/v1"
+# The platform gateway's door (`:20129`, the SSO proxy that exempts `/v1`), not
+# the gateway's own port: `20128` is published on the gateway host's loopback and
+# bridge alone, so a doctor run from anywhere else — this repo's own host
+# included — would probe an address that only ever answers for containers on the
+# gateway's machine. `OMNIROUTE_BASE_URL` overrides it; see .env.example.
+DEFAULT_BASE_URL = "http://192.168.1.46:20129/v1"
 
 
 def is_placeholder(value: str) -> bool:

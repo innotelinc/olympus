@@ -51,6 +51,7 @@ from cerulean_api import (  # noqa: E402 - the path insert above is what makes t
     TEMPLATE_PLACEHOLDERS,
     Api,
     certificate_covers,
+    connect_client,
     ensure_certificate,
     ensure_proxy_host,
     ensure_record,
@@ -61,7 +62,9 @@ from cerulean_api import (  # noqa: E402 - the path insert above is what makes t
     load_env_file,
     looks_like_host,
     parse_expiry,
+    read_cerulean_settings,
     record_value,
+    require_cerulean,
     select_certificate,
     select_record,
     setting,
@@ -85,6 +88,7 @@ __all__ = [
     "TEMPLATE_PLACEHOLDERS",
     "certificate_covers",
     "closed_paths_config",
+    "connect_client",
     "ensure_certificate",
     "ensure_proxy_host",
     "ensure_record",
@@ -94,8 +98,10 @@ __all__ = [
     "list_proxy_hosts",
     "load_env_file",
     "parse_expiry",
+    "read_cerulean_settings",
     "record_value",
     "refused_paths",
+    "require_cerulean",
     "select_certificate",
     "select_record",
     "setting",
@@ -167,28 +173,27 @@ def main() -> int:
     def read(name: str, fallback: str = "") -> str:
         return setting(env_path, name, fallback, skipped)
 
-    api_base = read("CERULEAN_DNS_API_URL")
-    password = read("CERULEAN_ADMIN_PASSWORD")
-    zone = args.zone or read("CERULEAN_ZONE")
+    cerulean = read_cerulean_settings(env_path, skipped, zone_override=args.zone)
+    api_base = cerulean["CERULEAN_DNS_API_URL"]
+    token = cerulean["CERULEAN_API_TOKEN"]
+    password = cerulean["CERULEAN_ADMIN_PASSWORD"]
+    zone = cerulean["CERULEAN_ZONE"]
     fqdn = (args.fqdn or read("GATEWAY_PUBLIC_HOST")).rstrip(".").lower()
     forward_host = args.forward_host or read("GATEWAY_SSO_EDGE_FORWARD_HOST")
     forward_port = args.forward_port or int(read("GATEWAY_SSO_PORT", "20129") or 20129)
 
-    missing = [
-        name
-        for name, value in (
-            ("CERULEAN_DNS_API_URL", api_base),
-            ("CERULEAN_ADMIN_PASSWORD", password),
-            ("CERULEAN_ZONE", zone),
-            ("GATEWAY_PUBLIC_HOST", fqdn),
-        )
-        if not value
-    ]
+    require_cerulean(
+        env_path,
+        {
+            "CERULEAN_DNS_API_URL": api_base,
+            "CERULEAN_ZONE": zone,
+            "CERULEAN_API_TOKEN": token,
+            "CERULEAN_ADMIN_PASSWORD": password,
+        },
+    )
+    missing = [name for name, value in (("GATEWAY_PUBLIC_HOST", fqdn),) if not value]
     if missing:
-        sys.exit(
-            "Not configured for this: " + ", ".join(missing) + f" — set them in {env_path}.\n"
-            "CERULEAN_ADMIN_PASSWORD is the local login for the Cerulean host, not the Authentik token."
-        )
+        sys.exit("Not configured for this: " + ", ".join(missing) + f" — set them in {env_path}.")
     if forward_host and not looks_like_host(forward_host):
         sys.exit(f"--forward-host does not look like an address: {forward_host}")
     if not forward_host:
@@ -201,8 +206,10 @@ def main() -> int:
     record_name = args.record_name or zone_relative(fqdn, zone)
     record_value_target = args.record_value or zone
 
-    api = Api(api_base, args.insecure)
-    api.login(password)
+    api = connect_client(api_base, args.insecure, token=token, password=password)
+    # The bridge's record routes are zone-addressed (`Api.path_for`), so the client
+    # is told which zone this run is about.
+    api.zone = zone
 
     print(f"Cerulean: {api.base}")
     print(f"  zone:     {zone}")

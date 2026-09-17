@@ -58,7 +58,7 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 | App runtime (`scripts/app-runtime.py`) | Python + docker | One container, one loopback port and one SQLite file per app, under `OLYMPUS_APPS_ROOT`. Also writes the app's nginx vhost and reloads `olympus-sites`, which is how a name reaches a container without the edge learning a port |
 | Sites and apps edge (`docker-compose.yml`, profile `sites`) | nginx (`olympus-sites`), host-networked on `SITE_PORT` | Serves the staged tree `scripts/package-website.py --publish` writes under `OLYMPUS_SITES_ROOT`, and reverse-proxies each running app to its container by hostname. `make site-publish`/`make app-publish` then put the name on through Cerulean + NPM. No auth by design — a published site or app is public, and the zip download is the delivery path for anything that is not. See [site-publishing.md](site-publishing.md) |
 | Gateway dashboard SSO (`compose.gateway-sso.yml`) | oauth2-proxy + Authentik (`olympus-gateway-sso`) | The gateway dashboard manages provider credentials, so it is fronted by an identity-aware proxy restricted to one Authentik group. OmniRoute's own OIDC cannot be used: its callback strips the trailing slash Authentik always puts in `iss` and then demands an exact match — see [gateway-sso.md](gateway-sso.md) |
-| Gateway auth mode (`scripts/gateway-auth-mode.py`) | Python, no dependencies | Turns the gateway's *own* login off so Authentik is the only gate: one login for one surface, and the half that cannot authenticate anyone is gone. `requireLogin=false` makes reachability of `127.0.0.1:20128` the entire control, so the script checks the binding first and refuses otherwise. `make gateway-auth-mode`, `--dry-run`, `--verify` |
+| Gateway auth mode (`scripts/gateway-auth-mode.py`) | Python, no dependencies | Turns the gateway's *own* login off so Authentik is the only gate: one login for one surface, and the half that cannot authenticate anyone is gone. `requireLogin=false` makes reachability of `20128` the entire control, so the script checks the binding first and refuses otherwise — "local" being loopback plus the host's own docker0 gateway, which only containers on that host can dial, and never a LAN address. `make gateway-auth-mode`, `--dry-run`, `--verify`, `--container` |
 | Gateway sessions (`compose.gateway-sso.yml`) | redis 7 (`olympus-gateway-sso-sessions`), loopback `127.0.0.1:16379` | Server-side sessions for the proxy above. A cookie session carries every group the identity claims; thirty groups overflow the 4KB limit, the split `Set-Cookie` headers exceed the edge's proxy buffer, and the login callback gets a 502 from the edge. No volume: losing it costs a re-login, nothing else |
 | Gateway name check (`scripts/gateway-edge-check.py`) | Python, no dependencies | Walks `gateway.olympus.innotel.us` link by link — DNS at two resolvers, TLS, the edge, the SSO proxy, the session store — and names the first broken one, because a dead edge, a lapsed certificate and a stopped proxy all reach a person as "it's not resolving". The session link is the one a `curl` cannot reach, since the failure only exists after a login. `make gateway-edge-check`; daily under `olympus-gateway-edge-check.timer` |
 | `scripts/cerulean-edge.py` | Python + the Cerulean API | Publishes a public name the way Cerulean intends: DNS record, certificate, and the NPM proxy host. The record is created in Technitium, the certificate by Cerulean's ACME job, and the host through Cerulean's NPM service — so the audit trail is Cerulean's, not a side door into Technitium |
@@ -109,12 +109,14 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 >   connections, which is the property the backup exists to have.
 > * **Whoever talks to the gateway inherits the topology problem.** `OMNIROUTE_BASE_URL`
 >   is one value in one `.env`, and host-side scripts read that same value, so a
->   container cannot be handed a different one. Across the mesh it is
->   `http://10.10.2.1:20128/v1` (OmniRoute serves API and dashboard on that one
->   port; the `:20129` door is this stack's own Authentik SSO proxy); on a host
->   where the gateway is published on
->   *that* host's loopback, it is `http://127.0.0.1:20128/v1` and every service
->   that talks to it runs with `compose.host-gateway.yml` — Studio included
+>   container cannot be handed a different one. From any other host it is
+>   `http://192.168.1.46:20129/v1` — the gateway host's LAN address, and the
+>   Authentik SSO proxy in front of the gateway, which exempts `/v1` for API
+>   clients. The gateway's own `:20128` is published on that host's loopback and
+>   bridge alone, so it is not a target at all. On the gateway's own host a
+>   container uses `http://host.docker.internal:20129/v1`, and a host-mode caller
+>   `http://127.0.0.1:20129/v1` — every service that talks to it then runs with
+>   `compose.host-gateway.yml` — Studio included
 >   (`make docker-studio-up`). A Studio
 >   rebuilt without that override resolves `127.0.0.1:20128` to *itself*, answers
 >   `ECONNREFUSED` to its own requests, and stays `healthy` the whole time, because

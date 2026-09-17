@@ -81,6 +81,26 @@ function statusFile(job: string, fields: Record<string, unknown>): void {
   );
 }
 
+/**
+ * A request the runner has not claimed yet — the state a job is in between the
+ * click and the first status file, which is the window the panel polls in.
+ */
+function requestFile(job: string, fields: Record<string, unknown> = {}): void {
+  writeFileSync(
+    join(QUEUE, `${job}.request.json`),
+    JSON.stringify({
+      v: 1,
+      job,
+      action: "build",
+      slug: "markdown-notes",
+      title: "Markdown Notes",
+      requested_by: "studio",
+      requested_at: new Date().toISOString(),
+      ...fields,
+    }),
+  );
+}
+
 function post(id: string, body?: unknown, headers: Record<string, string> = TOKEN) {
   return POST(
     new Request(`http://studio.test/api/projects/${id}/build`, {
@@ -355,6 +375,56 @@ describe("GET /api/projects/[id]/build", () => {
       const response = await get(project.id, `?job=${job}`);
       expect(response.status).toBe(404);
     }
+  });
+
+  it("answers a queued job the runner has not claimed yet", async () => {
+    // The panel polls the job it just queued; the runner writes the first status
+    // when it claims the request, so this window is reachable on every build — and
+    // answering it with "No such build job" is a lie about work that was accepted.
+    const project = seed();
+    requestFile("0123456789abcdef");
+
+    const response = await get(project.id, "?job=0123456789abcdef");
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as { build: BuildStatus };
+    expect(payload.build.state).toBe("queued");
+    expect(payload.build.slug).toBe("markdown-notes");
+    expect(payload.build.message).toMatch(/waiting for the build runner/i);
+  });
+
+  it("says a claimed job is starting, not still waiting", async () => {
+    // The runner renames the request and writes its first status in two steps, so a
+    // poll can land between them. It has been picked up, and saying otherwise sends
+    // the operator looking for a runner that is working.
+    const project = seed();
+    requestFile("0123456789abcdef");
+    writeFileSync(join(QUEUE, "0123456789abcdef.running.json"), "{}");
+
+    const payload = (await (await get(project.id, "?job=0123456789abcdef")).json()) as {
+      build: BuildStatus;
+    };
+
+    expect(payload.build.state).toBe("queued");
+    expect(payload.build.message).toMatch(/picked this up/i);
+  });
+
+  it("still 404s a job the queue has no marker for", async () => {
+    const project = seed();
+    requestFile("1111111111111111");
+
+    const response = await get(project.id, "?job=2222222222222222");
+
+    expect(response.status).toBe(404);
+  });
+
+  it("reports a queued job as the app's latest, so a reload keeps the thread", async () => {
+    const project = seed();
+    requestFile("0123456789abcdef");
+
+    const payload = (await (await get(project.id)).json()) as { build: BuildStatus | null };
+
+    expect(payload.build?.state).toBe("queued");
   });
 
   it("returns the app's latest build when no job is named", async () => {

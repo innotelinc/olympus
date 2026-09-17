@@ -68,6 +68,19 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
       build/preview status and history, the deployment panel and the saved-app
       library on one surface.
 
+## Reliability patch — 0.2.1
+
+- [x] **Runner delivery crash fixed** — preview/publish error paths now return the
+      complete delivery tuple, so an edge or packaging failure cannot crash the
+      queue daemon and strand every later job behind a `.running.json` marker.
+- [x] **Preview credentials fixed** — delivery commands receive the scoped Cerulean
+      service key and `SITE_*` runtime settings without exposing them to the coding
+      agent. Preview can now register its `-preview` edge name after the container
+      starts.
+- [x] **Empty-agent failures remain explicit** — the greenfield DAG refuses an empty
+      artifact rather than reporting a false success; model capacity/tool-call
+      failures are recorded in the build log for retry or model-chain repair.
+
 ## Open — 0.2
 
 - [ ] **One gateway, one model chain** — Studio and the factory point at the shared
@@ -82,7 +95,9 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
       queued accepted issues → watched implement runs, still at a manual gate.
 - [ ] **Publish-time observability.** A publish that is not checked is a publish
       nobody knows about — fold `site-check` / `gateway-edge-check` evidence into
-      the panel and the job record.
+      the panel and the job record. Preview edge registration should use the same
+      evidence and expose a retry action when the app is running but Cerulean is
+      unavailable.
 - [ ] **Operator actions in the panel** — deliberately read-only today; anything
       that writes is a separate decision with its own gate.
 

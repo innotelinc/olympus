@@ -201,6 +201,18 @@ describe("planning", () => {
     expect(body.stream).toBe(false);
   });
 
+  it("budgets for the model's reasoning as well as for the plan", async () => {
+    // The cap is what the model's hidden reasoning is billed against on a
+    // reasoning model, so a plan-sized budget is not a plan-sized request. This
+    // deployment measured 1,255–1,919 reasoning tokens for a three-file plan.
+    const mock = stubGateway(completionResponse(GOOD_PLAN));
+    await post({ prompt: "a tracker" });
+
+    const completion = mock.mock.calls.find(([url]) => String(url).includes("/chat/completions"));
+    const body = JSON.parse(String(completion?.[1]?.body)) as { max_tokens: number };
+    expect(body.max_tokens).toBeGreaterThanOrEqual(6_000);
+  });
+
   it("refuses a reply with no usable start command", async () => {
     stubGateway(completionResponse('{"name":"x","run":{"start":""}}'));
 
@@ -214,6 +226,36 @@ describe("planning", () => {
 
     const response = await post({ prompt: "a tracker" });
     expect(response.status).toBe(422);
+    expect((await response.json()).error).toMatch(/rephrasing/);
+  });
+
+  it("calls an answer the gateway cut off by its length, not a malformed request", async () => {
+    // Exactly what a reasoning model does to this turn: the JSON is unterminated
+    // at the cap, so it fails to parse — but the request was fine and rephrasing
+    // it will not help, which is what the old message told the person to do.
+    const mock = stubGateway(() =>
+      Response.json({
+        choices: [
+          {
+            finish_reason: "length",
+            message: { content: '{"name":"Tip Calculator","runtime":{"language":"no' },
+          },
+        ],
+      }),
+    );
+
+    const response = await post({ prompt: "a tip calculator" });
+    expect(response.status).toBe(422);
+
+    const sent = JSON.parse(
+      String(mock.mock.calls.find(([url]) => String(url).includes("/chat/completions"))?.[1]?.body),
+    ) as { max_tokens: number };
+
+    const error = (await response.json()).error as string;
+    expect(error).toMatch(/cut off/);
+    expect(error).toContain(sent.max_tokens.toLocaleString("en-US"));
+    expect(error).toMatch(/nothing was written/i);
+    expect(error).not.toMatch(/rephrasing/);
   });
 
   it("returns 502 when the gateway errors on the completion", async () => {
