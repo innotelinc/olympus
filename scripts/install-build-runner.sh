@@ -127,7 +127,12 @@ install -d -o "$BUILD_USER" -g "$BUILD_GROUP" -m 0750 "$BUILD_HOME"
 # is unavailable to it.
 userns_ok=false
 if command -v runuser >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1; then
-    if runuser -u "$BUILD_USER" -- unshare -U true 2>/dev/null; then
+    # Codex's bubblewrap profile creates both a user and a network namespace.
+    # Testing only `-U` is insufficient: this host permits an unprivileged user
+    # namespace but denies the network namespace, which made the installer choose
+    # olympus-builder while every real agent failed with `bwrap: loopback:
+    # Failed RTM_NEWADDR: Operation not permitted`. Probe the complete shape.
+    if runuser -u "$BUILD_USER" -- unshare -Urn true 2>/dev/null; then
         userns_ok=true
     fi
 fi
