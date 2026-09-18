@@ -57,18 +57,29 @@ echo "docker-cleanup: $(hostname) $(date -u +%FT%TZ)"
 # is done here.)
 if [ "$(docker ps -aq --filter status=exited --filter status=dead --filter status=created | wc -l)" -gt 0 ]; then
   cutoff=$(( $(date +%s) - RETAIN_EXITED_DAYS * 86400 ))
-  old=""
+  # The ids are a list, not a string. Saying so with an array is what lets the
+  # command that consumes them be quoted plainly — `old="$old $id"` followed by
+  # `docker rm $old` worked only by word splitting, and read as a bug.
+  old=()
   for id in $(docker ps -aq --filter status=exited --filter status=dead --filter status=created); do
     finished=$(docker inspect -f '{{.State.FinishedAt}}' "$id" 2>/dev/null || echo "")
-    [ -n "$finished" ] && [ "$finished" != "0001-01-01T00:00:00Z" ] || continue
+    # A container that never ran reports the zero time: there is no age to
+    # judge, so it is left where it is.
+    if [ -z "$finished" ] || [ "$finished" = "0001-01-01T00:00:00Z" ]; then
+      continue
+    fi
     ts=$(date -d "$finished" +%s 2>/dev/null || echo 0)
     if [ "$ts" -gt 0 ] && [ "$ts" -lt "$cutoff" ]; then
-      old="$old $id"
+      old+=("$id")
     fi
   done
-  if [ -n "$old" ]; then
-    echo "  removing containers exited >${RETAIN_EXITED_DAYS}d:$(echo "$old" | tr ' ' '\n' | while read -r id; do [ -n "$id" ] && echo " $(docker inspect -f '{{.Name}}' "$id" | sed s,/,,)"; done)"
-    run docker rm $old >/dev/null
+  if [ ${#old[@]} -gt 0 ]; then
+    names=""
+    for id in "${old[@]}"; do
+      names="$names $(docker inspect -f '{{.Name}}' "$id" | sed 's,^/,,') "
+    done
+    echo "  removing containers exited >${RETAIN_EXITED_DAYS}d:${names% }"
+    run docker rm "${old[@]}" >/dev/null
   fi
 fi
 
