@@ -150,11 +150,30 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
       Nothing about this is a policy default: `make dispatch-status` says
       `NOT_ARMED` (level 0) until `make factory-arm` clears the gate, and `--check`
       fails if a trigger marker ever appears without evidence behind it.
-- [ ] **Publish-time observability.** A publish that is not checked is a publish
+- [x] **Publish-time observability.** A publish that is not checked is a publish
       nobody knows about — fold `site-check` / `gateway-edge-check` evidence into
       the panel and the job record. Preview edge registration should use the same
       evidence and expose a retry action when the app is running but Cerulean is
       unavailable.
+      **2026-09-18 — both checks are in the record, and the retry names the one
+      command.** `scripts/delivery-evidence.py` fetches the name, asks the local
+      state and classifies the answer; the runner writes the verdict onto the job,
+      the panel renders it, and `make site-evidence SLUG=…` runs it by hand. The
+      second half — `gateway-edge-check` — was still a script nobody's record
+      called, so a name that did not serve said only *that*: evidence v2 now walks
+      the same chain the walker has always walked (DNS → TLS → edge, and the proxy
+      and session store with it for a gated name) and records **which link broke**,
+      because a name that does not resolve and a name whose app is stopped both
+      read as "it is not resolving" in a browser. That walker also learned to skip
+      the proxy/session/`/v1` links for a published site — asking a page's name
+      about a login it does not have reported a healthy site as broken.
+
+      The retry is the classifier's own `retry` field, shown verbatim in the panel:
+      `edge-unreachable` (the app is running, Cerulean did not answer) and
+      `name-missing` both carry `make edge-publish SLUG=…` / `make edge-preview
+      SLUG=…`, and their detail says explicitly that nothing was rebuilt — the
+      app-up-but-unregistered case is one registration away, and the
+      app-up-and-registered case is *not* a retry at all.
 - [ ] **Operator actions in the panel** — deliberately read-only today; anything
       that writes is a separate decision with its own gate.
 - [ ] **Build-plane quotas surfaced per project.** Distro resolves the identity
@@ -220,3 +239,8 @@ evidence before it is turned on. The factory runs at **L0** by default.
       `vault-renew-alert` run green and send to the Telegram channel again.
 - [x] **`.env` hygiene**: multi-word values now quoted (bash-sourced tooling
       was executing `email` as a command); `.env.bak*` gitignored.
+- [x] **Publish-time observability closed** (above): evidence v2 carries the chain
+      walk, the panel shows the broken link beside the verdict, and
+      `scripts/tests/test_delivery_evidence.py` (28 tests, the file this script
+      never had) pins every branch of the verdict table — including that a chain
+      that could not be walked is **absent**, never a clean one.

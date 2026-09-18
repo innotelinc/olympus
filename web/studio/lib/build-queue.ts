@@ -165,6 +165,26 @@ export type DeliveryEvidence = {
   app: { state: string; port: number | null; container: string | null };
   checkedAt: string | null;
   checks: number | null;
+  /**
+   * Where the name's chain stopped, when it did not serve (evidence v2): DNS → TLS
+   * → edge. Null means the walk could not run, which is *not* the same as a clean
+   * chain — the panel says "not walked" for one and "ok" for the other.
+   */
+  chain: DeliveryChain | null;
+};
+
+/**
+ * The chain walk `scripts/gateway-edge-check.py` records inside the evidence.
+ *
+ * `broken` is the point of it: a name that does not resolve and a name whose app is
+ * stopped both read as "it is not resolving" in a browser, and only one of them is
+ * anything about the app.
+ */
+export type DeliveryChain = {
+  ok: boolean;
+  verdict: string;
+  broken: string[];
+  links: Record<string, { ok: boolean; error: string }>;
 };
 
 export type RunnerState = {
@@ -560,7 +580,26 @@ function toDeliveryEvidence(value: unknown): DeliveryEvidence | null {
     },
     checkedAt: asString(raw.checked_at),
     checks: asNumber(raw.checks),
+    chain: toDeliveryChain(raw.chain),
   };
+}
+
+/** The chain inside the evidence, or null when it was not walked (or not recorded). */
+function toDeliveryChain(value: unknown): DeliveryChain | null {
+  if (typeof value !== "object" || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  const links: Record<string, { ok: boolean; error: string }> = {};
+  if (typeof raw.links === "object" && raw.links !== null) {
+    for (const [name, entry] of Object.entries(raw.links as Record<string, unknown>)) {
+      const link = typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : {};
+      links[name] = { ok: link.ok === true, error: asString(link.error) ?? "" };
+    }
+  }
+  const broken = Array.isArray(raw.broken) ? raw.broken.filter((n): n is string => typeof n === "string") : [];
+  // A record with no links at all is not a walk — most likely an older evidence
+  // file. Null keeps "not walked" distinguishable from "walked, all fine".
+  if (!Object.keys(links).length && !broken.length) return null;
+  return { ok: raw.ok === true, verdict: asString(raw.verdict) ?? "", broken, links };
 }
 
 /**

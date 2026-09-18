@@ -662,7 +662,8 @@ def diagnose(links: dict[str, dict], host: str) -> str:
     does not answer says nothing about this name, and everything about the host
     answering for the zone.
     """
-    dns, tls, edge, proxy = links["dns"], links["tls"], links["edge"], links["proxy"]
+    dns, tls, edge = links["dns"], links["tls"], links["edge"]
+    proxy = links.get("proxy")
     session = links.get("session")
 
     if not dns["ok"]:
@@ -697,7 +698,7 @@ def diagnose(links: dict[str, dict], host: str) -> str:
     if links.get("v1") is not None and not links["v1"].get("ok"):
         return f"{host} is reachable and gated, but `/v1` is not where it should be: {links['v1'].get('error')}"
 
-    if not proxy["ok"]:
+    if proxy is not None and not proxy["ok"]:
         return (
             f"{host} answers from the edge but the SSO proxy behind it does not: "
             f"{proxy['error']}. The name is fine; the container is not."
@@ -711,6 +712,10 @@ def diagnose(links: dict[str, dict], host: str) -> str:
             f"{host} is reachable and its proxy is up, but a login would not complete: "
             f"{session.get('error') or 'the session store did not answer'}"
         )
+
+    if proxy is None:
+        # The published-site shape: nothing behind the edge to log in through.
+        return f"{host} is reachable and serving as expected."
 
     return f"{host} is reachable and gated as expected."
 
@@ -760,6 +765,36 @@ def report(links: dict[str, dict], host: str) -> None:
             print(f"     warning:  {payload['warning']}")
 
 
+def walk(host: str, env: dict[str, str], port: int,
+         expect_sso: bool = True) -> tuple[dict[str, dict], str, int]:
+    """The whole chain, in order — `(links, verdict, exit code)`.
+
+    A function rather than only a command line because a second caller needs this
+    exact answer: `delivery-evidence.py` records it beside the fetch it already
+    makes, so a published name that does not answer says *which link* broke instead
+    of only that nothing served — and the two callers cannot drift into two
+    opinions about the same name.
+
+    `expect_sso=False` is the published-site case: a site has no proxy and no
+    session store, so asking about them would report a page's name as broken for
+    not having a login, and `/v1` is the gateway's own route.
+    """
+    links: dict[str, dict] = {
+        "dns": check_dns(host, env),
+        "tls": check_tls(host),
+        "edge": check_edge(host, expect_sso=expect_sso),
+    }
+    if expect_sso:
+        # The proxy and the session store belong to the gateway's name, and `/v1` is
+        # its own route. Asked for a published site they answer about a port that has
+        # nothing to do with it — and a missing link is reported as missing, never as a
+        # broken one (see `diagnose`).
+        links["proxy"] = check_proxy(port)
+        links["session"] = check_session(env)
+        links["v1"] = check_v1(host, port)
+    return links, diagnose(links, host), exit_code(links)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check the gateway's public name, link by link.")
     parser.add_argument("--host", default="", help=f"the name to check (default {DEFAULT_HOST})")
@@ -786,22 +821,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"gateway-edge-check: {host!r} is not a hostname to check", file=sys.stderr)
         return 2
 
-    links = {
-        "dns": check_dns(host, env),
-        "tls": check_tls(host),
-        "edge": check_edge(host, expect_sso=not args.no_sso),
-        "proxy": check_proxy(port),
-    }
-    # A published site has no proxy and no session store; asking about them there
-    # would report a page's name as broken for not having a login. `/v1` is asked
-    # about for the same reason — it is the gateway's route, and a site's name does
-    # not serve it either.
-    if not args.no_sso:
-        links["session"] = check_session(env)
-        links["v1"] = check_v1(host, port)
-
-    verdict = diagnose(links, host)
-    code = exit_code(links)
+    links, verdict, code = walk(host, env, port, expect_sso=not args.no_sso)
 
     if args.json:
         print(

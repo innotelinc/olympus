@@ -309,6 +309,14 @@ export default function AdminPanel({ viewer }: { viewer: string | null }) {
                                 ) : (
                                   <>
                                     {job.deliveryEvidence.detail}
+                                    {/* Which link of the *name* broke, when the check
+                                        walked it. Kept beside the verdict because
+                                        "the app is running, the name is missing" and
+                                        "DNS does not answer" are fixed by different
+                                        people. */}
+                                    {job.deliveryEvidence.chain?.broken.length ? (
+                                      <>{" — chain: "}<span className="mono">{job.deliveryEvidence.chain.broken.join(", ")}</span>{" failed"}</>
+                                    ) : null}
                                     {job.deliveryEvidence.retry ? (
                                       <>
                                         {" — no rebuild needed: "}

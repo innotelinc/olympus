@@ -59,7 +59,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
 DEFAULT_SUFFIX = "studio.olympus.innotel.us"
 PREVIEW_LABEL = "-preview"
-EVIDENCE_VERSION = 1
+# 2 adds the chain walk (see `chain_state`): the verdict already said the name did
+# not serve, and this says which link of the name broke.
+EVIDENCE_VERSION = 2
 
 
 def fail(message: str, code: int = 2) -> "NoReturn":  # type: ignore[name-defined]
@@ -250,6 +252,44 @@ def edge_state(env_path: Path, env: dict[str, str], fqdn: str, insecure: bool) -
     return "registered" if cerulean_api.find_proxy_host(hosts, fqdn) is not None else "missing"
 
 
+def chain_state(host: str, env: dict[str, str], port: int = 0) -> dict | None:
+    """Walk the name's chain — DNS → TLS → edge — and say which link broke.
+
+    `gateway-edge-check.py` asked this first for the *gateway's* name, where "it is
+    not resolving" was almost never what happened: four links wired in series each
+    fail with the same sentence in a browser. A published site's name is the same
+    shape of problem three links long, and recording only "did not serve" leaves the
+    reader to re-run the diagnosis by hand.
+
+    `expect_sso=False` because a site serves directly: asking about the SSO proxy,
+    the session store or `/v1` would report a page's name as broken for not having a
+    login. Returns None when the walker cannot run at all — absent evidence is
+    reported as absent, never as a passing chain.
+    """
+    try:
+        walker = load_script("gateway_edge_check", "gateway-edge-check.py")
+        links, verdict, code = walker.walk(host, env, port, expect_sso=False)
+    except (OSError, SystemExit, AttributeError, ValueError):
+        return None
+
+    broken = [name for name, payload in links.items() if not payload.get("ok")]
+    return {
+        "ok": code == 0,
+        "verdict": verdict,
+        "broken": broken,
+        # Per-link, but only what a reader acts on: the flag, and the error or note
+        # the link itself reported. The raw payloads (DNS answers, certificates) stay
+        # in the walker, where the operator runs it for the whole story.
+        "links": {
+            name: {
+                "ok": bool(payload.get("ok")),
+                "error": payload.get("error") or payload.get("warning") or "",
+            }
+            for name, payload in links.items()
+        },
+    }
+
+
 class Outcome(NamedTuple):
     """The verdict, and the one command that changes it."""
 
@@ -259,7 +299,8 @@ class Outcome(NamedTuple):
     retry: str | None
 
 
-def classify(served: bool, app: str, edge: str, slug: str, preview: bool) -> Outcome:
+def classify(served: bool, app: str, edge: str, slug: str, preview: bool,
+             chain: dict | None = None) -> Outcome:
     """The verdict from the two halves. Pure, so every branch can be asserted.
 
     Written as a table rather than as nested conditions because the interesting part
@@ -267,6 +308,17 @@ def classify(served: bool, app: str, edge: str, slug: str, preview: bool) -> Out
     missing is one command away, while an app that is up with its name registered is a
     fault between them that no retry of the delivery will fix.
     """
+    # When the name does not serve, the chain says *where* it stopped: a name whose DNS
+    # does not answer and a name whose app is stopped both read as "it is not
+    # resolving" in a browser, and only one of them is anything about the app.
+    chain_note = ""
+    if chain and chain.get("broken"):
+        first = chain["broken"][0]
+        error = (chain.get("links") or {}).get(first, {}).get("error") or ""
+        chain_note = f"; the name's chain stops at {first}"
+        if error:
+            chain_note += f" ({error})"
+
     if served:
         return Outcome(0, "served", "the name serves", None)
 
@@ -278,7 +330,7 @@ def classify(served: bool, app: str, edge: str, slug: str, preview: bool) -> Out
             1,
             "not-a-published-name",
             f"the name does not answer, and it is not under this deployment's publishing "
-            f"suffix, so there is no app here to look up (edge: {edge})",
+            f"suffix, so there is no app here to look up (edge: {edge}){chain_note}",
             None,
         )
 
@@ -290,15 +342,18 @@ def classify(served: bool, app: str, edge: str, slug: str, preview: bool) -> Out
                 3,
                 "name-missing",
                 "the app is running; its name is not registered at the edge, so nothing "
-                "routes to it",
+                "routes to it" + chain_note,
                 re_register,
             )
         if edge == "unreachable":
+            # The retry is the whole recovery, and it is safe to name it as one: the
+            # app is up, so nothing was rebuilt and nothing needs rebuilding — only
+            # the registration has to be written, and Cerulean has to answer for it.
             return Outcome(
                 3,
                 "edge-unreachable",
                 "the app is running, and Cerulean did not answer, so the name could not "
-                "be registered — nothing was rebuilt, and nothing needs to be",
+                "be registered — nothing was rebuilt, and nothing needs to be" + chain_note,
                 re_register,
             )
         if edge == "registered":
@@ -307,14 +362,14 @@ def classify(served: bool, app: str, edge: str, slug: str, preview: bool) -> Out
                 "registered-but-not-serving",
                 "the app is running and the name is registered, so the fault is between "
                 "them: the generated vhost on the sites edge, or the edge's route to "
-                "this host",
+                "this host" + chain_note,
                 None,
             )
         return Outcome(
             1,
             "not-serving",
             "the app is running but the name does not answer, and the edge could not be "
-            "read to say whether it is registered",
+            "read to say whether it is registered" + chain_note,
             None,
         )
 
@@ -323,7 +378,7 @@ def classify(served: bool, app: str, edge: str, slug: str, preview: bool) -> Out
             1,
             "app-stopped",
             "the name does not answer and the container is not running — this needs the "
-            "project run again, not just its name",
+            "project run again, not just its name" + chain_note,
             f"make app-publish SLUG={slug}" if not preview else None,
         )
 
@@ -332,14 +387,14 @@ def classify(served: bool, app: str, edge: str, slug: str, preview: bool) -> Out
             1,
             "app-unknown",
             "the name does not answer and Docker could not be asked whether the "
-            "container is up",
+            "container is up" + chain_note,
             None,
         )
 
     return Outcome(
         1,
         "app-absent",
-        "nothing has been delivered under this slug — no runtime record exists",
+        "nothing has been delivered under this slug — no runtime record exists" + chain_note,
         None,
     )
 
@@ -425,6 +480,11 @@ def evaluate(
 
     if root is None:
         root = apps_root(settings)
+    # The chain is walked only when the name did not serve. On a name that answers it
+    # would be three more requests to re-prove what the fetch just proved, and asking
+    # Cerulean or DNS for a passing site would make a good answer depend on services
+    # the answer does not need.
+    chain = None if served else chain_state(fqdn, settings)
     if served:
         # The edge state is not probed when the name already answers: "registered" is
         # what was just demonstrated, and asking Cerulean would make a passing check
@@ -441,7 +501,7 @@ def evaluate(
         app, record = "unknown", None
         edge = edge_state(env_path, settings, fqdn, insecure)
 
-    outcome = classify(served, app, edge, slug, preview)
+    outcome = classify(served, app, edge, slug, preview, chain)
     payload = {
         "v": EVIDENCE_VERSION,
         "checked_at": now_stamp(),
@@ -458,6 +518,9 @@ def evaluate(
             "container": (record or {}).get("container"),
         },
         "edge": edge,
+        # Where the name's chain stopped, when it did not serve (v2). `null` means the
+        # walk could not run — not that the chain is clean.
+        "chain": chain,
         # The check's own account, kept whole: the note explains *which gate* answered
         # for a name behind the identity provider, and the error is what went wrong
         # when nothing did.
@@ -529,6 +592,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {outcome.detail}", file=sys.stderr)
         if check.get("error"):
             print(f"  the check said: {check['error']}", file=sys.stderr)
+        chain = payload.get("chain")
+        if chain and chain.get("broken"):
+            for name in chain["broken"]:
+                error = (chain.get("links") or {}).get(name, {}).get("error") or ""
+                print(f"  chain {name}: FAIL{(' — ' + error) if error else ''}", file=sys.stderr)
+            print(f"  the whole chain: make gateway-edge-check HOST={fqdn}", file=sys.stderr)
         if outcome.retry:
             print(f"  fix: {outcome.retry}", file=sys.stderr)
     return outcome.code
