@@ -14,7 +14,7 @@ RUN IT ON THE GATEWAY'S HOST. The gateway is the platform's single OmniRoute in
 Group 2 (`2-voice/`, mesh `10.10.2.1`); this script is the tooling for the DASHBOARD
 and its state, so it belongs beside the volume rather than beside whichever stack
 is talking to the gateway. It asks Docker for the container's own mount, which
-means a Docker that can see the gateway container (`g2-omniroute` by default) and
+means a Docker that can see the gateway container (`omniroute` by default) and
 that host's VAULT_* — the volume is what is being backed up, not this checkout.
 
 `scripts/omniroute-restore-providers.py` already answers "how do I move
@@ -76,7 +76,13 @@ VAULT_ENTRY = "omniroute"
 # Run this script on that host; override with --container, or point --data-dir /
 # OMNIROUTE_DATA_DIR straight at the volume's mount when the container is named
 # something else.
-DEFAULT_CONTAINER = "g2-omniroute"
+# `omniroute` is the name the gateway's own repo gives the container
+# (`container_name:` in `2-voice/capstone/docker-compose.yml`), and the name it
+# runs as on the gateway's host. `g2-omniroute` — the group prefix the
+# hand-written group files used — names no container anywhere, and this default
+# was written as that; the group compose is generated from the member repos now,
+# so it carries the repo's own name too.
+DEFAULT_CONTAINER = "omniroute"
 DEFAULT_HOST_DATA_DIR = Path("/root/.omniroute")
 
 KEY_SERVER_ENV = "SERVER_ENV"
