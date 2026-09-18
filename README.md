@@ -254,6 +254,16 @@ registered it reports the wiring gap, keeps the reason as an artifact
 (`.factory-ci/skipped.txt`), and finishes green rather than turning red for it — and
 `make app` is the working path.
 
+**A pushed spec is still built — by the host runner.** `scripts/build-runner.py` sweeps
+`build-requests/*.md` on a slower interval of its own (`BUILD_SPEC_POLL_SECONDS`, default
+60; also once at start), fast-forwarding the checkout first (`--ff-only`, and only on a
+clean tree), and queues every spec whose *content* this host has not manufactured through
+the same `submit()` the CLI and Studio use. That way the host that can reach the gateway
+is the one that builds a push, and no second path can disagree about what a request may
+say. `BUILD_SPECS=0` turns the sweep off and `BUILD_SPECS_PULL=0` stops the pull. A push
+whose build failed is deliberately *not* retried on the next pass — that retry is an
+explicit act, in Studio or `make app SPEC=... REPLACE=1`.
+
 The bootstrap is idempotent and does, in order:
 
 1. Installs what is missing: the OmniRoute CLI, the Codex CLI, the Claude Code CLI, and the Archon CLI.

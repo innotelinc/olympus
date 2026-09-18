@@ -169,6 +169,16 @@ jobs:
           grep -qF 'vars.OLYMPUS_BUILD_RUNNER' .github/workflows/olympus-app-builder.yml \
             || { echo "::error::olympus-app-builder.yml no longer lets a routed runner be selected"; exit 1; }
 
+          # ...which makes the host runner's sweep the only thing that builds a push. If
+          # it stopped reading build-requests/, pushed specs would pile up unbuilt with
+          # nothing anywhere going red, so the push path itself is asserted here.
+          grep -qF 'SPECS_DIRNAME' scripts/build-runner.py \
+            || { echo "::error::build-runner.py no longer defines the sweep's directory"; exit 1; }
+          grep -qF 'BUILD_SPECS' scripts/build-runner.py \
+            || { echo "::error::build-runner.py no longer reads BUILD_SPECS — the push path is gone"; exit 1; }
+          grep -qF '"merge", "--ff-only"' scripts/build-runner.py \
+            || { echo "::error::the spec sweep no longer fast-forwards with --ff-only"; exit 1; }
+
       - name: Compose files render
         run: |
           set -euo pipefail

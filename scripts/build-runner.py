@@ -25,17 +25,37 @@ Usage:
     scripts/build-runner.py --submit build-requests/app.md [--replace]
     scripts/build-runner.py --check            # validate the environment, no build
 
+THE SPEC SWEEP, and why it is here rather than in CI. A spec that arrives by push
+used to be manufactured by `.github/workflows/olympus-app-builder.yml` on a
+GitHub-hosted runner, and that cannot work: the build reads its model from the
+platform gateway, whose API is LAN-only by design (NPM refuses `/v1` on every public
+name — docs/gateway-sso.md), so no hosted runner can reach it at any URL. The
+hosted job now reports exactly that and finishes without manufacturing anything.
+
+This process is already where the toolchain, the checkout and the gateway are, so it
+is also what turns a pushed spec into an app: on its own slower interval it
+fast-forwards the checkout (`--ff-only`, and only ever on a clean tree) and queues
+any `build-requests/*.md` whose *content* it has not manufactured, through the same
+`submit()` the CLI and Studio use, so all three cannot disagree about what a request
+may say. A push whose build failed is not retried by the sweep — an operator retries
+it, in Studio or with `make app` — because a retry loop over a spec that cannot be
+built is a way to spend the whole gateway on it.
+
 Env:
     BUILD_QUEUE_DIR       where requests/status live (default <repo>/.factory/build-queue)
     BUILD_POLL_SECONDS    idle scan interval (default 5)
     BUILD_TIMEOUT_SECONDS per-build wall clock before it is killed (default 1800)
     MANUFACTURE_SCRIPT    override the command's script (default scripts/manufacture.sh)
+    BUILD_SPECS           "0" turns the spec sweep off (default: on)
+    BUILD_SPECS_PULL      "0" stops the sweep fast-forwarding the checkout first
+    BUILD_SPEC_POLL_SECONDS  sweep interval (default 60; the sweep also runs once at start)
 """
 
 from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -87,6 +107,16 @@ ARCHON_VERSION_TIMEOUT_SECONDS = 20
 DEFAULT_TIMEOUT_SECONDS = 1800
 STATUS_EVERY_SECONDS = 5
 HEARTBEAT_EVERY_SECONDS = 10
+
+# ---- the spec sweep ---------------------------------------------------------
+
+# Specs that arrive by push, manufactured the way a Studio request is. Off is a
+# valid choice for a deployment that would rather pull and build deliberately.
+DEFAULT_SPEC_POLL_SECONDS = 60
+SPECS_DIRNAME = "build-requests"
+# `build-requests/.cache/` is gitignored already, which is the right home for state
+# that is this host's own record of what it has built and must not travel in a clone.
+SPECS_STATE_REL = "build-requests/.cache/specs-built.json"
 LOG_TAIL_CHARS = 4000
 
 # What the build is allowed to inherit from the repo `.env`. An allow-list, not a
@@ -515,6 +545,33 @@ def read_json(path: Path) -> object | None:
         return None
 
 
+def sha256_file(path: Path) -> str:
+    """The content digest the sweep de-duplicates on.
+
+    Content, not mtime: a re-pushed spec that changed nothing is the same spec, and
+    one that changed a word is a new build.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_specs_state(path: Path) -> dict:
+    """What this host has already manufactured, keyed by spec path.
+
+    A cache, not a ledger. Missing or unreadable means "nothing built yet", which
+    costs one rebuild rather than a refusal — but it is also what stops a push from
+    being manufactured again on every sweep, including a push whose build failed.
+    Those are retried by an operator, in Studio or with `make app`, not in a loop.
+    """
+    data = read_json(path)
+    if isinstance(data, dict) and isinstance(data.get("specs"), dict):
+        return data["specs"]
+    return {}
+
+
 def write_json_atomic(path: Path, payload: dict) -> None:
     """Write beside the target and rename, so a reader never sees a half file."""
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -789,6 +846,9 @@ class Runner:
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         poll_seconds: int = DEFAULT_POLL_SECONDS,
         manufacture: Path | None = None,
+        specs: bool = True,
+        specs_pull: bool = True,
+        spec_poll_seconds: int = DEFAULT_SPEC_POLL_SECONDS,
     ) -> None:
         self.repo = repo
         self.queue = queue_dir
@@ -798,6 +858,15 @@ class Runner:
         self.child: subprocess.Popen | None = None
         self.stopping = False
         self.dotenv = self._load_dotenv()
+        # The sweep is a second, slower responsibility of this same process: a spec
+        # that arrived by push has no request file, so something has to notice it.
+        self.specs_enabled = specs
+        self.specs_pull = specs_pull
+        self.spec_poll_seconds = spec_poll_seconds
+        self.specs_state_path = repo / SPECS_STATE_REL
+        # Set by `_run_request` once a request has validated, so the outcome is
+        # recorded no matter which of its several exits it left through.
+        self._current_spec: dict | None = None
 
     # ---- environment ----------------------------------------------------
 
@@ -909,6 +978,21 @@ class Runner:
     # ---- running one job ------------------------------------------------
 
     def process(self, request: Path) -> None:
+        """Run one claimed request, then remember which spec content it was.
+
+        The recording wraps the work rather than sitting at each of its exits: a build
+        that *fails* is exactly the one the sweep must not re-queue on its next pass,
+        and an exit that forgets to record is a sweep that retries forever.
+        """
+        self._current_spec = None
+        try:
+            self._run_request(request)
+        finally:
+            spec, self._current_spec = self._current_spec, None
+            if spec is not None:
+                self.record_spec_built(spec)
+
+    def _run_request(self, request: Path) -> None:
         running = self.claim(request)
         if running is None:
             return
@@ -929,6 +1013,9 @@ class Runner:
             )
             running.unlink(missing_ok=True)
             return
+
+        # Validated: from here the spec is this job's own, whatever happens next.
+        self._current_spec = spec
 
         slug = str(spec["slug"])
         started_at = now_iso()
@@ -1608,17 +1695,183 @@ class Runner:
             )
             path.unlink(missing_ok=True)
 
+    # ---- the spec sweep --------------------------------------------------
+
+    def record_spec_built(self, spec: dict) -> None:
+        """Note that this host has attempted exactly this spec content.
+
+        Deliberately outcome-blind: the job's own status says how it went, and what
+        the sweep needs to know is only "would queueing this again be the same work".
+        Recording regardless of outcome is what keeps a failed push from being
+        rebuilt on every pass; the retry is an explicit act in Studio or `make app`.
+        """
+        try:
+            target, rel = resolve_spec(self.repo, spec.get("spec"))
+            digest = sha256_file(target)
+        except (RequestError, OSError):
+            return
+
+        # Overwrites whatever was there — including a refusal the sweep recorded, which
+        # this job has just superseded by actually running the spec.
+        state = read_specs_state(self.specs_state_path)
+        entry = {"sha256": digest, "at": now_iso()}
+        job = spec.get("job")
+        if job:
+            entry["job"] = job
+        state[rel] = entry
+        self._write_specs_state(state)
+
+    def fast_forward(self) -> None:
+        """Bring the checkout up to date, or say why it was left alone.
+
+        `--ff-only`, and only on a clean tree. A helper that resolved conflicts or
+        discarded changes in the checkout a deployment builds from would be a way to
+        lose someone's edit in the name of a scheduled sweep; a rewritten upstream
+        history — which this repository has had — is a state to report, not to force.
+        """
+
+        def git(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(  # noqa: S603 - fixed argv, no shell
+                ("git", *args),
+                cwd=str(self.repo),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        status = git("status", "--porcelain")
+        if status.returncode != 0:
+            log("spec sweep: not a git checkout — skipping the fast-forward")
+            return
+        if status.stdout.strip():
+            log("spec sweep: the checkout has local changes — leaving it alone")
+            return
+
+        before = git("rev-parse", "HEAD").stdout.strip()
+        if git("fetch", "--quiet", "origin").returncode != 0:
+            log("spec sweep: could not reach origin — building what is already checked out")
+            return
+
+        merge = git("merge", "--ff-only", "@{u}")
+        if merge.returncode != 0:
+            log(
+                "spec sweep: origin is not a fast-forward of this checkout — leaving it "
+                "alone (a rewritten history or a local commit); pull it by hand"
+            )
+            return
+
+        after = git("rev-parse", "HEAD").stdout.strip()
+        if before and after and before != after:
+            log(f"spec sweep: fast-forwarded {before[:7]}..{after[:7]}")
+            for line in git("log", "--oneline", f"{before}..{after}").stdout.splitlines():
+                log(f"  {line}")
+
+    def sweep_specs(self) -> None:
+        """Manufacture the specs whose content this host has not built yet.
+
+        Every refusal is recorded as well as reported, so a file in `build-requests/`
+        that can never be manufactured says so once rather than every interval.
+        """
+        if not self.specs_enabled:
+            return
+
+        if self.specs_pull:
+            self.fast_forward()
+
+        specs_dir = self.repo / SPECS_DIRNAME
+        if not specs_dir.is_dir():
+            return
+
+        state = read_specs_state(self.specs_state_path)
+        queued = 0
+        for path in sorted(specs_dir.glob("*.md")):
+            # The directory's own README documents the format; it is not a request.
+            if path.name.lower() == "readme.md":
+                continue
+            rel = path.relative_to(self.repo).as_posix()
+            try:
+                digest = sha256_file(path)
+            except OSError as error:
+                log(f"spec sweep: cannot read {rel}: {error}")
+                continue
+            if state.get(rel, {}).get("sha256") == digest:
+                continue
+
+            # `replace` is derived, never asked for: the sweep only reaches a spec
+            # whose content it has not built, and for one that already has an app
+            # directory that is a rebuild — which the load node refuses unless told.
+            raw_slug = Path(rel).stem
+            replace = bool(
+                SLUG_PATTERN.fullmatch(raw_slug)
+                and resolve_build_dir(self.repo, raw_slug).is_dir()
+            )
+
+            try:
+                payload = build_request(
+                    self.repo, rel, replace=replace, requested_by="spec-sweep"
+                )
+            except RequestError as error:
+                log(f"spec sweep: refusing {rel}: {error}")
+                state[rel] = {"sha256": digest, "refused": str(error), "at": now_iso()}
+                self._write_specs_state(state)
+                continue
+
+            try:
+                enqueue(self.queue, payload)
+            except OSError as error:
+                log(f"spec sweep: could not queue {rel}: {error}")
+                continue
+
+            # Recorded here, at queue time, and not only when the build finishes. The
+            # sweep runs on its own interval and a build takes far longer than one: a
+            # spec remembered only at the end would be queued again on every pass while
+            # it was still running.
+            state[rel] = {"sha256": digest, "job": payload["job"], "at": now_iso()}
+            self._write_specs_state(state)
+
+            queued += 1
+            log(
+                f"spec sweep: queued {rel} (job {payload['job']}"
+                f"{', replacing the app it already has' if replace else ''})"
+            )
+
+        if queued:
+            log(f"spec sweep: {queued} spec(s) queued")
+
+    def _write_specs_state(self, state: dict) -> None:
+        try:
+            # `build-requests/.cache/` is gitignored and therefore absent on a fresh
+            # clone; `write_json_atomic` writes beside the target, so the directory has
+            # to exist or every record is lost to a FileNotFoundError that only the log
+            # would show.
+            self.specs_state_path.parent.mkdir(parents=True, exist_ok=True)
+            write_json_atomic(self.specs_state_path, {"version": 1, "specs": state})
+        except OSError as error:
+            log(f"spec sweep: could not write {self.specs_state_path}: {error}")
+
     def serve(self) -> int:
         self.started_at = now_iso()
         self.queue.mkdir(parents=True, exist_ok=True)
         self.recover()
         log(f"build runner ready — repo {self.repo}, queue {self.queue}")
+        if self.specs_enabled:
+            log(
+                f"spec sweep enabled — every {self.spec_poll_seconds}s, "
+                f"{'fast-forwarding first' if self.specs_pull else 'no pull'}"
+            )
 
         signal.signal(signal.SIGTERM, self._stop)
         signal.signal(signal.SIGINT, self._stop)
 
         last_beat = 0.0
+        last_sweep = 0.0
         while not self.stopping:
+            # Once at start, then on its own slower interval: a push is not urgent,
+            # and the sweep is the only thing here that touches the checkout.
+            if self.specs_enabled and time.monotonic() - last_sweep >= self.spec_poll_seconds:
+                last_sweep = time.monotonic()
+                self.sweep_specs()
+
             pending = self.requests()
             if pending:
                 self.process(pending[0])
@@ -1647,30 +1900,49 @@ def default_queue_dir(repo: Path) -> Path:
     return repo / ".factory" / "build-queue"
 
 
-def submit(queue: Path, repo: Path, spec: str, *, replace: bool) -> tuple[int, dict | None]:
-    """Queue a build. Reuses the runner's own validation, so the CLI and the UI
-    cannot disagree about what is acceptable."""
+def build_request(repo: Path, spec: str, *, replace: bool, requested_by: str) -> dict:
+    """The request a spec becomes, validated — or an RequestError.
+
+    Split out of `submit()` so a caller that is not a person at a terminal can be
+    told *why* a spec is unacceptable rather than only that it was: the spec sweep
+    records the refusal, so an unmanufacturable file in `build-requests/` is reported
+    once as the thing it is instead of re-reported on every pass.
+    """
     payload = {
         "v": PROTOCOL_VERSION,
         "job": os.urandom(8).hex(),
         "spec": spec,
-        "requested_by": f"cli:{os.environ.get('USER') or 'unknown'}",
+        "requested_by": requested_by,
         "requested_at": now_iso(),
         "replace": replace,
     }
+    spec_target, spec_rel = resolve_spec(repo, spec)
+    payload["spec"] = spec_rel
+    payload["slug"] = resolve_slug(payload, spec_rel)
+    payload["title"] = payload["slug"]
+    _ = spec_target
+    return payload
+
+
+def enqueue(queue: Path, payload: dict) -> None:
+    """Put a validated request where the runner will claim it."""
+    queue.mkdir(parents=True, exist_ok=True)
+    target = queue / f"{payload['job']}{REQUEST_SUFFIX}"
+    write_json_atomic(target, payload)
+
+
+def submit(queue: Path, repo: Path, spec: str, *, replace: bool) -> tuple[int, dict | None]:
+    """Queue a build. Reuses the runner's own validation, so the CLI and the UI
+    cannot disagree about what is acceptable."""
     try:
-        spec_target, spec_rel = resolve_spec(repo, spec)
-        payload["spec"] = spec_rel
-        payload["slug"] = resolve_slug(payload, spec_rel)
-        payload["title"] = payload["slug"]
-        _ = spec_target
+        payload = build_request(
+            repo, spec, replace=replace, requested_by=f"cli:{os.environ.get('USER') or 'unknown'}"
+        )
     except RequestError as error:
         print(f"refused: {error}", file=sys.stderr)
         return 2, None
 
-    queue.mkdir(parents=True, exist_ok=True)
-    target = queue / f"{payload['job']}{REQUEST_SUFFIX}"
-    write_json_atomic(target, payload)
+    enqueue(queue, payload)
     return 0, payload
 
 
@@ -1694,6 +1966,16 @@ def main() -> int:
     queue = Path(args.queue).expanduser().resolve() if args.queue else default_queue_dir(repo)
     timeout = args.timeout or int(os.environ.get("BUILD_TIMEOUT_SECONDS") or DEFAULT_TIMEOUT_SECONDS)
     poll = int(os.environ.get("BUILD_POLL_SECONDS") or DEFAULT_POLL_SECONDS)
+    # Read here rather than at the `Runner(...)` below, because `--check` reports them
+    # and returns long before that line.
+    specs = (os.environ.get("BUILD_SPECS") or "1").strip().lower() not in {"0", "false", "no", "off"}
+    specs_pull = (os.environ.get("BUILD_SPECS_PULL") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    spec_poll = int(os.environ.get("BUILD_SPEC_POLL_SECONDS") or DEFAULT_SPEC_POLL_SECONDS)
 
     if args.check:
         missing = [p for p in (repo / "scripts" / "manufacture.sh",) if not p.is_file()]
@@ -1783,6 +2065,13 @@ def main() -> int:
                     "install-build-runner.sh creates it and hands it to the build account"
                 )
 
+        # The sweep is the only thing here that writes to the checkout, so what it is
+        # allowed to do is part of the environment this check exists to describe.
+        print(
+            f"  {'specs':<9} sweep {'on' if specs else 'OFF'} every {spec_poll}s"
+            f"{' (fast-forwards the checkout first)' if specs and specs_pull else ''}"
+        )
+
         for path in missing:
             print(f"missing: {path}")
         return 1 if missing else 0
@@ -1816,7 +2105,15 @@ def main() -> int:
             print(f"{str(status.get('state', '?')):<7} {status.get('job')}  {status.get('message')}")
         return 0
 
-    runner = Runner(repo, queue, timeout_seconds=timeout, poll_seconds=poll)
+    runner = Runner(
+        repo,
+        queue,
+        timeout_seconds=timeout,
+        poll_seconds=poll,
+        specs=specs,
+        specs_pull=specs_pull,
+        spec_poll_seconds=spec_poll,
+    )
     lock_path = queue / LOCK_NAME
     queue.mkdir(parents=True, exist_ok=True)
 
@@ -1845,6 +2142,9 @@ def main() -> int:
     if args.once:
         runner.started_at = now_iso()
         runner.recover()
+        # Before draining, so "one pass" means one pass of everything this process
+        # does — a spec that arrived by push included.
+        runner.sweep_specs()
         processed = 0
         while True:
             pending = runner.requests()
