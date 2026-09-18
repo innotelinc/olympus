@@ -1678,3 +1678,39 @@ pre.code-body {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Delivery pipeline — the request → build → verify → live flow, with the
+   Distro console as the downstream operations surface. Kept to pipe-* names
+   because `.stage` is already a builder term in this app. */
+.pipe {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.pipe-stage {
+  flex: 1 1 150px;
+  min-width: 140px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.pipe-n {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.pipe-l {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.pipe-sub {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 4px;
+}

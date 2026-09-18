@@ -305,6 +305,57 @@ export default function AdminPanel({ viewer }: { viewer: string | null }) {
 
             <section className="admin-block">
               <div className="admin-head">
+                <h2>Delivery pipeline</h2>
+                <span className="hint">request → build → verify → live — mirrored read-only in Distro</span>
+              </div>
+              <div className="pipe">
+                <div className="pipe-stage">
+                  <div className="pipe-n">{status.queue.recent.filter((j) => j.state === "queued").length}</div>
+                  <div className="pipe-l">Queued</div>
+                  <div className="pipe-sub">request written by Studio</div>
+                </div>
+                <div className="pipe-stage">
+                  <div className="pipe-n">{status.queue.running}</div>
+                  <div className="pipe-l">Building</div>
+                  <div className="pipe-sub">
+                    {status.runner.live
+                      ? status.runner.busyWith
+                        ? `runner busy: ${status.runner.busyWith}`
+                        : "runner idle — will pick up"
+                      : "no runner — builds stall here"}
+                  </div>
+                </div>
+                <div className="pipe-stage">
+                  <div className="pipe-n">{status.queue.finished}</div>
+                  <div className="pipe-l">Verified</div>
+                  <div className="pipe-sub">artifact + preview packaged</div>
+                </div>
+                <div className="pipe-stage">
+                  <div className="pipe-n">
+                    {status.queue.recent.filter((j) => j.state === "succeeded" && (j.publishedUrl || j.previewUrl)).length}
+                  </div>
+                  <div className="pipe-l">Live</div>
+                  <div className="pipe-sub">{status.paths.siteSuffix || "publishing not configured"}</div>
+                </div>
+                <div className="pipe-stage">
+                  <div className="pipe-n">∞</div>
+                  <div className="pipe-l">Distro</div>
+                  <div className="pipe-sub">
+                    <a href="https://admin.distro.innotel.us/admin" target="_blank" rel="noreferrer">
+                      quota &amp; spend console ↗
+                    </a>
+                  </div>
+                </div>
+              </div>
+              <div className="hint" style={{ marginTop: 8 }}>
+                Every app built here flows through the estate&apos;s gateway under Distro&apos;s control:
+                the generation model calls are metered and capped per user there, and this queue is
+                mirrored into Distro&apos;s admin console for the operators who watch spend.
+              </div>
+            </section>
+
+            <section className="admin-block">
+              <div className="admin-head">
                 <h2>Built apps</h2>
                 <span className="hint">
                   {status.builds.length} visible from this container ({status.paths.builds})
