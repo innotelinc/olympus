@@ -228,11 +228,13 @@ jobs:
               echo "no route to the build gateway: $gateway/healthz"
               echo "nothing was manufactured — this is a wiring gap, not a build failure"
               echo
-              echo "fix, either one:"
-              echo "  * set the OMNIROUTE_BASE_URL repo variable to a gateway this runner can"
-              echo "    reach (the deployment's public door is https://gateway.olympus.innotel.us/v1)"
-              echo "    and the OMNIROUTE_API_KEY secret the agent authenticates with; or"
-              echo "  * set OLYMPUS_BUILD_RUNNER to a self-hosted runner on the gateway's host."
+              echo "fix: set OLYMPUS_BUILD_RUNNER to a self-hosted runner on the gateway's host."
+              echo "That is the only one that can work. The gateway's API is LAN-only by design:"
+              echo "NPM refuses /v1 on every public name — gateway.olympus.innotel.us included,"
+              echo "which answers 403 with or without a key (docs/gateway-sso.md) — so no"
+              echo "GitHub-hosted runner can reach it at any URL. A runner on that host keeps"
+              echo "the default http://192.168.1.46:20129/v1 and needs the OMNIROUTE_API_KEY"
+              echo "secret, which is set. Until then \`make app\` is the working path."
               echo
               echo "the spec that would have been built: ${SPECS}"
             } | tee .factory-ci/skipped.txt

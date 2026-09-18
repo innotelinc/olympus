@@ -243,14 +243,15 @@ provider connections and the key that decrypts them in Vault on the same schedul
 Docker also runs the same `push` manufacture trigger in CI: `.github/workflows/olympus-app-builder.yml`
 (`on.push.paths: build-requests/*.md`).
 
-**That job can only build where the gateway is reachable.** It runs on
-`vars.OLYMPUS_BUILD_RUNNER || ubuntu-latest`, and a GitHub-hosted runner cannot route to
-a LAN gateway — so with both repo variables unset it reports that and finishes green
-having manufactured nothing (`.factory-ci/skipped.txt`, kept as an artifact), rather than
-turning red for a wiring gap. To make it build, either set `OMNIROUTE_BASE_URL` to a
-gateway the runner can reach — the deployment's public door is
-`https://gateway.olympus.innotel.us/v1` — together with the `OMNIROUTE_API_KEY` secret, or
-point `OLYMPUS_BUILD_RUNNER` at a self-hosted runner on the gateway's host. Until then,
+**That job can only build on a runner that can reach the gateway, and the gateway's API is
+LAN-only by design.** NPM refuses `/v1` on every public name — `gateway.olympus.innotel.us`
+included, which answers `403` with or without a key (see
+[docs/gateway-sso.md](docs/gateway-sso.md)) — so a GitHub-hosted runner cannot reach it at
+any URL. The job runs on `vars.OLYMPUS_BUILD_RUNNER || ubuntu-latest`; set that variable to
+a self-hosted runner on the gateway's host, where the default
+`http://192.168.1.46:20129/v1` and the `OMNIROUTE_API_KEY` secret both work. Until one is
+registered it reports the wiring gap, keeps the reason as an artifact
+(`.factory-ci/skipped.txt`), and finishes green rather than turning red for it — and
 `make app` is the working path.
 
 The bootstrap is idempotent and does, in order:
