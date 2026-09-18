@@ -127,10 +127,22 @@ jobs:
         run: |
           echo "$TELEGRAM_BOT_TOKEN" | ./setup.sh
 
-      # The coding agent itself. setup.sh provisions the core modules, the archon CLI
-      # and the gateway, but not the agent — and the build step has nothing to run
-      # without it. ("./scripts/bootstrap.sh" installs it too; this is the one piece
-      # app manufacturing needs from it.)
+      # The workflow engine. This job used to assume setup.sh had provided it, and it
+      # had not: setup.sh clones the Archon *source* into core-modules/ and chmods a
+      # binary that a source clone does not contain (`bin/archon` is a release
+      # artifact), so on a clean runner the build died with "no working archon CLI
+      # found" — the one thing it cannot run without. Installed exactly the way
+      # scripts/bootstrap.sh installs it, so the two cannot drift into two answers.
+      - name: 🧩 Install the Archon CLI (the workflow engine)
+        if: steps.spec.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://archon.diy/install | bash
+          archon --version
+
+      # The coding agent itself. setup.sh provisions the core modules and the gateway,
+      # but neither the agent nor the CLI above — the build step has nothing to run
+      # without either. Installed from the same source bootstrap.sh uses.
       - name: 🤖 Install the Coding Agent (Codex)
         if: steps.spec.outputs.found == 'true'
         run: npm install -g @openai/codex
