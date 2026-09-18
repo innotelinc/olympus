@@ -266,7 +266,7 @@ services:
   # volume on the gateway's host. `make gateway-vault-backup` / `-check` /
   # `-restore` copy it to Cerulean Vault and must be run THERE, not here —
   # scripts/omniroute-vault-backup.py asks Docker for the container's own mount,
-  # so it needs a Docker that can see the gateway (`--container g2-omniroute`).
+  # so it needs a Docker that can see the gateway (`--container omniroute`).
   # `make gateway-sso-up` / `gateway-edge` / `gateway-auth-mode` belong on that
   # host too: the SSO proxy forwards to the gateway's loopback binding, so the
   # dashboard gate has to run beside the dashboard. See docs/gateway-sso.md.

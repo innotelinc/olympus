@@ -200,8 +200,8 @@ docker-ps-host: ## List the host-networked stack's status
 # Cerulean Vault so losing the host stops mattering.
 #
 # RUN THIS ON THE GATEWAY'S HOST. It asks Docker for the gateway container's own
-# mount, so it needs a Docker that can see `g2-omniroute` (the Group 2 container
-# name) and that host's VAULT_* — the volume, not this checkout, is what is being
+# mount, so it needs a Docker that can see `omniroute` (the container's name in
+# the repo that declares it) and that host's VAULT_* — the volume, not this checkout, is what is being
 # backed up. It is safe to run any time: `--check` compares the backup with the
 # live gateway and exits non-zero on drift, which is the version worth putting on
 # a timer.
