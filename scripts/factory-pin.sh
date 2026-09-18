@@ -99,6 +99,21 @@ init_args=(init --cache "$CACHE")
 [ -n "${ARCHON_REVISION:-}" ] && init_args+=(--revision "$ARCHON_REVISION")
 python3 "$FACTORY_BIN" "${init_args[@]}"
 
+# The installer ships its own `doctor.py` and `trigger.py` and both are stubs:
+# its doctor defers to the pinned source's audit instead of reporting this
+# deployment's readiness, and this repo's compose healthcheck greps the
+# deployment doctor's `Status: READY` line — so an install would turn the olympus
+# container unhealthy and autoheal would restart it in a loop. Its trigger
+# reports nothing at all. Olympus's pair is tracked and published, so restore it:
+# this is `git checkout`, never a hand-edit, and it is why the managed paths are
+# four tracked files rather than a surprise in `git status`.
+for own in factory/doctor.py factory/trigger.py; do
+  if ! git -C "$ROOT_DIR" diff --quiet -- "$own"; then
+    git -C "$ROOT_DIR" checkout -- "$own"
+    say "factory-pin: restored Olympus's own $own (the installer ships a parallel stub)"
+  fi
+done
+
 after="$(git -C "$ROOT_DIR" status --porcelain | sort || true)"
 changed="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") || true)"
 if [ -n "$changed" ]; then
