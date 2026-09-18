@@ -6,10 +6,14 @@
 #   olympus-<target>-check.service   runs scripts/<target>-alert.sh
 #   olympus-<target>-check.timer     fires it daily, and 2 min after boot
 #
-# Five targets exist:
+# Six targets exist:
 #
 #   studio-token   credential expiry check for `make studio-oidc`
 #                  (scripts/studio-token-alert.sh)
+#   telegram-bot   is TELEGRAM_BOT_TOKEN still a live token — the one thing the
+#                  interactive gateway and every alert below share, and the one
+#                  that can go stale without a file here changing
+#                  (scripts/telegram-bot-alert.sh)
 #   vault-renew    daily renewal of the stack's periodic Vault token
 #                  (scripts/vault-renew-alert.sh)
 #   build-model    can the configured build model call a tool, twice over
@@ -60,6 +64,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 resolve_target() {
     case "$1" in
         studio-token)   TARGET_SCRIPT=studio-token-alert.sh ;;
+        telegram-bot)   TARGET_SCRIPT=telegram-bot-alert.sh ;;
         vault-renew)    TARGET_SCRIPT=vault-renew-alert.sh ;;
         build-model)    TARGET_SCRIPT=build-model-alert.sh ;;
         gateway-backup) TARGET_SCRIPT=gateway-backup-alert.sh ;;
@@ -83,13 +88,13 @@ for arg in "$@"; do
     case "$arg" in
         --uninstall) uninstall_only=true ;;
         TARGET=*) targets+=("${arg#TARGET=}") ;;
-        *) echo "unknown argument: $arg (expected TARGET=<studio-token|vault-renew|build-model|gateway-backup|gateway-edge> and/or --uninstall)" >&2; exit 2 ;;
+        *) echo "unknown argument: $arg (expected TARGET=<studio-token|telegram-bot|vault-renew|build-model|gateway-backup|gateway-edge> and/or --uninstall)" >&2; exit 2 ;;
     esac
 done
-if [[ ${#targets[@]} -eq 0 ]]; then targets=(studio-token vault-renew build-model gateway-backup gateway-edge); fi
+if [[ ${#targets[@]} -eq 0 ]]; then targets=(studio-token telegram-bot vault-renew build-model gateway-backup gateway-edge); fi
 
 for target in "${targets[@]}"; do
-    resolve_target "$target" || { echo "unknown target: $target (expected studio-token, vault-renew, build-model, gateway-backup or gateway-edge)" >&2; exit 2; }
+    resolve_target "$target" || { echo "unknown target: $target (expected studio-token, telegram-bot, vault-renew, build-model, gateway-backup or gateway-edge)" >&2; exit 2; }
 
     [[ -f "$REPO_ROOT/scripts/$TARGET_SCRIPT" ]] || {
         echo "scripts/$TARGET_SCRIPT is missing next to this installer" >&2
@@ -157,6 +162,7 @@ if ! $uninstall_only; then
     echo "run one right now:   systemctl start olympus-studio-token-check.service"
     echo "read the output:     journalctl -u olympus-studio-token-check -n 20"
     echo "test the channel:    $REPO_ROOT/scripts/studio-token-alert.sh --test-telegram"
+    echo "                     $REPO_ROOT/scripts/telegram-bot-alert.sh --test-telegram"
     echo "                     $REPO_ROOT/scripts/vault-renew-alert.sh --test-telegram"
     echo "                     $REPO_ROOT/scripts/build-model-alert.sh --test-telegram"
     echo "                     $REPO_ROOT/scripts/gateway-backup-alert.sh --test-telegram"
