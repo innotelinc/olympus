@@ -256,6 +256,42 @@ python3 factory/doctor.py
 # or from the host: docker compose exec olympus bash scripts/manufacture.sh build-requests/my-todo.md
 ```
 
+**The engine it drives is a pin, not a checkout you keep.** `scripts/factory-pin.sh`
+runs the factory's own installer, which clones the Archon revision the factory's
+manifest demands into `~/.cache/factory/archon/<sha>` and copies its runtime into
+this checkout; `.factory/consumer.json` records which revision that was, and
+`factory run` refuses to start without it (*"Integration pin required"* — which
+is what every manufacturing run said until the pin was first created here, on
+2026-09-18). The install replaces `factory/doctor.py` and `factory/trigger.py`
+with the factory's parallel stubs; this repo publishes its own pair (the doctor
+backs the compose healthcheck), so the script restores them after installing and
+tells you it did.
+
+### Arming it (`make factory-arm`) — earned, not configured
+
+Autonomy is a ladder, and each rung needs a **watched lap** and explicit evidence
+before it is turned on. Level 0 is a human starting every lap; level 1 is
+`.factory/loop.sh` submitting exactly one scheduled shared workflow per tick
+(`factory tick` reads `.factory/schedule.json`), kept alive by the
+`factory-timer` unit. `scripts/factory-dispatch.py` is the gate between them —
+the only thing that writes the schedule, records the evidence, and installs the
+unit:
+
+```bash
+make dispatch-status                     # level, pin, workflows, evidence, blockers
+# watch ONE lap end to end at level 0, then record it:
+make lap-record WF=archon-triage RUN=<run-id> RESULT=pass WHO=<you>
+make factory-arm WF=archon-lifecycle     # refuses until every gate is clear
+make factory-disarm                      # back to level 0 and stop the unit
+python3 scripts/factory-dispatch.py --check   # fails if a trigger exists without evidence
+```
+
+It refuses to arm while the pin, the runtime, the provider login
+(`~/.factory-env`, mode 600 — the unit sources it), the evidence or the stop
+control (`factory halt` writes `.factory/STOP`) is missing, and every refusal
+names the command that clears it. `factory/trigger.py --status` reports the same
+state, so a status surface can never arm anything by accident.
+
 ### Installation details
 
 | Step | Command / file | Notes |
@@ -305,7 +341,7 @@ which is also rendered at [innotelinc.github.io/olympus/#roadmap](https://innote
 | --- | --- | --- |
 | **0.1 — the builder** | Studio, the TUI and the plan → stream → package → run → publish engine, with the build runner and the saved-app store | **shipped** |
 | **0.2 — the operator surface** | `/admin`, plan-before-build, automatic live draft previews, Preview It, one gateway door, tenancy, runner hardening | **in development** |
-| **0.3 — dispatch** | Arm the dispatcher after a watched lap; publish-time observability | next |
+| **0.3 — dispatch** | Arm the dispatcher after a watched lap; publish-time observability | **engine installed and gated** — pinned to Archon `29f6a73d` (18 workflows), `make dispatch-status` reports level 0 with the two remaining human gates (the provider login and the watched lap); publish-time observability next |
 | **later** | Autonomy L2 (validate) and L3 (holdout + mutation ratchet); ONYX storage, on hold | later |
 
 ---

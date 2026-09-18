@@ -71,3 +71,19 @@ __pycache__/
 .DS_Store
 .env.bak*
 .env.*.bak
+
+# The factory installer (`scripts/factory-pin.sh` → `factory init`) appends its own
+# set of these on every install. Committed here so an install does not leave the
+# deployment checkout dirty with rules the repository already agreed with — the
+# pin's own state, per-run results, and credential-shaped files that must never
+# be committed even if a container writes one next to the code.
+.factory/consumer.json
+.factory/retired/
+.factory/STOP
+harness/.results/
+.factory/holdout/.results/
+.env.*
+!.env.example
+*.pem
+secrets.json
+credentials.json

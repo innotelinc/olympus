@@ -121,11 +121,35 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
 
 ## Next — 0.3
 
-- [ ] **Autonomy L1 — dispatch.** Arm the dispatcher after a watched lap:
+- [~] **Autonomy L1 — dispatch.** Arm the dispatcher after a watched lap:
       queued accepted issues → watched implement runs, still at a manual gate.
       The unblocked prerequisite list is now short: the runner picks up, the DAG
       completes, previews publish and answer 200 — dispatch has no infrastructure
       blocker left, only the gate policy and the watched lap itself.
+      **2026-09-18 — the engine is installed and the gate is written; two human
+      steps remain.** `scripts/factory-pin.sh` had never been run here, so the
+      deployment had no consumer to drive: it is now pinned to Archon
+      `29f6a73d` (the revision the factory's own manifest demands, and the reason
+      every manufacturing run used to die with *"Factory refused: Integration pin
+      required"*), and the pin exposes **18** shared workflows — `archon-lifecycle`
+      among them, which is the default `factory tick` schedule. The install also
+      replaces `factory/doctor.py` and `factory/trigger.py` with the factory's
+      parallel stubs, which the compose healthcheck and this repo's status
+      surface both read, so `factory-pin.sh` now restores Olympus's own pair and
+      says so instead of leaving it in `git status`. The gate itself is
+      `scripts/factory-dispatch.py`: it records a watched lap as evidence and is
+      the only thing that writes `.factory/schedule.json` and installs the
+      `factory-timer` unit — `factory tick` still owns the run. It refuses to arm
+      while anything is unclear and names the fix; on `.50` today that is:
+      * **`.factory-env`** — the unit sources the provider login from a mode-600
+        file in `$HOME`, and the native doctor still reports
+        `"authentication not live-tested"`;
+      * **the watched lap itself** — one `factory run <workflow>` observed end to
+        end, recorded with `make lap-record`.
+
+      Nothing about this is a policy default: `make dispatch-status` says
+      `NOT_ARMED` (level 0) until `make factory-arm` clears the gate, and `--check`
+      fails if a trigger marker ever appears without evidence behind it.
 - [ ] **Publish-time observability.** A publish that is not checked is a publish
       nobody knows about — fold `site-check` / `gateway-edge-check` evidence into
       the panel and the job record. Preview edge registration should use the same
@@ -173,6 +197,15 @@ evidence before it is turned on. The factory runs at **L0** by default.
   connections — a capability kept, not a milestone.
 
 ## 0.3 progress notes (2026-09-18)
+
+- [x] **The factory engine is installed and the L1 gate is enforced**:
+      `scripts/factory-pin.sh` ran for the first time on `.50` (pinned to Archon
+      `29f6a73d`, 18 workflows, `factory list` and the native `doctor` both pass),
+      `scripts/factory-dispatch.py` is the arming gate with a recorded-lap
+      requirement and 28 unit tests, `make dispatch-status | lap-record |
+      factory-arm | factory-disarm` are the operator surface, and the published
+      `factory/trigger.py` now reports the gate instead of guessing. The two
+      remaining gates are a provider login and a watched lap.
 
 - [x] **Pipeline made visible both ways**: the deployment panel now shows the
       delivery flow (queued → building → verified → live) with Distro named

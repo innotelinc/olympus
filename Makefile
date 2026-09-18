@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup env-sync env-sync-write doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger app plan new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir tui docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish gateway-edge-check
+.PHONY: help setup env-sync env-sync-write doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger dispatch-status lap-record factory-arm factory-disarm app plan new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir tui docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish gateway-edge-check
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -46,6 +46,26 @@ factory-doctor: ## Run factory doctor (readiness + blockers)
 
 factory-trigger: ## Show scheduler trigger status (expected: NOT_ARMED)
 	python3 factory/trigger.py --status
+
+## ---- Dispatch (autonomy level 1 — earned) ----------------------------------
+## The gate is scripts/factory-dispatch.py: it records the watched lap as
+## evidence and is the only thing that arms the loop. `factory-arm` refuses
+## while any gate is unclear and names the command that clears it.
+
+dispatch-status: ## Report the autonomy gate: level, pin, schedule, blockers
+	python3 scripts/factory-dispatch.py --status
+
+lap-record: ## Record a watched lap as evidence (WF=<workflow> RESULT=pass RUN=<id> WHO=<you>)
+	python3 scripts/factory-dispatch.py --record-lap \
+		--workflow "$(WF)" --result "$(RESULT)" --run "$(RUN)" --watched-by "$(WHO)" \
+		$(if $(NOTES),--notes "$(NOTES)",)
+
+factory-arm: ## Arm L1 dispatch (WF=<workflow> [INTERVAL=900]; ARGS="--dry-run" to preview)
+	python3 scripts/factory-dispatch.py --arm $(if $(WF),--workflow "$(WF)",) \
+		$(if $(INTERVAL),--interval $(INTERVAL),) $(ARGS)
+
+factory-disarm: ## Disarm L1 dispatch and stop the timer
+	python3 scripts/factory-dispatch.py --disarm
 
 ## ---- App manufacturing (local dev — mirrors olympus-app-builder.yml) ------
 
