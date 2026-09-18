@@ -79,6 +79,11 @@ UNIT_NAME = "factory-timer.service"
 DEFAULT_WORKFLOW = "archon-lifecycle"
 DEFAULT_INTERVAL = 900
 UNIT_USER = "root"
+# Where `--arm` installs the unit. Overridable because otherwise the only way to
+# exercise arming is as root on a host with systemd: anywhere else the write to
+# /etc raises, `--arm` returns 1 for it, and a test of the *gate* fails for a
+# reason that is host state — which is exactly how CI was red.
+UNIT_DIR = Path(os.environ.get("FACTORY_UNIT_DIR", "/etc/systemd/system"))
 
 
 # ── Paths and small helpers ──────────────────────────────────────────────────
@@ -487,7 +492,7 @@ def cmd_arm(args: argparse.Namespace) -> int:
         print(f"no systemd here — the unit is at {state_dir(root) / UNIT_NAME}", file=sys.stderr)
         return 0
 
-    target = Path("/etc/systemd/system") / UNIT_NAME
+    target = UNIT_DIR / UNIT_NAME
     try:
         target.write_text(unit_body, encoding="utf-8")
     except OSError as exc:

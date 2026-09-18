@@ -116,10 +116,20 @@ class GateCase(unittest.TestCase):
 
     def setUp(self):
         self.checkout = Checkout(self)
+        # `--arm` ends by installing the unit, and two things about that are host
+        # state rather than the gate: whether `systemctl` is on PATH, and whether
+        # the unit directory is writable. Faking only `systemctl` left the real
+        # write to /etc/systemd/system in place, so every arming case here passed
+        # as root on a host with systemd and failed on a runner — the CLI returned
+        # 1 for a permission error that has nothing to do with the evidence gate.
+        units = self.checkout.root / "units"
+        units.mkdir(parents=True, exist_ok=True)
         self.patches = [
             mock.patch.object(disp, "repo_root", lambda *a, **k: self.checkout.root),
             mock.patch.object(disp, "systemctl", lambda *a: (0, "active")),
             mock.patch.object(disp, "loop_running", lambda: False),
+            mock.patch.object(disp, "UNIT_DIR", units),
+            mock.patch.object(disp.shutil, "which", lambda name, *a, **k: f"/usr/bin/{name}"),
         ]
         for patch in self.patches:
             patch.start()
@@ -237,6 +247,10 @@ class EvidenceGate(GateCase):
         trigger = json.loads((self.checkout.root / ".factory" / "trigger.json").read_text())
         self.assertTrue(trigger["armed"])
         self.assertEqual(trigger["level"], 1)
+        # Arming is not finished until the unit is on disk: the last step is the one
+        # that used to fail for a non-root caller, so it is asserted rather than
+        # assumed from the exit code alone.
+        self.assertTrue((disp.UNIT_DIR / disp.UNIT_NAME).is_file())
 
     def test_a_stop_marker_blocks_arming(self):
         self.complete(result="pass")
