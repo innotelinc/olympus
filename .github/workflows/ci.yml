@@ -51,14 +51,49 @@ jobs:
           bash -n scripts/studio-export-dir.sh
           bash -n scripts/install-build-runner.sh
           bash -n scripts/manufacture.sh
-          python3 -m compileall -q scripts/build-runner.py scripts/prune-builds.py scripts/omniroute-restore-providers.py
-          python3 -m compileall -q scripts/vault-bootstrap.py scripts/authentik-studio-app.py
-          python3 -m compileall -q scripts/authentik-studio-token.py scripts/build-model-check.py
-          python3 -m compileall -q scripts/cerulean-edge.py
+          # The whole tree, not a list of file names. The list is how a file gets added
+          # and never compiled: scripts/project_plan.py was in neither this list nor the
+          # workflow one below, and its only-3.12 f-string reached a live build.
+          python3 -m compileall -q scripts
           # The rotation program is generated, so it has to stay valid Python.
           python3 scripts/authentik-studio-token.py --snippet > /tmp/studio-token-snippet.py
           python3 -c "compile(open('/tmp/studio-token-snippet.py').read(), 'snippet', 'exec')"
           python3 -m compileall -q factory harness 2>/dev/null || echo "nothing to compile — ok"
+
+      - name: Python parses on the version the app builder runs
+        run: |
+          set -euo pipefail
+          # The app-builder's script nodes run on Python 3.11 and setup.sh's declared
+          # floor is 3.10. `compileall` on this runner's own newer interpreter cannot see
+          # that difference — a backslash inside an f-string expression parses on 3.12 and
+          # is a SyntaxError on 3.11 — which is exactly how scripts/project_plan.py got
+          # through CI and then failed the build on its first planning turn. ast.parse's
+          # feature_version is the check for it that needs no second interpreter.
+          python3 - <<'PY'
+          import ast, pathlib, sys
+
+          FLOOR = (3, 11)
+          SKIP = {".git", "node_modules", "__pycache__", ".venv", "builds"}
+
+          failed, seen = [], 0
+          for path in sorted(pathlib.Path(".").rglob("*.py")):
+              if any(part in SKIP for part in path.parts):
+                  continue
+              seen += 1
+              try:
+                  ast.parse(
+                      path.read_text(encoding="utf-8", errors="replace"),
+                      filename=str(path),
+                      feature_version=FLOOR,
+                  )
+              except SyntaxError as error:
+                  failed.append(f"{path}:{error.lineno}: {error.msg}")
+
+          for line in failed:
+              print(f"::error::{line}")
+          print(f"python 3.{FLOOR[1]} floor: {seen} file(s) parsed, {len(failed)} failed")
+          sys.exit(1 if failed else 0)
+          PY
 
       - name: Script unit tests (runner, prune, model check)
         run: |

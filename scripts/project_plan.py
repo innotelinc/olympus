@@ -337,10 +337,14 @@ def describe(plan: dict) -> str:
     stack = f"{language} ({', '.join(frameworks)})" if frameworks else language
     database = plan["runtime"]["database"]
     kind = "website" if plan["kind"] == "website" else "app"
+    # Bound to a name rather than escaped inside the f-string: a backslash in an
+    # f-string expression is 3.12-only syntax, and the app builder runs these nodes on
+    # 3.11 — where this file did not parse at all, minutes into a model run.
+    port = plan["run"]["port"] or "the runtime's choice"
     return (
         f"{plan['name']} — {kind}, {stack}"
         + (f", {database}" if database else "")
-        + f", start `{plan['run']['start']}` on port {plan['run']['port'] or 'the runtime\'s choice'}"
+        + f", start `{plan['run']['start']}` on port {port}"
     )
 
 
