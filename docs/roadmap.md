@@ -171,3 +171,19 @@ evidence before it is turned on. The factory runs at **L0** by default.
   and does not become a second execution plane. See the convergence doc.
 - `make gateway-vault-check` remains the drift check for the gateway's provider
   connections — a capability kept, not a milestone.
+
+## 0.3 progress notes (2026-09-18)
+
+- [x] **Pipeline made visible both ways**: the deployment panel now shows the
+      delivery flow (queued → building → verified → live) with Distro named
+      as the downstream control plane — generation traffic is metered and
+      capped there, and the queue is mirrored into Distro's console. Deployed
+      and verified on .50.
+- [x] **Alert estate repaired after the .50 reinstall**: TELEGRAM_BOT_TOKEN
+      (placeholder) and TELEGRAM_CHAT_ID (empty) restored from the estate
+      identity; gateway edge/backup timers moved to .46 where the gateway
+      actually runs; VAULT_ADDR points at the platform Vault and the
+      path-scoped token file is back, so `studio-token-alert` and
+      `vault-renew-alert` run green and send to the Telegram channel again.
+- [x] **`.env` hygiene**: multi-word values now quoted (bash-sourced tooling
+      was executing `email` as a command); `.env.bak*` gitignored.
