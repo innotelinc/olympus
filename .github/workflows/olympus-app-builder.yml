@@ -8,6 +8,16 @@ on:
   push:
     paths:
       - 'build-requests/*.md'
+  # The push filter is a spec landing in build-requests/, so a change to THIS file
+  # cannot re-run the job it changed — the only way to exercise a fix to it is to name
+  # a spec by hand. An empty spec is a refusal, not "newest wins": manufacturing costs a
+  # model run and writes an app nobody asked for.
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: 'Spec to manufacture, e.g. build-requests/resume-generator.md. Empty manufactures nothing.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -29,13 +39,34 @@ jobs:
           # Need history to diff the pushed range, not just the tip.
           fetch-depth: 0
 
-      - name: 🔎 Resolve the spec this push actually adds
+      - name: 🔎 Resolve the spec (a push's new spec, or one named by hand)
         id: spec
         env:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.event.after }}
+          EVENT: ${{ github.event_name }}
+          DISPATCH_SPEC: ${{ inputs.spec }}
         run: |
           set -euo pipefail
+
+          # A manual run names its spec, because it is the only way to run this job when
+          # no spec was added — a fix to the workflow itself, or a spec already pushed.
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            if [ -z "${DISPATCH_SPEC:-}" ]; then
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              echo "workflow_dispatch with no spec given — nothing to manufacture."
+              exit 0
+            fi
+            if [ ! -f "$DISPATCH_SPEC" ]; then
+              echo "::error::no such spec in this checkout: $DISPATCH_SPEC"
+              exit 1
+            fi
+            printf 'specs=%s\n' "$DISPATCH_SPEC" >> "$GITHUB_OUTPUT"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            printf '  %s\n' "$DISPATCH_SPEC"
+            exit 0
+          fi
+
           head_sha="${AFTER:-$GITHUB_SHA}"
 
           # `before` is all-zeros on a new branch, and unreachable after a
