@@ -97,6 +97,37 @@ jobs:
           nodes=$(grep -cE '^[[:space:]]+script: [a-z0-9-]+' "$WF/archon-greenfield.yaml")
           [ "$nodes" -ge 4 ] || { echo "::error::only $nodes script node(s) found in the workflow"; exit 1; }
 
+          # A retry has to stay sayable. The load node refuses to overwrite an app that
+          # already exists, and the build a retry is about is precisely the one that has
+          # output — so without this consent every retry of a project that produced files
+          # is refused, which is how the refusal was found. Asserted end to end because
+          # the input is useless if it does not reach the node that reads it.
+          grep -qE '^[[:space:]]+replace:' "$WF/archon-greenfield.yaml" \
+            || { echo "::error::$WF/archon-greenfield.yaml no longer declares the 'replace' input"; exit 1; }
+          grep -qF 'replace: "$INPUTS.replace"' "$WF/archon-greenfield.yaml" \
+            || { echo "::error::the load node no longer passes \$INPUTS.replace — a rebuild would be refused"; exit 1; }
+          grep -qF 'INPUTS_REPLACE' "$WF/scripts/load-spec.py" \
+            || { echo "::error::load-spec.py no longer reads INPUTS_REPLACE"; exit 1; }
+          grep -qF 'REPLACE' scripts/manufacture.sh \
+            || { echo "::error::manufacture.sh no longer passes the rebuild consent"; exit 1; }
+
+          # Every node in this workflow declares `runtime: uv` and Archon resolves it
+          # through that binary, which nothing installs by default: not the runner
+          # image, not setup.sh until it was added. Missing, it fails on the first node
+          # before the spec is read — minutes of model run saved by checking here.
+          grep -qF 'runtime: uv' "$WF/archon-greenfield.yaml" \
+            || { echo "::error::no node declares runtime: uv — this check assumes uv"; exit 1; }
+          grep -qF 'astral-sh/setup-uv' .github/workflows/olympus-app-builder.yml \
+            || { echo "::error::olympus-app-builder.yml no longer installs uv, which every node needs"; exit 1; }
+          grep -qF 'check_command "uv"' setup.sh \
+            || { echo "::error::setup.sh no longer requires uv"; exit 1; }
+
+          # The build needs a gateway, and a GitHub-hosted runner cannot route to a LAN
+          # one. The job reports that and manufactures nothing; if the runner stops being
+          # selectable, that report is all it can ever do.
+          grep -qF 'vars.OLYMPUS_BUILD_RUNNER' .github/workflows/olympus-app-builder.yml \
+            || { echo "::error::olympus-app-builder.yml no longer lets a routed runner be selected"; exit 1; }
+
       - name: Compose files render
         run: |
           set -euo pipefail

@@ -6,6 +6,7 @@ asked for. Everything here is therefore code, and every refusal is explicit.
 
 Reads (env, because a caller-controlled value is never substituted into script source):
     INPUTS_DECLARED   the spec path passed as --input spec=<path>
+    INPUTS_REPLACE    "true" to rebuild over a previous manufacture (--input replace=true)
 
 Emits {slug, title, spec_path, spec_sha, output_dir, app_dir}.
 """
@@ -16,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -24,6 +26,9 @@ MAX_SPEC_BYTES = 400_000
 # contains only these is an interrupted pre-build and is safe to resume; any
 # project file remains protected by the overwrite guard.
 WORKFLOW_CONTROL_FILES = {"plan.json"}
+# The same set of spellings `scripts/build-runner.py` accepts from a request, so a
+# retry means the same thing whether it arrives through Studio or through `make app`.
+TRUTHY = {"1", "true", "yes", "on"}
 
 
 def note(*parts: object) -> None:
@@ -120,23 +125,41 @@ def main() -> int:
     app_dir = out / slug
 
     # A previous manufacture is evidence someone was looking at it. Replacing it
-    # silently loses the comparison they were about to make. The one exception is
-    # an interrupted plan node: `plan.json` is workflow control state, not an app
-    # file, and leaving it behind used to block every retry after a planning/build
-    # failure. Remove only those control files and preserve the guard for any real
-    # project output.
+    # silently loses the comparison they were about to make, so it only happens when
+    # the caller says so — `replace=true`, the same consent `scripts/build-runner.py`
+    # takes from Studio's own confirm (`{ "replace": true }`).
+    #
+    # That consent is what a retry needs. Studio's "fix it" exports a spec whose own
+    # purpose is to rebuild a project that already has output, and `builds/<slug>`
+    # is exactly what a previous attempt left behind — so a guard with no way to say
+    # "yes, replace it" refused every retry of a project that had got far enough to
+    # produce files, which is every retry worth making.
+    #
+    # The one thing that is never a reason to stop is an interrupted plan node:
+    # `plan.json` is workflow control state, not an app file, and leaving it behind
+    # used to block every retry after a planning/build failure. Remove only those
+    # control files and preserve the guard for any real project output.
+    replace = (os.environ.get("INPUTS_REPLACE") or "").strip().lower() in TRUTHY
     if app_dir.is_dir():
         entries = list(app_dir.iterdir())
-        project_entries = [entry for entry in entries if entry.name not in WORKFLOW_CONTROL_FILES]
-        if not project_entries:
-            for entry in entries:
-                if entry.name in WORKFLOW_CONTROL_FILES:
-                    entry.unlink(missing_ok=True)
-        elif entries:
-            fail(
-                f"{app_dir} already exists and is not empty. Remove it to rebuild, or "
-                f"export the app under a different title."
-            )
+        if replace and entries:
+            shutil.rmtree(app_dir)
+            note(f"replaced    {app_dir} (a rebuild was requested; the previous one is gone)")
+            app_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            project_entries = [
+                entry for entry in entries if entry.name not in WORKFLOW_CONTROL_FILES
+            ]
+            if not project_entries:
+                for entry in entries:
+                    if entry.name in WORKFLOW_CONTROL_FILES:
+                        entry.unlink(missing_ok=True)
+            elif entries:
+                fail(
+                    f"{app_dir} already exists and is not empty. Rebuild it on purpose "
+                    f"(make app SPEC=… REPLACE=1, or --input replace=true), or export "
+                    f"the app under a different title. It is left exactly as it was."
+                )
 
     note(f"spec        {spec_path}")
     note(f"app         {app_dir}")

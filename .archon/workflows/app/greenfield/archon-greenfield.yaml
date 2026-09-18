@@ -9,6 +9,9 @@ description: |
     archon workflow run archon-greenfield --no-worktree \
       --input spec=build-requests/my-app.md
 
+  Add `--input replace=true` to rebuild over an app this workflow already
+  manufactured; without it the load node refuses, preserving the previous build.
+
   NOT for: the issue → PR factory workflows (factory-triage, factory-implement),
   which change THIS repository.
 
@@ -45,6 +48,16 @@ inputs:
       state, a website does not — and therefore what the planner is asked for. A
       Studio export carries the kind the person chose; a hand-run spec defaults to
       app.
+  replace:
+    default: "false"
+    description: >-
+      "true" rebuilds over a previous manufacture of the same app instead of being
+      refused by the overwrite guard. It is a consent, not a convenience: the
+      previous `builds/<slug>` is deleted, which is why it is never implied. This
+      is what a retry needs — Studio's "fix it" exports a spec that exists to
+      rebuild a project which already has output, so without it every retry of a
+      project that produced files was refused. `make app` passes REPLACE=1 for it,
+      and the host-side runner passes it when the request says `replace`.
 
 returns: record
 
@@ -52,12 +65,13 @@ nodes:
   # Deterministic intake. Resolves the spec, refuses anything outside the checkout,
   # derives the app's directory from the spec's own name, and refuses to overwrite a
   # previous manufacture — a rebuild that silently replaces an app is how you lose
-  # the one you were comparing against.
+  # the one you were comparing against. `replace` is the caller saying so on purpose.
   - id: load
     script: load-spec
     runtime: uv
     with:
       declared: "$INPUTS.spec"
+      replace: "$INPUTS.replace"
     output_format:
       type: object
       properties:

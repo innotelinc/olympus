@@ -114,6 +114,85 @@ class TheLoaderAndStalePlan(unittest.TestCase):
             self.assertEqual([entry.name for entry in project_entries], ["index.html"])
 
 
+class RebuildingOverAPreviousBuild(unittest.TestCase):
+    """`replace` is the difference between a retry working and being refused.
+
+    The guard is right: a previous ``builds/<slug>`` is the build someone was
+    comparing against. What it must not do is make a retry impossible — and the
+    project a retry is about is exactly the one that already has output, so every
+    retry was refused. Consent has to be sayable, and only when it is said.
+    """
+
+    watched = ("INPUTS_DECLARED", "INPUTS_REPLACE")
+
+    def setUp(self) -> None:
+        self.node = load_node("load-spec")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+        # A checkout the node accepts: it insists on .archon/ and reads output_dir
+        # from it, and it must be the working directory.
+        (self.root / ".archon").mkdir()
+        (self.root / ".archon" / "config.yaml").write_text(
+            "factory_settings:\n  output_dir: ./builds\n", encoding="utf-8"
+        )
+        (self.root / "build-requests").mkdir()
+        (self.root / "build-requests" / "resume-generator.md").write_text(
+            "# Application Specification: Resume Generator\n", encoding="utf-8"
+        )
+        self.app_dir = self.root / "builds" / "resume-generator"
+        self.app_dir.mkdir(parents=True)
+        (self.app_dir / "index.html").write_text("<html />", encoding="utf-8")
+
+        self.cwd = Path.cwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, self.cwd)
+        saved = {key: os.environ.pop(key, None) for key in self.watched}
+        self.addCleanup(lambda: [os.environ.pop(key, None) for key in self.watched])
+        self.addCleanup(lambda: os.environ.update({k: v for k, v in saved.items() if v is not None}))
+        os.environ["INPUTS_DECLARED"] = "build-requests/resume-generator.md"
+
+    def load(self) -> None:
+        """Run the node the way Archon does: in the checkout's cwd, inputs in env."""
+        with mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+            self.node.main()
+
+    def test_without_consent_an_existing_build_is_refused_and_left_alone(self) -> None:
+        os.environ["INPUTS_REPLACE"] = "false"
+        with self.assertRaises(SystemExit) as caught:
+            self.load()
+        self.assertEqual(caught.exception.code, 1)
+        self.assertTrue((self.app_dir / "index.html").is_file())
+
+    def test_consent_rebuilds_over_it(self) -> None:
+        os.environ["INPUTS_REPLACE"] = "true"
+        self.load()
+        self.assertTrue(self.app_dir.is_dir())
+        self.assertEqual(list(self.app_dir.iterdir()), [])
+
+    def test_the_consent_spellings_the_runner_accepts_are_the_same_ones(self) -> None:
+        for spelling in ("1", "TRUE", "yes", "on"):
+            with self.subTest(spelling=spelling):
+                (self.app_dir / "index.html").write_text("<html />", encoding="utf-8")
+                os.environ["INPUTS_REPLACE"] = spelling
+                self.load()
+                self.assertEqual(list(self.app_dir.iterdir()), [])
+
+    def test_an_unset_replace_is_not_consent(self) -> None:
+        os.environ.pop("INPUTS_REPLACE", None)
+        with self.assertRaises(SystemExit) as caught:
+            self.load()
+        self.assertEqual(caught.exception.code, 1)
+
+    def test_a_directory_holding_only_control_state_is_still_resumable(self) -> None:
+        os.environ.pop("INPUTS_REPLACE", None)
+        (self.app_dir / "index.html").unlink()
+        (self.app_dir / "plan.json").write_text("{}", encoding="utf-8")
+        self.load()
+        self.assertFalse((self.app_dir / "plan.json").exists())
+
+
 class TheBuilderAndThePlan(NodeFixture):
     def setUp(self) -> None:
         super().setUp()

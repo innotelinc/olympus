@@ -129,11 +129,14 @@ Manufactured from a build-request spec by `archon-greenfield`.
 ## Rebuilding
 
 ```bash
-make app SPEC={spec_display}
+make app SPEC={spec_display} REPLACE=1
 ```
 
-This directory is generated output (`builds/` is gitignored). Delete it to rebuild:
-the workflow refuses to overwrite an existing app, so a rebuild is always explicit.
+This directory is generated output (`builds/` is gitignored). `REPLACE=1` is not
+optional: the workflow refuses to overwrite an existing app, so a rebuild has to say
+so — which is also why the advice here used to be "delete the directory first", a
+step with no record of what it removed. Without the flag the run stops at its first
+node and leaves this build exactly as it is.
 """
 
     (app_dir / "README.md").write_text(readme, encoding="utf-8")

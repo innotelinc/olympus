@@ -14,7 +14,12 @@ permissions:
 
 jobs:
   build-new-app:
-    runs-on: ubuntu-latest
+    # The build talks to the platform gateway. When that gateway is only on the LAN,
+    # a GitHub-hosted runner cannot route to it, so set the OLYMPUS_BUILD_RUNNER repo
+    # variable to the label of a runner that can (the same shape as
+    # AUTHENTIK_E2E_RUNNER in ci.yml). Set OMNIROUTE_BASE_URL as well when the runner
+    # reaches a different door than the default below.
+    runs-on: ${{ vars.OLYMPUS_BUILD_RUNNER || 'ubuntu-latest' }}
     outputs:
       found: ${{ steps.spec.outputs.found }}
     steps:
@@ -71,6 +76,15 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+
+      # Every node in archon-greenfield declares `runtime: uv`, and Archon resolves
+      # those through the `uv` binary — but nothing installed it: not this workflow,
+      # not setup.sh, and the runner image is not guaranteed to carry it. On a runner
+      # without it the very first script node (load) fails before it reads the spec,
+      # so the job went red for a missing toolchain rather than a bad app.
+      - name: ⚡ Setup uv (the runtime archon-greenfield's nodes declare)
+        if: steps.spec.outputs.found == 'true'
+        uses: astral-sh/setup-uv@v10
 
       - name: 🏗️ Run Monolithic Setup
         if: steps.spec.outputs.found == 'true'
@@ -152,6 +166,34 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .factory-ci
+
+          # Whether a build can happen at all is decided by the gateway, and a runner
+          # with no route to it cannot manufacture anything. That is a wiring gap, not
+          # a broken pipeline, so it is reported and the job ends green with nothing
+          # built — which is what the check above already claims this job does.
+          #
+          # It has to be probed here rather than left to manufacture.sh: that script
+          # refuses to start when the gateway is silent, deliberately, because for an
+          # operator a build that dies 20 minutes in has burned the run. Correct for
+          # `make app`, wrong for a runner that was never wired to a gateway.
+          gateway="${OMNIROUTE_BASE_URL%/v1}"
+          if ! curl -fsS -m 10 "$gateway/healthz" >/dev/null 2>&1; then
+            {
+              echo "no route to the build gateway: $gateway/healthz"
+              echo "nothing was manufactured — this is a wiring gap, not a build failure"
+              echo
+              echo "fix, either one:"
+              echo "  * set the OMNIROUTE_BASE_URL repo variable to a gateway this runner can"
+              echo "    reach (the deployment's public door is https://gateway.olympus.innotel.us/v1)"
+              echo "    and the OMNIROUTE_API_KEY secret the agent authenticates with; or"
+              echo "  * set OLYMPUS_BUILD_RUNNER to a self-hosted runner on the gateway's host."
+              echo
+              echo "the spec that would have been built: ${SPECS}"
+            } | tee .factory-ci/skipped.txt
+            echo "::warning title=App not manufactured::build gateway unreachable — see .factory-ci/skipped.txt"
+            exit 0
+          fi
+
           for spec in $SPECS; do
             echo "Manufacturing from $spec"
             # Tee'd rather than left on the terminal. This step failing with no

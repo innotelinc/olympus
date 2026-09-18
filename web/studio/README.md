@@ -473,7 +473,8 @@ factory *continues* the app rather than restarting it.
 | Filename | The title, lowercased and dashed, capped at 60 chars — generated, never parsed from input |
 | Existing spec | `409`; the UI asks before replacing it, and `POST { "overwrite": true }` replaces it outright |
 | Too large to inline | Past 60 KB the appendix lists the files without their contents |
-| Next step | `make app SPEC=build-requests/<slug>.md` — or commit it: a push touching `build-requests/*.md` triggers `olympus-app-builder.yml` |
+| Next step | `make app SPEC=build-requests/<slug>.md` — or commit it: a push touching `build-requests/*.md` triggers `olympus-app-builder.yml` (which only manufactures where the build gateway is reachable; see the repository README) |
+| Rebuilding an app that exists | `make app SPEC=… REPLACE=1` — the `load` node refuses to overwrite `builds/<slug>` without it, and a retry of a failed build is exactly the case that has one |
 
 The build is saved before it is exported, so the spec can never describe an older
 build than the one on screen. `GET` returns the same bytes as a download, so the

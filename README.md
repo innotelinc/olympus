@@ -185,14 +185,23 @@ Then manufacture an app from a spec:
 make new-request NAME=my-todo   # → build-requests/my-todo.md
 $EDITOR build-requests/my-todo.md
 make app                         # local — or: make docker-app SPEC=build-requests/my-todo.md
+make app SPEC=build-requests/my-todo.md REPLACE=1   # rebuild over an app already in ./builds
 make builds                       # list ./builds (volume, gitignored)
 ```
+
+The workflow will not manufacture over an app it has already produced — a rebuild that
+silently replaced `builds/<slug>` is how you lose the build you were comparing against.
+`REPLACE=1` is that consent, and it is the same consent Studio's own rebuild sends
+(`{ "replace": true }`). **A retry needs it**: the project a failed build is about is
+exactly the one that already has output, so without it every retry of a project that got
+far enough to write files was refused at the `load` node.
 
 `make app` runs the `archon-greenfield` workflow (`.archon/workflows/app/greenfield/`)
 through the Archon CLI: it resolves and bounds the spec, **plans the stack**, runs Codex
 over the plan, **asserts on the artifact rather than the exit code**, and only then
 writes a `MANIFEST.json` + `README.md` recording which spec (by SHA-256) and which model
-produced the app. An agent that exits 0 having written nothing fails the run — worth
+produced the app. Its nodes declare `runtime: uv`, so `uv` is a hard requirement of this
+path — `./setup.sh` checks for it and `make app` says so plainly if it is absent. An agent that exits 0 having written nothing fails the run — worth
 knowing because this gateway does that: Codex exits 0 even when its last request was
 refused.
 
@@ -233,6 +242,16 @@ provider connections and the key that decrypts them in Vault on the same schedul
 
 Docker also runs the same `push` manufacture trigger in CI: `.github/workflows/olympus-app-builder.yml`
 (`on.push.paths: build-requests/*.md`).
+
+**That job can only build where the gateway is reachable.** It runs on
+`vars.OLYMPUS_BUILD_RUNNER || ubuntu-latest`, and a GitHub-hosted runner cannot route to
+a LAN gateway — so with both repo variables unset it reports that and finishes green
+having manufactured nothing (`.factory-ci/skipped.txt`, kept as an artifact), rather than
+turning red for a wiring gap. To make it build, either set `OMNIROUTE_BASE_URL` to a
+gateway the runner can reach — the deployment's public door is
+`https://gateway.olympus.innotel.us/v1` — together with the `OMNIROUTE_API_KEY` secret, or
+point `OLYMPUS_BUILD_RUNNER` at a self-hosted runner on the gateway's host. Until then,
+`make app` is the working path.
 
 The bootstrap is idempotent and does, in order:
 
