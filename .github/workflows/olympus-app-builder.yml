@@ -82,9 +82,12 @@ jobs:
       # not setup.sh, and the runner image is not guaranteed to carry it. On a runner
       # without it the very first script node (load) fails before it reads the spec,
       # so the job went red for a missing toolchain rather than a bad app.
+      # Pinned to an exact release, not a major tag: astral-sh/setup-uv publishes no
+      # floating `v10`, and a `@v10` here fails the whole job at "Set up job" — before
+      # the resolve step, so the run is red with nothing to read.
       - name: ⚡ Setup uv (the runtime archon-greenfield's nodes declare)
         if: steps.spec.outputs.found == 'true'
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.1.0
 
       - name: 🏗️ Run Monolithic Setup
         if: steps.spec.outputs.found == 'true'
