@@ -122,6 +122,12 @@ jobs:
           grep -qF 'check_command "uv"' setup.sh \
             || { echo "::error::setup.sh no longer requires uv"; exit 1; }
 
+          # The workflow engine. A source clone does not contain the binary, so the job
+          # has to install it — the run that proved this died on "no working archon CLI
+          # found" after every other step had passed.
+          grep -qF 'archon.diy/install' .github/workflows/olympus-app-builder.yml \
+            || { echo "::error::olympus-app-builder.yml no longer installs the Archon CLI that manufacture.sh requires"; exit 1; }
+
           # The build needs a gateway, and a GitHub-hosted runner cannot route to a LAN
           # one. The job reports that and manufactures nothing; if the runner stops being
           # selectable, that report is all it can ever do.
