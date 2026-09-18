@@ -69,3 +69,5 @@ __pycache__/
 
 # OS artifacts
 .DS_Store
+.env.bak*
+.env.*.bak
