@@ -319,8 +319,9 @@ make studio-token-rotate AUTHENTIK_HOST=<host>   # rebuild and re-date it
 On the deployment host the check runs daily without anyone remembering it:
 
 ```bash
-scripts/install-token-check-timer.sh             # all four: 06:17 UTC + after boot
+scripts/install-token-check-timer.sh             # all six: 06:17 UTC + after boot
 systemctl start olympus-studio-token-check.service   # run the credential check now
+systemctl start olympus-telegram-bot-check.service   # is the bot token still live now
 systemctl start olympus-vault-renew-check.service    # renew the Vault token now
 systemctl start olympus-build-model-check.service    # can builds produce anything now
 systemctl start olympus-gateway-backup-check.service # back the gateway's state up now
@@ -338,6 +339,16 @@ which is why it needs no drift check to go with it — the copy cannot fall behi
 the thing it is copied from. It is also the only target here that writes anything,
 and it writes to Vault over the network, so the units' read-only hardening is
 intact.
+
+One target guards a credential that no single file owns. `TELEGRAM_BOT_TOKEN` is
+shared by this stack's alert wrappers and the interactive Telegram front end, and
+it can be revoked in @BotFather without anything here changing — at which point
+alerts simply stop arriving. `scripts/telegram-bot-alert.sh`
+(`TARGET=telegram-bot`) calls `getMe` daily and fails the unit when the token is
+rejected, naming the bot when it is not. It never polls `getUpdates`, so the
+front end keeps the bot's one poller. Because a revoked token is also the
+credential the alert would send with, a 401 is journal-and-`systemctl --failed`
+only by design.
 
 It alerts through Telegram when the credential is inside its warning window
 (`--warn-days`, 14 by default) or unusable, and repeats daily while it lapses —

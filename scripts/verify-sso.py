@@ -305,6 +305,18 @@ def check(condition, message):
         raise CheckFailed(message)
 
 
+def unreachable(err, host):
+    """A name that does not resolve, or a connection that never lands.
+
+    Reported, never raised: a resolver that cannot see this name is a finding
+    about *this* run, and an unhandled `socket.gaierror` out of urllib would
+    bury every host checked before it behind a traceback.
+    """
+    if "Name or service not known" in str(err) or "Temporary failure" in str(err):
+        return f"cannot resolve {host} from this host ({err})"
+    return f"cannot reach {host} ({err})"
+
+
 def client_credentials_authenticate(cfg):
     """Prove the configured client_id/client_secret authenticate at the token endpoint.
 
@@ -583,6 +595,10 @@ def main():
                 failures += 1
                 print(f"  {BAD}  {host}: {err}")
                 continue
+            except (urllib.error.URLError, OSError) as err:
+                failures += 1
+                print(f"  {BAD}  {host}: {unreachable(err, host)}")
+                continue
             check(
                 status in (302, 307),
                 f"{host}: the callback sealed a session (HTTP {status})",
@@ -602,6 +618,9 @@ def main():
     except CheckFailed as err:
         failures += 1
         print(f"  {BAD}  {err}")
+    except (urllib.error.URLError, OSError) as err:
+        failures += 1
+        print(f"  {BAD}  {unreachable(err, ', '.join(cfg.hosts))}")
     finally:
         if pk is not None:
             try:
