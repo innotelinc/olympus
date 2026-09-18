@@ -170,7 +170,10 @@ def sync(example_path: Path, env_path: Path, *, write: bool) -> int:
     addition = "\n\n".join(block.render() for block in to_add)
     # Keep the file's own trailing newline out of the middle of the addition.
     body = env.rstrip("\n")
-    env_path.write_text(f"{body}\n\n{'\n'.join(HEADER)}\n\n{addition}\n", encoding="utf-8")
+    # Same reason as project_plan.py: a backslash inside an f-string expression only
+    # parses on 3.12+, and the nodes that run these scripts use 3.11.
+    header = "\n".join(HEADER)
+    env_path.write_text(f"{body}\n\n{header}\n\n{addition}\n", encoding="utf-8")
 
     for block in to_add:
         print(f"added: {block.key}")
