@@ -56,6 +56,15 @@ FORBIDDEN_PATTERNS=(
   "(credit|credits|thanks|acknowledg)[[:space:]]*:?[[:space:]]*(to[[:space:]]+)?(${TOOL_TOKEN})"
 )
 
+# NOTE on pipelines: every check below greps a here-string, never a `printf … |
+# grep`. Both callers run under `set -o pipefail` (commit-msg, pre-commit and
+# the CI job all set it), and a `printf` writing more than a pipe buffer into a
+# `grep -q` that quits at the first match dies of SIGPIPE — 141 from the
+# pipeline, which an `if …; then` reads as "no match". A large input (a big
+# staged diff, a merged message log, an audit window) therefore failed OPEN and
+# skipped the rule entirely. A here-string has no writer process to signal, so
+# the verdict cannot depend on the size of the input.
+
 # Escape ERE metacharacters in a literal so allowlisted identities such as
 # dependabot[bot] match literally instead of being read as a bracket
 # expression.
@@ -74,17 +83,17 @@ guard_check_stream() {
   #    line is BAD unless its value is exactly one of the allowed identities —
   #    never the reverse (a negated character class over the allowlist would
   #    silently pass any foreign value sharing a letter with it).
-  if printf '%s\n' "$input" | grep -Eiq "^(${TRAILER_PREFIXES})[[:space:]]*:"; then
+  if grep -Eiq "^(${TRAILER_PREFIXES})[[:space:]]*:" <<< "$input"; then
     local bad="" line ok
     while IFS= read -r line; do
       case "$line" in *[A-Za-z0-9]*) ;; *) continue ;; esac
       # Not a trailer line at all? Then rule 1 does not apply to it.
-      printf '%s\n' "$line" | grep -Eqi "^(${TRAILER_PREFIXES})[[:space:]]*:" || continue
+      grep -Eqi "^(${TRAILER_PREFIXES})[[:space:]]*:" <<< "$line" || continue
       # Trailer line: BAD unless the value is exactly an allowed identity.
       ok=0
       for allowed in "${ALLOWED_ATTRIBUTIONS[@]}"; do
-        if printf '%s\n' "$line" \
-            | grep -Eqi "^(${TRAILER_PREFIXES})[[:space:]]*:[[:space:]]*$(guard_escape_ere "$allowed")[[:space:]]*$"; then
+        if grep -Eqi "^(${TRAILER_PREFIXES})[[:space:]]*:[[:space:]]*$(guard_escape_ere "$allowed")[[:space:]]*$" \
+            <<< "$line"; then
           ok=1
           break
         fi
@@ -101,7 +110,7 @@ guard_check_stream() {
 
   # 2. AI-assistant attribution phrases are forbidden.
   for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
-    if printf '%s\n' "$input" | grep -Eiq -- "$pattern"; then
+    if grep -Eiq -- "$pattern" <<< "$input"; then
       printf 'guard: forbidden attribution pattern matched: %s\n' "$pattern" >&2
       return 1
     fi
@@ -165,6 +174,24 @@ guard_selftest() {
       fails=$((fails + 1))
     fi
   done
+
+  # A LARGE input must get the same verdict as a small one. The rules grep a
+  # here-string, so no check can die of SIGPIPE when its writer outlives a
+  # `grep -q` — the failure that once made big inputs pass (the pipeline
+  # returned 141, which `if …; then` reads as "no match"). Run these under
+  # pipefail so the regression is caught even from a shell that has it off.
+  local filler big_bad big_clean
+  filler="$(head -c 262144 /dev/zero | tr '\0' 'x' | fold -w 79 | sed 's/$/ context line/')"
+  big_bad="$(printf '%s\n' "${MUST_REJECT[0]}"; printf '%s\n' "$filler")"
+  big_clean="$(printf '%s\n' "$filler")"
+  if ( set -o pipefail; printf '%s\n' "$big_bad" | guard_check_stream >/dev/null 2>&1 ); then
+    printf 'guard_selftest: FAIL — a large input hid a foreign trailer (fail-open)\n' >&2
+    fails=$((fails + 1))
+  fi
+  if ! ( set -o pipefail; printf '%s\n' "$big_clean" | guard_check_stream >/dev/null 2>&1 ); then
+    printf 'guard_selftest: FAIL — a large clean input was wrongly rejected\n' >&2
+    fails=$((fails + 1))
+  fi
 
   # A blank line before the trailer must not defeat the trailer check.
   if printf 'Subject\n\nco-authored-by: Someone Else <else@example.com>\n' \
