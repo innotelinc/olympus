@@ -62,6 +62,11 @@ validate_requirements() {
   check_command "python3" "https://www.python.org/downloads  |  sudo apt install python3 python3-venv  |  brew install python3" || missing=1
   check_command "gh"      "https://cli.github.com/  |  sudo apt install gh  |  brew install gh  — then run: gh auth login" || missing=1
   check_command "npm"     "https://nodejs.org/  |  sudo apt install nodejs npm  |  brew install node (npm ships with node)" || missing=1
+  # The app-manufacturing workflow's nodes all declare `runtime: uv`, and Archon runs
+  # them through this binary. Nothing else installs it, and its absence used to surface
+  # much later as a script node failing before it had read the spec, so it is required
+  # here beside the rest.
+  check_command "uv"      "curl -LsSf https://astral.sh/uv/install.sh | sh  |  brew install uv  |  https://docs.astral.sh/uv/getting-started/installation/" || missing=1
 
   # Extra version floors
   if command -v python3 >/dev/null 2>&1; then

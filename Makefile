@@ -70,7 +70,10 @@ factory-disarm: ## Disarm L1 dispatch and stop the timer
 ## ---- App manufacturing (local dev — mirrors olympus-app-builder.yml) ------
 
 app: ## Manufacture app from SPEC (or most recent build-requests/*.md) → ./builds
-	bash scripts/manufacture.sh $(if $(SPEC),$(SPEC),)
+	REPLACE=$(REPLACE) bash scripts/manufacture.sh $(if $(SPEC),$(SPEC),)
+# REPLACE=1 rebuilds over an app this workflow already manufactured. The load node
+# refuses otherwise, on purpose — the previous ./builds/<slug> is the build you were
+# comparing against, and a retry of a failed build is precisely the case that has one.
 
 new-request: ## Scaffold build-requests/$(NAME).md from factory/APP_SPEC_TEMPLATE.md
 	@if [ -z "$(NAME)" ]; then echo "usage: make new-request NAME=my-app" >&2; exit 2; fi
@@ -432,8 +435,8 @@ edge-preview: ## Register (or retry) an app's preview name at the edge (SLUG=<sl
 docker-shell: ## Shell into the running Olympus container
 	docker compose exec olympus bash
 
-docker-app: ## Manufacture inside the container (SPEC= or newest build-request)
-	docker compose exec olympus bash scripts/manufacture.sh $(if $(SPEC),$(SPEC),)
+docker-app: ## Manufacture inside the container (SPEC= or newest build-request, REPLACE=1 to rebuild)
+	docker compose exec olympus bash -c "REPLACE=$(REPLACE) bash scripts/manufacture.sh $(if $(SPEC),$(SPEC),)"
 
 docker-clean: ## Remove container + builds volume (irreversible)
 	docker compose down -v

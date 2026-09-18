@@ -2,6 +2,7 @@
 # scripts/manufacture.sh — local app manufacturing (mirrors .github/workflows/olympus-app-builder.yml)
 # Usage: ./scripts/manufacture.sh [build-requests/foo.md]
 #        SPEC=build-requests/foo.md ./scripts/manufacture.sh
+#        REPLACE=1 SPEC=build-requests/foo.md ./scripts/manufacture.sh   # rebuild over an existing app
 # If no spec given, picks the most recent build-requests/*.md (lexicographically last mtime).
 # Output is always ./builds (per .archon/config.yaml factory_settings.output_dir). Ignored by .gitignore.
 #
@@ -113,6 +114,15 @@ if [ -z "$ARCHON" ]; then
 fi
 say "manufacture: archon: $ARCHON"
 
+# --- the script runtime ----------------------------------------------------------
+# Every node in this workflow declares `runtime: uv` and Archon runs them through that
+# binary. Checked here so a host that never ran setup.sh is told what is missing, rather
+# than watching the first node fail before it has read the spec.
+if ! command -v uv >/dev/null 2>&1; then
+  die "manufacture: the 'uv' runtime is missing, and every $WORKFLOW node needs it.\n          Install: curl -LsSf https://astral.sh/uv/install.sh | sh   (or run ./setup.sh)"
+fi
+say "manufacture: uv: $(command -v uv)"
+
 # --- the gateway ----------------------------------------------------------------
 # Checked BEFORE the run, not during it: a build that dies 20 minutes in because the
 # model gateway was never up has burned the run to learn something a two-second probe
@@ -130,11 +140,25 @@ else
   warn "manufacture: OMNIROUTE_BASE_URL is unset and .env had no value — the agent will use the default gateway with no key"
 fi
 
+# --- replace consent ------------------------------------------------------------
+# The load node refuses to manufacture over an app that already exists, so that a
+# rebuild cannot quietly destroy the one you were comparing against. Studio's own
+# rebuild gives that consent as `{ "replace": true }`; REPLACE=1 is the same consent
+# for a hand-run or scripted one. Without it, RETRYING a failed build is impossible:
+# the project that failed is the project that has output.
+RUN_INPUTS=(--input "spec=$SPEC")
+case "$(printf '%s' "${REPLACE:-}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    RUN_INPUTS+=(--input replace=true)
+    warn "manufacture: REPLACE set — a previous ./builds/<app> for this spec is deleted before building"
+    ;;
+esac
+
 # --- run ------------------------------------------------------------------------
 # Foreground by default, so `make app` returns having actually built the app. Pass
 # ARCHON_RUN_ARGS=--detach for a long build you would rather poll.
 # shellcheck disable=SC2086
 "$ARCHON" workflow run "$WORKFLOW" --no-worktree \
-  --input spec="$SPEC" ${ARCHON_RUN_ARGS:-}
+  "${RUN_INPUTS[@]}" ${ARCHON_RUN_ARGS:-}
 
 say "manufacture: done — output under $(sed -n 's/^  output_dir: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$ROOT_DIR/.archon/config.yaml" | head -1 || echo ./builds)"
