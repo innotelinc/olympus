@@ -44,6 +44,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -60,6 +61,7 @@ from cerulean_api import (  # noqa: E402 - the path insert above is what makes t
     connect_client,
     ensure_record,
     find_proxy_host,
+    load_env_file,
     find_zone,
     list_proxy_hosts,
     looks_like_host,
@@ -120,6 +122,9 @@ class Config:
         self.token = cerulean["CERULEAN_API_TOKEN"]
         self.password = cerulean["CERULEAN_ADMIN_PASSWORD"]
         self.zone = cerulean["CERULEAN_ZONE"]
+        # Kept whole as well as parsed: the evidence check wants the same settings this
+        # run used, not a second read of the file that could disagree with it.
+        self.env = load_env_file(env_path)
         self.suffix = (read("SITE_HOST_SUFFIX", DEFAULT_SUFFIX) or DEFAULT_SUFFIX).rstrip(".").lower()
         self.forward_host = read("SITE_EDGE_FORWARD_HOST")
         self.port = int(read("SITE_PORT", "20130") or 20130)
@@ -176,6 +181,81 @@ def preview_hostname_for(config: Config, slug: str) -> str:
     site when someone reads the edge's host list.
     """
     return f"{normalise_slug(slug)}-preview.{config.suffix}"
+
+
+def load_evidence():
+    """`scripts/delivery-evidence.py`, imported.
+
+    Imported rather than re-implemented because the question it answers — does this
+    name serve, and if not is it the app or the name — is the same question a publish
+    has just raised. Two answers to it is how a name starts being reported live here
+    and missing in the panel.
+    """
+    path = Path(__file__).resolve().parent / "delivery-evidence.py"
+    spec = importlib.util.spec_from_file_location("delivery_evidence", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - only if the file is gone
+        fail(f"{path} is missing, so a publish cannot be checked", 2)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["delivery_evidence"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_after_registering(config: Config, fqdn: str, slug: str, preview: bool) -> int:
+    """Did registering the name actually put it live? Recorded, and reported.
+
+    Both callers end with this, because "Edge: <report>" says the proxy host was
+    written and says nothing about whether the name answers — and the difference is
+    the whole failure this deployment has hit. The verdict is written under the app
+    runtime's `evidence/` directory, the same record the build runner reads for the
+    job status, so a publish from the command line leaves the same trail as one from
+    the UI.
+    """
+    evidence = load_evidence()
+    root = evidence.apps_root(config.env)
+    payload, outcome = evidence.evaluate(
+        fqdn, slug, preview, config.env_path, config.env, root=root
+    )
+    evidence.write_evidence(root, fqdn, payload)
+
+    if outcome.code == 0:
+        print(f"\n{payload['check'].get('note') or 'serving'}: https://{fqdn}/ — checked and recorded")
+        return 0
+
+    print(f"\nhttps://{fqdn}/ did not answer after registering it: {outcome.detail}", file=sys.stderr)
+    if payload["check"].get("error"):
+        print(f"  the check said: {payload['check']['error']}", file=sys.stderr)
+    if outcome.retry:
+        print(f"  fix: {outcome.retry}", file=sys.stderr)
+    return outcome.code
+
+
+def cerulean_failure(config: Config, slug: str, fqdn: str, preview: bool, error: object) -> int:
+    """Cerulean would not answer. Say whether that cost a build — usually it did not.
+
+    This is the case the roadmap calls out, and it reads differently from every other
+    failure in this file: the container is running, the files are packaged, and the
+    *only* thing missing is the name. Nothing has to be rebuilt, so the operator gets
+    the command that registers it rather than an invitation to run the whole delivery
+    again. A failure that is *not* connectivity is re-raised untouched — "no
+    certificate covers the wildcard" is not this problem and must not be reported as
+    though it were.
+    """
+    evidence = load_evidence()
+    if not evidence.unreachable(error):
+        raise error
+
+    root = evidence.apps_root(config.env)
+    payload, outcome = evidence.evaluate(
+        fqdn, slug, preview, config.env_path, config.env, root=root
+    )
+    evidence.write_evidence(root, fqdn, payload)
+
+    print(f"Cerulean did not answer: {error}", file=sys.stderr)
+    print(f"  {outcome.detail}", file=sys.stderr)
+    if outcome.retry:
+        print(f"  nothing was rebuilt; when it answers: {outcome.retry}", file=sys.stderr)
+    return outcome.code if outcome.code == 3 else 1
 
 
 def connect(config: Config, insecure: bool) -> Api:
@@ -242,26 +322,28 @@ def publish(api: Api, config: Config, args: argparse.Namespace) -> int:
     forward_host = config.require_forward(args.forward_host)
     forward_port = args.forward_port or config.port
 
-    cert_id = ensure_wildcard_ready(api, config)
-    print(f"Certificate: id {cert_id} covers {fqdn}")
+    try:
+        cert_id = ensure_wildcard_ready(api, config)
+        print(f"Certificate: id {cert_id} covers {fqdn}")
 
-    report = ensure_proxy_host(
-        api,
-        fqdn,
-        forward_host,
-        forward_port,
-        cert_id,
-        args.dry_run,
-        repoint=args.repoint,
-    )
+        report = ensure_proxy_host(
+            api,
+            fqdn,
+            forward_host,
+            forward_port,
+            cert_id,
+            args.dry_run,
+            repoint=args.repoint,
+        )
+    except SystemExit as error:
+        return cerulean_failure(config, slug, fqdn, False, error)
     print(f"Edge: {report}")
 
     if args.dry_run:
         print(f"\ndry run — https://{fqdn}/ would serve http://{forward_host}:{forward_port}")
         return 0
 
-    print(f"\nhttps://{fqdn}/  —  Verify with: make site-check HOST={fqdn}")
-    return 0
+    return check_after_registering(config, fqdn, slug, False)
 
 
 def preview(api: Api, config: Config, args: argparse.Namespace) -> int:
@@ -285,26 +367,29 @@ def preview(api: Api, config: Config, args: argparse.Namespace) -> int:
     forward_host = config.require_forward(args.forward_host)
     forward_port = args.forward_port or config.port
 
-    cert_id = ensure_wildcard_ready(api, config)
-    print(f"Certificate: id {cert_id} covers {fqdn}")
+    try:
+        cert_id = ensure_wildcard_ready(api, config)
+        print(f"Certificate: id {cert_id} covers {fqdn}")
 
-    report = ensure_proxy_host(
-        api,
-        fqdn,
-        forward_host,
-        forward_port,
-        cert_id,
-        args.dry_run,
-        repoint=True,
-    )
+        report = ensure_proxy_host(
+            api,
+            fqdn,
+            forward_host,
+            forward_port,
+            cert_id,
+            args.dry_run,
+            repoint=True,
+        )
+    except SystemExit as error:
+        return cerulean_failure(config, slug, fqdn, True, error)
     print(f"Edge: {report}")
 
     if args.dry_run:
         print(f"\ndry run — https://{fqdn}/ would serve http://{forward_host}:{forward_port}")
         return 0
 
-    print(f"\nhttps://{fqdn}/  —  a preview name. Nothing is published under {slug}.{config.suffix}.")
-    return 0
+    print(f"\nNothing is published under {slug}.{config.suffix}.")
+    return check_after_registering(config, fqdn, slug, True)
 
 
 def remove(api: Api, config: Config, args: argparse.Namespace) -> int:

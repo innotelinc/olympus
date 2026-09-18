@@ -294,6 +294,36 @@ export default function AdminPanel({ viewer }: { viewer: string | null }) {
                             ) : (
                               job.message || "—"
                             )}
+                            {/* What the runtime's exit code does not say: whether the
+                                name answers, and when that was last asked. */}
+                            {job.deliveryEvidence ? (
+                              <div className="hint" style={{ marginTop: 4 }}>
+                                <span
+                                  className={`pill dot-${job.deliveryEvidence.served ? "ok" : "fail"}`}
+                                  title={job.deliveryEvidence.detail}
+                                >
+                                  checked: {job.deliveryEvidence.verdict}
+                                </span>{" "}
+                                {job.deliveryEvidence.served ? (
+                                  <>served — {relativeLabel(job.deliveryEvidence.checkedAt, now)}</>
+                                ) : (
+                                  <>
+                                    {job.deliveryEvidence.detail}
+                                    {job.deliveryEvidence.retry ? (
+                                      <>
+                                        {" — no rebuild needed: "}
+                                        <span className="mono">{job.deliveryEvidence.retry}</span>
+                                      </>
+                                    ) : null}
+                                  </>
+                                )}
+                              </div>
+                            ) : job.action === "publish" || job.action === "preview" ? (
+                              <div className="hint" style={{ marginTop: 4 }}>
+                                not checked against its name —{" "}
+                                <span className="mono">make site-evidence SLUG={job.slug}</span>
+                              </div>
+                            ) : null}
                           </td>
                         </tr>
                       ))}
@@ -335,7 +365,16 @@ export default function AdminPanel({ viewer }: { viewer: string | null }) {
                     {status.queue.recent.filter((j) => j.state === "succeeded" && (j.publishedUrl || j.previewUrl)).length}
                   </div>
                   <div className="pipe-l">Live</div>
-                  <div className="pipe-sub">{status.paths.siteSuffix || "publishing not configured"}</div>
+                  <div className="pipe-sub">
+                    {status.paths.siteSuffix || "publishing not configured"}
+                    {/* The line between "the delivery ran" and "the name answers":
+                        counted here, so the number above is not read as proof. */}
+                    <br />
+                    {status.queue.recent.filter((j) => j.deliveryVerified === true).length} checked at the edge
+                    {status.queue.recent.some((j) => j.deliveryEvidence && !j.deliveryEvidence.served)
+                      ? ` · ${status.queue.recent.filter((j) => j.deliveryEvidence && !j.deliveryEvidence.served).length} not answering`
+                      : ""}
+                  </div>
                 </div>
                 <div className="pipe-stage">
                   <div className="pipe-n">∞</div>

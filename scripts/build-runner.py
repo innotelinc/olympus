@@ -879,6 +879,11 @@ class Runner:
         # between two fields and their absence.
         for name in ("published_url", "preview_url"):
             payload.setdefault(name, None)
+        # What the delivery was *checked against*, and whether it served. Always
+        # present, `null` when this job does not deliver anything (a build), so a
+        # reader never has to tell "not checked" from "the writer forgot the key".
+        for name in ("delivery_evidence", "delivery_verified"):
+            payload.setdefault(name, None)
         try:
             write_json_atomic(self.status_path(job), payload)
         except OSError as error:
@@ -955,6 +960,18 @@ class Runner:
             else:
                 code, detail, site, published_url, _unused = self.run_delivery(job, spec)
             succeeded = code == 0
+
+            # After the delivery, never instead of it: the commands may all have
+            # returned zero while the name answers nothing, and the two are reported
+            # separately so "succeeded" keeps meaning "the delivery ran". The job is
+            # not failed for this — a name that does not answer yet is not a broken
+            # build, and the retry is one command — but it is never left implied.
+            evidence = self.check_delivery(slug, action == "preview")
+            if evidence is not None and not evidence.get("served"):
+                detail = f"{detail} Checked: {evidence.get('detail')}."
+                if evidence.get("retry"):
+                    detail += f" Retry with `{evidence['retry']}`."
+
             self.write_status(
                 job,
                 **self.job_fields(spec),
@@ -967,6 +984,8 @@ class Runner:
                 site=site,
                 published_url=published_url,
                 preview_url=preview_url,
+                delivery_evidence=evidence,
+                delivery_verified=bool(evidence.get("served")) if evidence else None,
                 log_tail=log_tail(self.log_path(job)),
             )
             done = "previewed" if action == "preview" else "published"
@@ -1309,14 +1328,18 @@ class Runner:
                     if Path(command[1]).name == "studio-sites.py":
                         record = read_app_runtime(slug)
                         if record:
+                            # The retry names the edge step alone. "Run Preview It again"
+                            # was the old advice and it repackaged the project and
+                            # restarted a healthy container to register a name — which
+                            # is the cost this retry path exists to remove.
                             retry = (
-                                f"run Preview It again — no rebuild needed."
+                                f"`make edge-preview SLUG={slug}`"
                                 if preview
-                                else f"`make site-publish SLUG={slug}` — no rebuild needed."
+                                else f"`make edge-publish SLUG={slug}`"
                             )
                             detail += (
                                 f" The application itself is running on 127.0.0.1:{record.get('port')}; "
-                                f"only the edge is missing. Retry with {retry}"
+                                f"only the edge is missing. Retry with {retry} — no rebuild needed."
                             )
                     return code, detail, None, None, None
 
@@ -1364,6 +1387,57 @@ class Runner:
         if url:
             detail += f" Live at {url}."
         return 0, detail, site, url, None
+
+    def delivery_host(self, slug: str, preview: bool) -> str | None:
+        """The name this delivery was supposed to put live, or None if none was."""
+        suffix = self.site_suffix()
+        if not suffix:
+            return None
+        return f"{slug}-preview.{suffix}" if preview else f"{slug}.{suffix}"
+
+    def check_delivery(self, slug: str, preview: bool) -> dict | None:
+        """Ask whether the name serves, and keep the answer for the job status.
+
+        A zero exit code from the last step means the *registration* was written, not
+        that the name answers — the edge can accept a proxy host and still route
+        nothing, and a DNS name can be registered while nothing answers it yet. This is
+        the difference between "the commands succeeded" and "the thing is live", and
+        it is recorded rather than logged, because the panel's job row is what an
+        operator reads.
+
+        `scripts/delivery-evidence.py` owns the classification (app, name, or the
+        fault between them) and the retry command; this only carries the result.
+        """
+        fqdn = self.delivery_host(slug, preview)
+        script = self.repo / "scripts" / "delivery-evidence.py"
+        if not fqdn or not script.is_file():
+            return None
+
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                ["python3", str(script), fqdn, "--record", "--json"],
+                cwd=str(self.repo),
+                env=self.delivery_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=90,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            log(f"could not check {fqdn}: {error}")
+            return None
+
+        try:
+            payload = json.loads(result.stdout or "{}")
+        except ValueError:
+            return None
+        if not isinstance(payload, dict) or not payload.get("host"):
+            return None
+        # The check's own exit code travels with it: 3 is the one worth acting on —
+        # the app is running and only its name is missing.
+        payload["exit_code"] = result.returncode
+        return payload
 
     def publish_steps(self, slug: str, kind: str, plan: dict | None) -> list[list[str]]:
         """The commands a publish runs, in order.

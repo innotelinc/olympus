@@ -133,6 +133,23 @@ def verdict(result: dict, host: str, issuers: set[str]) -> tuple[bool, str, str 
     return False, "", f"HTTP {code} from https://{host}/"
 
 
+def check_host(host: str, env_path: Path | None = None, timeout: float = 25.0) -> dict:
+    """The whole check as data, so a caller can record it rather than re-implement it.
+
+    `scripts/delivery-evidence.py` folds this into the job record and the panel, and
+    it deliberately calls *this* function rather than repeating the logic: two
+    definitions of "a published name answers" is how a name starts being reported as
+    live in one place and broken in another.
+
+    Returns the verdict plus what the fetch saw — `code`, `final` and the body are
+    kept because "it failed" is not actionable and "redirected to the IdP" is.
+    """
+    env = load_env(env_path or REPO_ROOT / ".env")
+    result = fetch(f"https://{host}/", timeout)
+    ok, note, failure = verdict(result, host, issuer_hosts(env))
+    return {"host": host, "ok": ok, "note": note, "error": failure, **result}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Confirm a published name answers.")
     parser.add_argument("host", nargs="?", default="", help="the name to check")
@@ -153,13 +170,15 @@ def main(argv: list[str] | None = None) -> int:
     env_path = Path(args.env_file) if args.env_file else REPO_ROOT / ".env"
     issuers = issuer_hosts(load_env(env_path))
 
-    result = fetch(f"https://{host}/", args.timeout)
-    ok, note, failure = verdict(result, host, issuers)
+    # One fetch, through the same entry point `delivery-evidence.py` calls: the CLI and
+    # the recorded evidence must never be two answers to the same question.
+    checked = check_host(host, env_path, args.timeout)
+    ok, note, failure = checked["ok"], checked["note"], checked["error"]
 
     if args.json:
         import json
 
-        print(json.dumps({"host": host, "ok": ok, "note": note, "error": failure, **result}, indent=2))
+        print(json.dumps(checked, indent=2))
         return 0 if ok else 1
 
     if ok:
