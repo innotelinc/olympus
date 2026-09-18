@@ -128,7 +128,43 @@ export type BuildStatus = {
    * never registered.
    */
   previewUrl: string | null;
+  /**
+   * What the delivery was checked against, when it was checked.
+   *
+   * A zero exit code means the registration was written, not that the name answers,
+   * so the runner asks the name itself (`scripts/delivery-evidence.py`) and records
+   * the verdict here. Null on a build, and on a delivery old enough to predate the
+   * check.
+   */
+  deliveryEvidence: DeliveryEvidence | null;
+  /**
+   * Whether that check found the name serving. Null means it was never checked —
+   * deliberately not `false`, which would report an unchecked publish as broken.
+   */
+  deliveryVerified: boolean | null;
   logTail: string;
+};
+
+/**
+ * The verdict `scripts/delivery-evidence.py` recorded for a publish or a preview.
+ *
+ * `verdict` is the classifier's own word for which half failed — `served`,
+ * `name-missing`, `edge-unreachable`, `app-stopped` — and `retry` is the one command
+ * that fixes it. Both are shown as written rather than re-derived in the UI: the
+ * panel and the runner must not be two opinions about the same name.
+ */
+export type DeliveryEvidence = {
+  host: string;
+  slug: string;
+  preview: boolean;
+  served: boolean;
+  verdict: string;
+  detail: string;
+  retry: string | null;
+  edge: string;
+  app: { state: string; port: number | null; container: string | null };
+  checkedAt: string | null;
+  checks: number | null;
 };
 
 export type RunnerState = {
@@ -491,7 +527,39 @@ function toBuildStatus(raw: unknown): BuildStatus | null {
         : null,
     publishedUrl: asString(record.published_url),
     previewUrl: asString(record.preview_url),
+    deliveryEvidence: toDeliveryEvidence(record.delivery_evidence),
+    deliveryVerified:
+      typeof record.delivery_verified === "boolean" ? record.delivery_verified : null,
     logTail: asString(record.log_tail) ?? "",
+  };
+}
+
+/** The recorded check, or null when this job was never checked. */
+function toDeliveryEvidence(value: unknown): DeliveryEvidence | null {
+  if (typeof value !== "object" || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  const host = asString(raw.host);
+  // A record without a name is not evidence of anything; reporting it as an empty
+  // check would put a row in the panel that says nothing about a site.
+  if (!host) return null;
+
+  const app = typeof raw.app === "object" && raw.app !== null ? (raw.app as Record<string, unknown>) : {};
+  return {
+    host,
+    slug: asString(raw.slug) ?? "",
+    preview: raw.preview === true,
+    served: raw.served === true,
+    verdict: asString(raw.verdict) ?? "unknown",
+    detail: asString(raw.detail) ?? "",
+    retry: asString(raw.retry),
+    edge: asString(raw.edge) ?? "unknown",
+    app: {
+      state: asString(app.state) ?? "unknown",
+      port: asNumber(app.port),
+      container: asString(app.container),
+    },
+    checkedAt: asString(raw.checked_at),
+    checks: asNumber(raw.checks),
   };
 }
 
@@ -573,6 +641,8 @@ function queuedStatus(job: string): BuildStatus | null {
     site: null,
     publishedUrl: null,
     previewUrl: null,
+    deliveryEvidence: null,
+    deliveryVerified: null,
     logTail: "",
   };
 }

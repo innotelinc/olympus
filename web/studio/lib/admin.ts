@@ -90,7 +90,17 @@ export type AdminStatus = {
     recent: Array<
       Pick<
         BuildStatus,
-        "job" | "state" | "action" | "slug" | "title" | "updatedAt" | "message" | "publishedUrl" | "previewUrl"
+        | "job"
+        | "state"
+        | "action"
+        | "slug"
+        | "title"
+        | "updatedAt"
+        | "message"
+        | "publishedUrl"
+        | "previewUrl"
+        | "deliveryEvidence"
+        | "deliveryVerified"
       >
     >;
   };
@@ -355,6 +365,58 @@ function buildsCheck(builds: BuildSummary[]): AdminCheck {
   };
 }
 
+/**
+ * Deliveries that were reported done while their name does not answer.
+ *
+ * The panel's other checks are about whether the machinery is up. This one is about
+ * the gap between "the commands returned zero" and "the thing is live", which is the
+ * failure a publish can hide: the edge accepts a proxy host and routes nothing to it,
+ * and the job row says `succeeded` either way. Only deliveries the runner actually
+ * checked are counted, and an unchecked one is a warning rather than a fault — an old
+ * job is not evidence of a broken deployment.
+ */
+function deliveryCheck(recent: AdminStatus["queue"]["recent"]): AdminCheck {
+  const delivered = recent.filter((job) => job.action === "publish" || job.action === "preview");
+  if (delivered.length === 0) {
+    return {
+      id: "delivery",
+      title: "Deliveries are checked",
+      state: "ok",
+      detail: "No publish or preview has run here yet.",
+      hint: "A publish is checked against the name it registered: `make site-evidence SLUG=<slug>`. The verdict is recorded on the job.",
+    };
+  }
+
+  const unchecked = delivered.filter((job) => job.deliveryEvidence === null);
+  const checked = delivered.filter((job) => job.deliveryEvidence !== null);
+  const broken = checked.filter((job) => job.deliveryEvidence?.served === false);
+  const retryable = broken.filter((job) => job.deliveryEvidence?.retry);
+
+  if (broken.length > 0) {
+    const first = broken[0].deliveryEvidence;
+    return {
+      id: "delivery",
+      title: "Deliveries are checked",
+      state: "fail",
+      detail: `${broken.length} of ${checked.length} checked delivery(s) reported done while the name did not answer — ${first?.host}: ${first?.detail}.`,
+      hint: retryable.length
+        ? `${retryable.length} of them need only the name registered, nothing rebuilt: ${retryable[0].deliveryEvidence?.retry}.`
+        : "`make site-evidence HOST=<name>` says which half is missing.",
+    };
+  }
+
+  return {
+    id: "delivery",
+    title: "Deliveries are checked",
+    state: unchecked.length > 0 ? "warn" : "ok",
+    detail:
+      unchecked.length > 0
+        ? `${checked.length} of ${delivered.length} recent delivery(s) carry a recorded check; ${unchecked.length} predate it, so nothing says whether their names answer.`
+        : `All ${checked.length} recent delivery(s) were checked against their name and served.`,
+    hint: unchecked.length > 0 ? "`make site-evidence SLUG=<slug>` checks and records one now." : undefined,
+  };
+}
+
 function authCheck(
   config: ReturnType<typeof readAuthConfig>,
   session: Session | null,
@@ -472,6 +534,11 @@ export async function collectStatus(session: Session | null = null): Promise<Adm
       message: status.message,
       publishedUrl: status.publishedUrl,
       previewUrl: status.previewUrl,
+      // The check, not just the address: a publish whose name was registered and
+      // whose name does not answer is exactly the row an operator needs, and the
+      // published URL alone reads as success.
+      deliveryEvidence: status.deliveryEvidence,
+      deliveryVerified: status.deliveryVerified,
     })),
   };
 
@@ -522,6 +589,7 @@ export async function collectStatus(session: Session | null = null): Promise<Adm
     },
     runnerCheck(runner),
     buildsCheck(builds),
+    deliveryCheck(queue.recent),
     authCheck(config, session),
     adminPolicyCheck(config),
     tenancyCheck(),

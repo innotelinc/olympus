@@ -6,7 +6,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup env-sync env-sync-write doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger dispatch-status lap-record factory-arm factory-disarm app plan new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir tui docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish gateway-edge-check
+.PHONY: site-evidence edge-publish edge-preview help setup env-sync env-sync-write doctor up down logs ps check secret-scan secret-scan-history check-commits check-compose factory-doctor factory-trigger dispatch-status lap-record factory-arm factory-disarm app plan new-request builds prune build-runner-install build-runner-check build-runner-list test-runner studio-install studio-dev studio-build studio studio-test studio-check studio-e2e studio-oidc studio-oidc-check studio-token-check studio-token-rotate studio-export-dir studio-build-queue-dir tui docker-build docker-up docker-up-host docker-down docker-down-host docker-logs docker-ps docker-ps-host docker-shell docker-app docker-clean docker-studio vault-bootstrap vault-renew sites-up sites-down site-package site-publish site-unpublish sites-wildcard sites-list site-check app-package app-up app-down app-remove apps-list app-publish gateway-edge-check
 
 help: ## Show this help message
 	@echo "olympus — operator workflow"
@@ -407,9 +407,27 @@ app-publish: ## Package, run and publish an app on <slug>.<SITE_HOST_SUFFIX> (SL
 # 307/302 by design and used to be reported FAILED — two of the six names this is
 # pointed at. The verdict says which gate answered instead; a name that redirects
 # somewhere that is not the configured issuer still fails. scripts/site-check.py.
-site-check: ## Confirm a published name answers (HOST=<name>)
-	@if [ -z "$(HOST)" ]; then echo "usage: make site-check HOST=<name>" >&2; exit 2; fi
-	python3 scripts/site-check.py "$(HOST)" $(ARGS)
+# The assertion's two halves, in the order a failure needs them. `site-check` asks
+# whether the name answers; this asks *why not* when it does not — the app or the
+# name — and records the answer under the apps root so the panel shows what a
+# publish was checked against rather than only that it returned zero.
+#
+# Exit 3 is the state worth knowing: the app is running and only its name is
+# missing, so `make edge-publish`/`edge-preview` fixes it and nothing is rebuilt.
+site-evidence: ## Check (and record) whether a name really serves (SLUG=<slug> | HOST=<name>)
+	@if [ -z "$(SLUG)$(HOST)" ]; then echo "usage: make site-evidence SLUG=<slug> [ARGS=--preview]" >&2; exit 2; fi
+	python3 scripts/delivery-evidence.py $(if $(HOST),"$(HOST)","$(SLUG)") --record $(ARGS)
+
+# The retry action the roadmap asks for, and it is one command with no build in it:
+# registering a name is an edge operation, and an operator whose app is up and whose
+# name is missing should not have to repackage a container to fix that.
+edge-publish: ## Re-register an already-running app's name at the edge (SLUG=<slug>)
+	@if [ -z "$(SLUG)" ]; then echo "usage: make edge-publish SLUG=<slug>" >&2; exit 2; fi
+	python3 scripts/studio-sites.py --publish "$(SLUG)" $(ARGS)
+
+edge-preview: ## Register (or retry) an app's preview name at the edge (SLUG=<slug>)
+	@if [ -z "$(SLUG)" ]; then echo "usage: make edge-preview SLUG=<slug>" >&2; exit 2; fi
+	python3 scripts/studio-sites.py --preview "$(SLUG)" $(ARGS)
 
 docker-shell: ## Shell into the running Olympus container
 	docker compose exec olympus bash
