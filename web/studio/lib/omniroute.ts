@@ -50,11 +50,22 @@ const DEFAULT_BASE_URL = "http://192.168.1.46:20129/v1";
 const DEFAULT_CHAT_PATH = "/chat/completions";
 /**
  * What an unset `OMNIROUTE_MODEL` means, and therefore what every build uses
- * unless somebody chooses otherwise: OmniRoute's free router. It is the default
- * because a build that spends nothing is the right posture for a tool people are
- * invited to try — a paid default turns a first experiment into a provider bill.
+ * unless somebody chooses otherwise. It is a *free* model, because a build that
+ * spends nothing is the right posture for a tool people are invited to try and a
+ * paid default turns a first experiment into a provider bill.
+ *
+ * It is a named free model rather than OmniRoute's `auto/best-free` router, and
+ * that is a measured choice, not a preference. Called on this gateway on
+ * 2026-09-19, `auto/best-free` returns **502**: its candidate chain is dominated
+ * by free providers that cannot serve the gateway — the OpenCode free tier
+ * refuses outright (`403 … can only be used from within OpenCode`) and Felo's
+ * free tier fails at thread creation (`400`/`429`) — and the router reports the
+ * accumulated failures rather than falling through to a provider that works.
+ * `auto/best-free` stays in `MODEL_PRESETS`, where it is still the right label for
+ * "the strongest free provider"; it just cannot be what an unset default resolves
+ * to while it answers with an error. See `docs/stack.md`.
  */
-const DEFAULT_MODEL = "auto/best-free";
+export const DEFAULT_MODEL = "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free";
 
 /**
  * The presets the picker offers above the raw model list.

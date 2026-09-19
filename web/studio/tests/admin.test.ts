@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { classifyGatewayUrl, collectStatus, listBuilds, worstState, type AdminCheck } from "@/lib/admin";
-import { resetModelCache } from "@/lib/omniroute";
+import { DEFAULT_MODEL, resetModelCache } from "@/lib/omniroute";
 
 // The repo .env loader would otherwise put OIDC settings back after a test deletes
 // them, on any machine whose checkout carries credentials. See models-route.test.ts.
@@ -33,7 +33,7 @@ const MANAGED = [
 
 const CATALOG = {
   data: [
-    { id: "auto/coding", owned_by: "combo" },
+    { id: DEFAULT_MODEL, owned_by: "combo" },
     { id: "anthropic/claude-3-5", owned_by: "anthropic", context_length: 200000 },
     { id: "openai/gpt-4o", owned_by: "openai", context_length: 128000 },
   ],
@@ -197,7 +197,7 @@ describe("the collected panel", () => {
 
     expect(state.gateway.door).toBe(true);
     expect(state.gateway.probe).toMatchObject({ ok: true, models: 3, providers: 3, combos: 1 });
-    expect(state.gateway.resolvedModel).toBe("auto/coding");
+    expect(state.gateway.resolvedModel).toBe(DEFAULT_MODEL);
     expect(state.runner).toMatchObject({ live: true, host: "olympus-host", pid: 4242 });
     expect(state.queue).toMatchObject({ running: 1, finished: 1 });
     expect(state.queue.recent[0].state).toBe("running");
@@ -305,8 +305,9 @@ describe("the collected panel", () => {
     const model = check(state.checks, "model");
     expect(model.state).toBe("warn");
     expect(model.detail).toMatch(/no longer linked in/i);
-    // The fallback is OmniRoute's own router, which survives a provider going away.
-    expect(state.gateway.resolvedModel).toBe("auto/coding");
+    // The fallback is the free default, which is a model the gateway has linked
+    // in — so a provider being unlinked never leaves a build with nothing to run.
+    expect(state.gateway.resolvedModel).toBe(DEFAULT_MODEL);
   });
 
   it("counts what the queue is doing rather than what it was asked to do", async () => {

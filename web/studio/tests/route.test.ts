@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { POST } from "@/app/api/generate/route";
+import { DEFAULT_MODEL } from "@/lib/omniroute";
 import { withPlan } from "./helpers/plan";
 
 // The route calls loadRepoEnv(), which reads the repo-root .env. Deleting a key
@@ -168,7 +169,7 @@ describe("streaming", () => {
 
     const body = JSON.parse(String(mock.mock.calls[0][1]?.body));
     expect(body.stream).toBe(true);
-    expect(body.model).toBe("auto/coding");
+    expect(body.model).toBe(DEFAULT_MODEL);
     expect(JSON.stringify(body.messages)).toContain("<button>go</button>");
     expect(body.messages.at(-1).content).toBe("make the button blue");
   });

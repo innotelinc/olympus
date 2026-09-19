@@ -311,8 +311,8 @@ The sub-path is deliberate rather than extra keys in the secret above: a KV v2
 write replaces the whole secret, so folding an unrelated credential into
 `cerulean/olympus` would make every re-run a quiet coin flip between the two.
 
-Two things about that backup are traps rather than details, and both cost a
-working gateway before they cost anything visible.
+Three things about that backup are traps rather than details, and each costs a
+working gateway before it costs anything visible.
 
 **The data volume has to be mounted where the image reads it.** OmniRoute's image
 sets `DATA_DIR=/app/data`; a compose file that mounts the volume at `/data`
@@ -323,9 +323,33 @@ next `up --force-recreate`, which discards the credentials and turns every
 longer guesses that path: it asks the running container for `DATA_DIR`, resolves
 it through the container's mounts, and refuses with that explanation when the
 data dir is not mounted at all, because in that state there is nothing durable to
-back up and a volume sitting beside it is a decoy. If you change the service's
-mount, run `make gateway-vault-check` — it compares against the live gateway, so
-it fails on a mount that moved rather than reporting the stale copy as fine.
+*find* — and finding it must not depend on `docker` being on the timer's `PATH`,
+which it was: a unit that could not run `docker inspect` fell through to the
+host-run location and reported `could not read /root/.omniroute/server.env` while
+the live volume sat beside it. It now searches the Docker volumes for the file
+that identifies a gateway data dir (`server.env`, by name and by
+`STORAGE_ENCRYPTION_KEY` inside it) and refuses outright when two volumes look
+like one, rather than guessing which is live.
+
+**The free router is not a working default on this gateway, and that is
+measured.** `auto/best-free` returned **502** on 2026-09-19. Its candidate chain
+is dominated by free providers that cannot serve the gateway — OpenCode's free
+tier refuses with `403 … can only be used from within OpenCode`, Felo's fails at
+thread creation with `400`/`429` — and the router answers with the accumulated
+failures rather than falling through to a provider that works. Setting
+`is_active = 0` on the two `opencode` rows in `provider_connections` removed those
+errors and left the Felo ones (its connection is not in that table), so the
+router still cannot be what an unset default resolves to. Studio therefore
+defaults to a named free model (`openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`,
+verified answering) and keeps `auto/best-free` in the preset list, where the label
+is still right. To make the router usable: get the Felo free provider out of the
+chain, or put a provider with real credits behind it.
+
+**A stale volume beside the live one is a decoy, so nothing here guesses.** A
+path-only backup will happily measure a volume the gateway stopped using and
+report a healthy copy of it. If you change the service's mount, run
+`make gateway-vault-check` — it compares against the live gateway, so it fails on
+a mount that moved rather than reporting the stale copy as fine.
 
 **The CLI has to be findable from a timer's `PATH`.** The export half of the
 backup shells out to `omniroute auth export`, and `omniroute` usually lives in a
