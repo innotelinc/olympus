@@ -12,6 +12,8 @@ Run: python3 -m unittest discover -s scripts/tests -v
 from __future__ import annotations
 
 import importlib.util
+import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -76,6 +78,71 @@ class BaseUrl(unittest.TestCase):
         self.assertEqual(
             restore.normalise_base_url("https://gw.example.test/omniroute"), "https://gw.example.test/omniroute"
         )
+
+
+class FindCli(unittest.TestCase):
+    """Where the CLI is found from — because a timer's PATH is not a login shell's.
+
+    The bug this pins: the operator who runs a backup by hand has nvm's bin dir on
+    PATH, and the systemd unit that runs it daily does not, so the export half of
+    the backup only ever worked when a human was logged in.
+    """
+
+    def setUp(self) -> None:
+        self._saved_env = dict(os.environ)
+        self._saved_home = os.environ.get("HOME")
+        self._real_path = restore.shutil.which
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ.pop("OMNIROUTE_BIN", None)
+
+    def tearDown(self) -> None:
+        restore.shutil.which = self._real_path
+        self._tmp.cleanup()
+        os.environ.clear()
+        os.environ.update(self._saved_env)
+        if self._saved_home is None:
+            os.environ.pop("HOME", None)
+
+    def fake_cli(self, relative: str) -> Path:
+        path = Path(self._tmp.name) / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        return path
+
+    def test_path_wins_over_the_fallback_globs(self) -> None:
+        restore.shutil.which = lambda name: "/usr/bin/omniroute" if name == "omniroute" else None
+        self.assertEqual(restore.find_cli(), "/usr/bin/omniroute")
+
+    def test_an_explicit_binary_is_used(self) -> None:
+        binary = self.fake_cli("custom/omniroute")
+        os.environ["OMNIROUTE_BIN"] = str(binary)
+        restore.shutil.which = lambda name: None
+        self.assertEqual(restore.find_cli(), str(binary))
+
+    def test_an_explicit_binary_that_is_not_executable_is_refused(self) -> None:
+        path = Path(self._tmp.name) / "not-a-binary"
+        path.write_text("x")
+        os.environ["OMNIROUTE_BIN"] = str(path)
+        restore.shutil.which = lambda name: None
+        with self.assertRaises(restore.GatewayError):
+            restore.find_cli()
+
+    def test_an_nvm_install_is_found_with_a_minimal_path(self) -> None:
+        # What the timer actually looks like: no nvm on PATH, only the file on disk.
+        binary = self.fake_cli("home/.nvm/versions/node/v24.20.0/bin/omniroute")
+        os.environ["HOME"] = str(Path(self._tmp.name) / "home")
+        restore.shutil.which = lambda name: None
+        self.assertEqual(restore.find_cli(), str(binary))
+
+    def test_a_missing_cli_names_the_ways_to_point_at_it(self) -> None:
+        os.environ["HOME"] = str(Path(self._tmp.name) / "empty-home")
+        restore.shutil.which = lambda name: None
+        with self.assertRaises(restore.GatewayError) as caught:
+            restore.find_cli()
+        message = str(caught.exception)
+        self.assertIn("OMNIROUTE_BIN", message)
+        self.assertIn("--creds", message)
 
 
 if __name__ == "__main__":

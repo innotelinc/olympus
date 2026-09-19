@@ -311,6 +311,34 @@ The sub-path is deliberate rather than extra keys in the secret above: a KV v2
 write replaces the whole secret, so folding an unrelated credential into
 `cerulean/olympus` would make every re-run a quiet coin flip between the two.
 
+Two things about that backup are traps rather than details, and both cost a
+working gateway before they cost anything visible.
+
+**The data volume has to be mounted where the image reads it.** OmniRoute's image
+sets `DATA_DIR=/app/data`; a compose file that mounts the volume at `/data`
+leaves the gateway keeping its connections in the container's own writable layer.
+Nothing looks wrong — it answers, and its free providers keep working — until the
+next `up --force-recreate`, which discards the credentials and turns every
+`auto/coding` call into `503 No credentials for opencode`. The backup script no
+longer guesses that path: it asks the running container for `DATA_DIR`, resolves
+it through the container's mounts, and refuses with that explanation when the
+data dir is not mounted at all, because in that state there is nothing durable to
+back up and a volume sitting beside it is a decoy. If you change the service's
+mount, run `make gateway-vault-check` — it compares against the live gateway, so
+it fails on a mount that moved rather than reporting the stale copy as fine.
+
+**The CLI has to be findable from a timer's `PATH`.** The export half of the
+backup shells out to `omniroute auth export`, and `omniroute` usually lives in a
+user install (`~/.nvm/versions/node/*/bin`, `~/.volta/bin`, `~/.local/bin`) that
+an interactive shell has on `PATH` and a systemd unit does not. The script now
+falls back to those locations and honours `OMNIROUTE_BIN`; the failure it used to
+produce was the quiet kind, where running the backup by hand succeeded and the
+nightly one failed, so "the backup is current" was only ever true just after
+someone ran it. A backup that finds *no* connections is refused rather than
+stored: an empty export is how a gateway on the wrong data dir looks, and writing
+it over the good copy destroys the credentials `--restore` needs. Pass `--force`
+if the emptiness is genuinely the truth.
+
 ```bash
 make studio-token-check                          # remaining days; exit 2 once lapsing
 make studio-token-rotate AUTHENTIK_HOST=<host>   # rebuild and re-date it

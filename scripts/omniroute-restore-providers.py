@@ -37,6 +37,7 @@ dropped.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import shutil
@@ -50,9 +51,55 @@ DEFAULT_SOURCE = "/root/.omniroute"
 DEFAULT_TARGET = os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1")
 REQUEST_TIMEOUT = 30
 
+# Where a Node user-install actually puts the CLI. A systemd timer runs with the
+# minimal PATH (`/usr/local/sbin:...:/bin`), which does not include nvm, volta or
+# `~/.local/bin` — so `omniroute` is on PATH for the operator who runs the backup
+# by hand and invisible to the timer that is supposed to run it daily. That is
+# not a cosmetic difference: the export is the half of the backup that reads the
+# connections, so the timer's copy failed every night while the manual one
+# worked, and "the backup is current" was only ever true right after someone ran
+# it. These globs are searched after PATH so an explicit install always wins.
+CLI_FALLBACK_GLOBS = (
+    "~/.nvm/versions/node/*/bin/omniroute",
+    "~/.volta/bin/omniroute",
+    "~/.local/bin/omniroute",
+    "/usr/local/bin/omniroute",
+    "/opt/homebrew/bin/omniroute",
+)
+
 
 class GatewayError(RuntimeError):
     """A gateway call failed; the message is safe to show the operator."""
+
+
+def find_cli() -> str:
+    """Locate the OmniRoute CLI, or raise with the ways to point at it.
+
+    `OMNIROUTE_BIN` wins (an explicit statement about this host), then PATH, then
+    the user-install locations above. Newest nvm version first: an old node in the
+    list is still runnable but not the one anyone means.
+    """
+    override = (os.environ.get("OMNIROUTE_BIN") or "").strip()
+    if override:
+        if os.access(override, os.X_OK) and os.path.isfile(override):
+            return override
+        raise GatewayError(f"OMNIROUTE_BIN is set to {override}, which is not an executable file")
+
+    found = shutil.which("omniroute")
+    if found:
+        return found
+
+    for pattern in CLI_FALLBACK_GLOBS:
+        matches = sorted(glob.glob(os.path.expanduser(pattern)), reverse=True)
+        for candidate in matches:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+
+    raise GatewayError(
+        "`omniroute` is not on PATH and not in the usual user-install locations "
+        "(nvm/volta/~/.local/bin). Install the OmniRoute CLI, set OMNIROUTE_BIN to "
+        "its full path, or pass --creds FILE."
+    )
 
 
 def normalise_base_url(url: str) -> str:
@@ -130,11 +177,7 @@ def export_credentials(source: str, creds_file: str | None) -> list[dict]:
         entries = parsed if isinstance(parsed, list) else parsed.get("connections", [])
         return [entry for entry in entries if isinstance(entry, dict)]
 
-    binary = shutil.which("omniroute")
-    if not binary:
-        raise GatewayError(
-            "`omniroute` is not on PATH; install the OmniRoute CLI or pass --creds FILE"
-        )
+    binary = find_cli()
     if not os.path.isdir(source):
         raise GatewayError(f"source data dir not found: {source}")
 

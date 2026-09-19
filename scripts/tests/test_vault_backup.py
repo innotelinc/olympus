@@ -180,6 +180,61 @@ class DetectDataDir(unittest.TestCase):
                 os.environ["OMNIROUTE_DATA_DIR"] = saved
 
 
+class DetectDataDirViaTheContainer(unittest.TestCase):
+    """The data dir is whatever the *running* image reads — proved, not guessed.
+
+    The failure these pin, measured on this platform: compose mounted the volume
+    at `/data` while the image read `/app/data`, so the gateway ran on its
+    container's writable layer (connections lost on every recreate) and a
+    path-guessing backup measured the unused volume beside it and reported a
+    successful backup of the wrong directory.
+    """
+
+    def setUp(self) -> None:
+        self._saved_env = os.environ.pop("OMNIROUTE_DATA_DIR", None)
+        self._real = (backup.shutil.which, backup.inspect_mounts, backup.container_data_dir)
+        backup.shutil.which = lambda name: "/usr/bin/docker" if name == "docker" else None
+
+    def tearDown(self) -> None:
+        backup.shutil.which, backup.inspect_mounts, backup.container_data_dir = self._real
+        if self._saved_env is not None:
+            os.environ["OMNIROUTE_DATA_DIR"] = self._saved_env
+
+    def arrange(self, data_dir_env: list[str], mounts: list[dict]) -> None:
+        backup.container_data_dir = lambda _docker, _container: list(data_dir_env)
+        backup.inspect_mounts = lambda _docker, _container: list(mounts)
+
+    def test_the_mount_at_the_images_own_data_dir_wins(self) -> None:
+        self.arrange(
+            ["/app/data"],
+            [
+                {"Destination": "/data", "Source": "/vol/stale"},
+                {"Destination": "/app/data", "Source": "/vol/live"},
+            ],
+        )
+        self.assertEqual(backup.detect_data_dir("", "omniroute"), Path("/vol/live"))
+
+    def test_a_data_dir_that_is_not_mounted_is_refused_not_guessed(self) -> None:
+        # The gateway is on its container layer: there is nothing to back up, and
+        # the volume next to it is a decoy. Naming that is the whole value here.
+        self.arrange(["/app/data"], [{"Destination": "/data", "Source": "/vol/stale"}])
+        with self.assertRaises(backup.Failure) as caught:
+            backup.detect_data_dir("", "omniroute")
+        message = str(caught.exception)
+        self.assertIn("/app/data", message)
+        self.assertIn("writable layer", message)
+
+    def test_an_image_that_publishes_no_data_dir_falls_back_to_the_real_mount(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "server.env").write_text("STORAGE_ENCRYPTION_KEY=x\n")
+            self.arrange([], [{"Destination": "/data", "Source": tmp}])
+            self.assertEqual(backup.detect_data_dir("", "omniroute"), Path(tmp))
+
+    def test_no_container_at_all_is_the_host_run_gateway(self) -> None:
+        self.arrange([], [])
+        self.assertEqual(backup.detect_data_dir("", "missing"), backup.DEFAULT_HOST_DATA_DIR)
+
+
 class Backup(unittest.TestCase):
     def setUp(self) -> None:
         self._saved = dict(os.environ)
@@ -213,6 +268,33 @@ class Backup(unittest.TestCase):
         vault = StubVault()
         self.assertEqual(backup.do_backup(vault, self.data_dir, dry_run=True, as_json=False), 0)
         self.assertEqual(vault.writes, [])
+
+    def test_an_empty_export_never_overwrites_a_stored_backup(self) -> None:
+        # The signature of a gateway running on a fresh or wrongly mounted volume:
+        # it answers on its free providers and looks healthy. Storing those zero
+        # connections would destroy the only copy of the credentials.
+        vault = StubVault({backup.KEY_PROVIDERS: json.dumps([{"provider": "p"}] * 3)})
+        backup.export_connections = lambda _dir: []
+        with self.assertRaises(backup.Failure) as caught:
+            backup.do_backup(vault, self.data_dir, dry_run=False, as_json=False)
+        self.assertIn("--restore", str(caught.exception))
+        self.assertEqual(vault.writes, [])
+
+    def test_an_empty_export_is_stored_when_forced(self) -> None:
+        vault = StubVault({backup.KEY_PROVIDERS: json.dumps([{"provider": "p"}] * 3)})
+        backup.export_connections = lambda _dir: []
+        self.assertEqual(backup.do_backup(vault, self.data_dir, dry_run=False, as_json=False, force=True), 0)
+        self.assertEqual(len(vault.writes), 1)
+
+    def test_a_smaller_export_is_stored_and_says_so(self) -> None:
+        # Providers are really removed; the backup follows the gateway and the
+        # report is where a surprise shows up.
+        vault = StubVault({backup.KEY_PROVIDERS: json.dumps([{"provider": "p"}] * 3)})
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            self.assertEqual(backup.do_backup(vault, self.data_dir, dry_run=False, as_json=False), 0)
+        self.assertEqual(len(vault.writes), 1)
+        self.assertIn("fewer than the 3 stored", buffer.getvalue())
 
     def test_the_report_never_prints_a_stored_value(self) -> None:
         vault = StubVault()
