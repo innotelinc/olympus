@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_MODEL,
   GatewayError,
   chatCompletionsUrl,
   chooseModel,
@@ -68,7 +69,7 @@ describe("readConfig", () => {
     // `127.0.0.1:20128` is Studio itself, which is how a rebuild once turned
     // every generation into ECONNREFUSED with nothing in the gateway's log.
     expect(config.baseUrl).toBe("http://192.168.1.46:20129/v1");
-    expect(config.model).toBe("auto/coding");
+    expect(config.model).toBe(DEFAULT_MODEL);
     expect(config.chatPath).toBe("/chat/completions");
   });
 
@@ -252,7 +253,13 @@ describe("findModel", () => {
 
 describe("resolveModel", () => {
   const config = { baseUrl: "http://gw/v1", apiKey: "k", model: "auto/coding", chatPath: "/chat/completions" };
-  const models = parseModels({ data: [{ id: "auto/coding", owned_by: "combo" }, { id: "openai/gpt-4o", owned_by: "openai" }] });
+  const models = parseModels({
+    data: [
+      { id: "auto/coding", owned_by: "combo" },
+      { id: DEFAULT_MODEL, owned_by: "openai" },
+      { id: "openai/gpt-4o", owned_by: "openai" },
+    ],
+  });
 
   it("uses a requested model that is linked in", () => {
     expect(resolveModel(config, models, "openai/gpt-4o")).toEqual({ model: "openai/gpt-4o", source: "requested" });
@@ -264,9 +271,9 @@ describe("resolveModel", () => {
     expect(resolved.reason).toMatch(/not one of the/);
   });
 
-  it("falls back to the combo when the configured default is gone", () => {
+  it("falls back to the free default when the configured default is gone", () => {
     const resolved = resolveModel({ ...config, model: "retired/model" }, models, "");
-    expect(resolved.model).toBe("auto/coding");
+    expect(resolved.model).toBe(DEFAULT_MODEL);
     expect(resolved.source).toBe("fallback");
     expect(resolved.reason).toMatch(/retired\/model/);
   });

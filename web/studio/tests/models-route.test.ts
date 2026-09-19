@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GET } from "@/app/api/models/route";
-import { resetModelCache } from "@/lib/omniroute";
+import { DEFAULT_MODEL, resetModelCache } from "@/lib/omniroute";
 
 // See plan-route.test.ts: the repo .env loader would otherwise put OIDC settings
 // back after a test deletes them.
@@ -57,9 +57,9 @@ function stubCatalog(payload: unknown, status = 200) {
 
 const CATALOG = {
   data: [
-    { id: "openai/gpt-4o", owned_by: "openai", context_length: 128000 },
-    { id: "auto/coding", owned_by: "combo" },
-    { id: "anthropic/claude-3-5", owned_by: "anthropic", context_length: 200000 },
+    { id: "openai/gpt-4o:free", owned_by: "openai", context_length: 128000 },
+    { id: DEFAULT_MODEL, owned_by: "combo" },
+    { id: "anthropic/claude-3-5:free", owned_by: "anthropic", context_length: 200000 },
   ],
 };
 
@@ -84,9 +84,9 @@ describe("the catalogue", () => {
 
     const body = await (await get()).json();
     expect(body.models.map((model: { id: string }) => model.id)).toEqual([
-      "auto/coding",
-      "anthropic/claude-3-5",
-      "openai/gpt-4o",
+      DEFAULT_MODEL,
+      "anthropic/claude-3-5:free",
+      "openai/gpt-4o:free",
     ]);
   });
 
@@ -101,8 +101,8 @@ describe("the catalogue", () => {
     stubCatalog(CATALOG);
 
     const body = await (await get()).json();
-    expect(body.default).toBe("auto/coding");
-    expect(body.configured).toBe("auto/coding");
+    expect(body.default).toBe(DEFAULT_MODEL);
+    expect(body.configured).toBe(DEFAULT_MODEL);
   });
 
   it("serves the cached list without asking the gateway twice", async () => {

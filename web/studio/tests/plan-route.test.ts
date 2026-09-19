@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { POST } from "@/app/api/plan/route";
-import { resetModelCache } from "@/lib/omniroute";
+import { DEFAULT_MODEL, resetModelCache } from "@/lib/omniroute";
 import { resetRateLimits } from "@/lib/ratelimit";
 
 // The route calls loadRepoEnv(), which reads the repo-root .env. Deleting a key
@@ -58,8 +58,8 @@ function post(payload: unknown, headers: Record<string, string> = {}): Promise<R
 
 const MODELS = {
   data: [
-    { id: "auto/coding", owned_by: "combo" },
-    { id: "openai/gpt-4o", owned_by: "openai" },
+    { id: DEFAULT_MODEL, owned_by: "combo" },
+    { id: "openai/gpt-4o:free", owned_by: "openai" },
   ],
 };
 
@@ -149,7 +149,7 @@ describe("planning", () => {
     const body = await response.json();
     expect(body.plan.slug).toBe("weight-tracker");
     expect(body.plan.run.start).toBe("npm start");
-    expect(body.model).toBe("auto/coding");
+    expect(body.model).toBe(DEFAULT_MODEL);
   });
 
   it("asks the planner to decide what this is, rather than being told", async () => {
@@ -277,8 +277,11 @@ describe("planning", () => {
   it("accepts a model the gateway has linked in", async () => {
     stubGateway(completionResponse(GOOD_PLAN));
 
-    const response = await post({ prompt: "a tracker", model: "openai/gpt-4o" });
+    // A *free* model on purpose: the paid ones are gated on a Magnate
+    // entitlement this suite does not configure, and a test that asked for one
+    // would be testing the gate rather than the model choice.
+    const response = await post({ prompt: "a tracker", model: "openai/gpt-4o:free" });
     expect(response.status).toBe(200);
-    expect((await response.json()).model).toBe("openai/gpt-4o");
+    expect((await response.json()).model).toBe("openai/gpt-4o:free");
   });
 });
