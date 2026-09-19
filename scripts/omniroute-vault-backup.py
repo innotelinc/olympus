@@ -242,9 +242,10 @@ def detect_data_dir(explicit: str, container: str) -> Path:
     """Where the gateway's state lives.
 
     An explicit path wins; then `OMNIROUTE_DATA_DIR`; then the running container's
-    mount of `/app/data` (the deployment in this repository); then the host-run
-    data dir setup.sh uses. The container is asked rather than assumed, because
-    the whole point of this script is that the location is easy to get wrong.
+    mount of the directory the image actually reads (`DATA_DIR`, `/app/data`); then
+    a mount at a path this image has used (`/data`); then the host-run data dir
+    setup.sh uses. The container is asked rather than assumed, because the whole
+    point of this script is that the location is easy to get wrong.
     """
     if explicit:
         return Path(explicit).expanduser()
@@ -254,23 +255,86 @@ def detect_data_dir(explicit: str, container: str) -> Path:
 
     docker = shutil.which("docker")
     if docker:
-        try:
-            result = subprocess.run(
-                [docker, "inspect", container, "--format", "{{json .Mounts}}"],
-                capture_output=True,
-                text=True,
-                timeout=20,
+        mounts = inspect_mounts(docker, container)
+        wanted = container_data_dir(docker, container)
+
+        # The image's own DATA_DIR decides, not a hardcoded path. This is the
+        # difference between reading the gateway and reading a stale volume beside
+        # it: measured on this platform, compose mounted the volume at `/data`
+        # while the image read `/app/data`, so the gateway ran on its container's
+        # writable layer — provider connections vanish on every recreate — and a
+        # path-guessing backup happily reported the unused volume.
+        for destination in wanted:
+            for mount in mounts:
+                if str(mount.get("Destination") or "") == destination and mount.get("Source"):
+                    return Path(str(mount["Source"]))
+
+        # An image that does not publish DATA_DIR still mounts one of the paths
+        # this one has used. Trust the mount that actually holds a `server.env`:
+        # that file is the data dir, wherever it is.
+        for known in ("/app/data", "/data"):
+            for mount in mounts:
+                if str(mount.get("Destination") or "") != known or not mount.get("Source"):
+                    continue
+                source = Path(str(mount["Source"]))
+                if (source / "server.env").is_file():
+                    return source
+
+        # DATA_DIR known and mounted nowhere: the gateway's state is in its
+        # container's writable layer, so there is nothing durable to back up. Say
+        # that, rather than measuring some other directory and reporting a healthy
+        # backup of it. (A host-run gateway has no container to ask and falls
+        # through to the host data dir below.)
+        if wanted and mounts:
+            raise Failure(
+                f"the gateway's data dir ({wanted[0]}) is not a volume mount: its\n"
+                "provider connections live in the container's writable layer and are lost\n"
+                "on the next recreate. Mount the data volume there (see the `omniroute`\n"
+                "service in 2-voice/capstone/docker-compose.yml), or point\n"
+                "OMNIROUTE_DATA_DIR / --data-dir at the real data dir."
             )
-        except (OSError, subprocess.SubprocessError):
-            result = None
-        if result is not None and result.returncode == 0 and result.stdout.strip():
-            try:
-                for mount in json.loads(result.stdout):
-                    if mount.get("Destination") == "/app/data" and mount.get("Source"):
-                        return Path(str(mount["Source"]))
-            except ValueError:
-                pass
     return DEFAULT_HOST_DATA_DIR
+
+
+def inspect_mounts(docker: str, container: str) -> list[dict]:
+    """The container's mounts, or [] when it cannot be asked."""
+    try:
+        result = subprocess.run(
+            [docker, "inspect", container, "--format", "{{json .Mounts}}"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    try:
+        mounts = json.loads(result.stdout)
+    except ValueError:
+        return []
+    return mounts if isinstance(mounts, list) else []
+
+
+def container_data_dir(docker: str, container: str) -> list[str]:
+    """`DATA_DIR` as the running container sees it — the destination, not a guess."""
+    try:
+        result = subprocess.run(
+            [docker, "inspect", container, "--format", "{{range .Config.Env}}{{println .}}{{end}}"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    for line in result.stdout.splitlines():
+        if line.startswith("DATA_DIR="):
+            value = line.partition("=")[2].strip()
+            if value:
+                return [value]
+    return []
 
 
 def read_server_env(data_dir: Path) -> str:
@@ -336,10 +400,34 @@ def redact(value: object) -> str:
 # --- modes --------------------------------------------------------------------
 
 
-def do_backup(vault: Vault, data_dir: Path, dry_run: bool, as_json: bool) -> int:
+def do_backup(vault: Vault, data_dir: Path, dry_run: bool, as_json: bool, force: bool = False) -> int:
+    stored_values, _, _ = vault.read()
+    stored_count = count_providers(stored_values)
+
     server_env = read_server_env(data_dir)
     entries = export_connections(data_dir)
     providers_json = json.dumps(entries, indent=2)
+
+    # An *empty* export is the one case where "always write what you find" is the
+    # wrong rule. It is the signature of the failure this stack keeps meeting: a
+    # gateway recreated on a fresh (or wrongly mounted) volume answers on its
+    # free providers and looks healthy, while the nightly timer stores that
+    # emptiness over the good copy and the only record of the credentials is gone
+    # before anyone notices. A smaller-but-non-empty backup is left alone to be
+    # truthful — providers really are removed — so only the total loss is refused,
+    # unless --force says the emptiness is the truth.
+    if not dry_run and not force and not entries and stored_count:
+        raise Failure(
+            f"refusing to store 0 connections over the {stored_count} already in\n"
+            f"{vault.secret_path}: an empty export is how a gateway running on the wrong\n"
+            "data dir looks, and writing it would destroy the only copy. Check which data\n"
+            "dir the gateway is actually serving from (--data-dir / OMNIROUTE_DATA_DIR —\n"
+            "the container's own mount is the authority), repair the gateway\n"
+            "(`--restore` puts the stored connections back), then re-run. Pass --force\n"
+            "only if the gateway really has no connections."
+        )
+
+    shrunk = bool(stored_count) and len(entries) < stored_count
 
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     values = {
@@ -367,6 +455,7 @@ def do_backup(vault: Vault, data_dir: Path, dry_run: bool, as_json: bool) -> int
         version = vault.write(values)
         report["written"] = True
         report["version"] = version
+        report["replaced"] = stored_count
 
     if as_json:
         print(json.dumps(report, indent=2))
@@ -382,6 +471,11 @@ def do_backup(vault: Vault, data_dir: Path, dry_run: bool, as_json: bool) -> int
         print(f"stored     version {version}, at {stamp}")
     if not entries:
         print("warning: no connections were exported — back this up only if that is correct")
+    elif shrunk:
+        print(
+            f"note: {len(entries)} connection(s) is fewer than the {stored_count} stored before —\n"
+            "      stored as found; pass --force if the emptiness was not intended"
+        )
     return EXIT_OK
 
 
@@ -545,7 +639,11 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--check", action="store_true", help="report what is stored, and compare with the live gateway")
     mode.add_argument("--restore", action="store_true", help="write the stored state back")
     parser.add_argument("--dry-run", action="store_true", help="with a backup: report without writing")
-    parser.add_argument("--force", action="store_true", help="with --restore: overwrite an existing server.env")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="with --restore: overwrite an existing server.env; with a backup: allow it to replace a larger stored one",
+    )
     parser.add_argument("--password", default="", help="with --restore: dashboard password for the target gateway")
     parser.add_argument("--api-key", default="", help="with --restore: management key for the target gateway")
     parser.add_argument("--json", action="store_true", help="machine-readable report")
@@ -579,9 +677,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_NOT_CONFIGURED
 
     vault = Vault(addr, token, prefix, path)
-    data_dir = detect_data_dir(args.data_dir, args.container)
 
     try:
+        data_dir = detect_data_dir(args.data_dir, args.container)
         vault.probe_write()
         if args.check:
             return do_check(vault, data_dir, args.json)
@@ -591,7 +689,7 @@ def main(argv: list[str] | None = None) -> int:
             # already stores in Vault.
             password = args.password or setting(file_values, "OMNIROUTE_DASHBOARD_PASSWORD") or vault.dashboard_password()
             return do_restore(vault, data_dir, args.force, password, args.api_key, args.json)
-        return do_backup(vault, data_dir, args.dry_run, args.json)
+        return do_backup(vault, data_dir, args.dry_run, args.json, args.force)
     except Failure as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_FAILED
