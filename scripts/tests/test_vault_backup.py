@@ -156,6 +156,15 @@ class ReadServerEnv(unittest.TestCase):
 
 
 class DetectDataDir(unittest.TestCase):
+    def setUp(self) -> None:
+        # The volume search is real on a host that runs the gateway in Docker, so
+        # every test here says explicitly whether a volume should be found.
+        self._real_search = backup.find_volume_data_dir
+        backup.find_volume_data_dir = lambda *_args, **_kwargs: None
+
+    def tearDown(self) -> None:
+        backup.find_volume_data_dir = self._real_search
+
     def test_an_explicit_path_wins(self) -> None:
         self.assertEqual(backup.detect_data_dir("/some/dir", "nothing"), Path("/some/dir"))
 
@@ -170,11 +179,17 @@ class DetectDataDir(unittest.TestCase):
             else:
                 os.environ["OMNIROUTE_DATA_DIR"] = saved
 
-    def test_it_falls_back_to_the_host_data_dir(self) -> None:
-        saved = os.environ.get("OMNIROUTE_DATA_DIR")
-        os.environ.pop("OMNIROUTE_DATA_DIR", None)
+    def test_no_container_and_no_host_data_dir_names_the_gateway_not_a_path(self) -> None:
+        # The reported failure this replaces: "could not read
+        # /root/.omniroute/server.env" while the gateway was merely stopped — which
+        # reads like a broken backup rather than a stopped service.
+        saved = os.environ.pop("OMNIROUTE_DATA_DIR", None)
         try:
-            self.assertEqual(backup.detect_data_dir("", "a-container-that-does-not-exist"), backup.DEFAULT_HOST_DATA_DIR)
+            with self.assertRaises(backup.Failure) as caught:
+                backup.detect_data_dir("", "a-container-that-does-not-exist")
+            message = str(caught.exception)
+            self.assertIn("docker compose up -d omniroute", message)
+            self.assertIn("--container", message)
         finally:
             if saved is not None:
                 os.environ["OMNIROUTE_DATA_DIR"] = saved
@@ -194,9 +209,12 @@ class DetectDataDirViaTheContainer(unittest.TestCase):
         self._saved_env = os.environ.pop("OMNIROUTE_DATA_DIR", None)
         self._real = (backup.shutil.which, backup.inspect_mounts, backup.container_data_dir)
         backup.shutil.which = lambda name: "/usr/bin/docker" if name == "docker" else None
+        self._real_search = backup.find_volume_data_dir
+        backup.find_volume_data_dir = lambda *_args, **_kwargs: None
 
     def tearDown(self) -> None:
         backup.shutil.which, backup.inspect_mounts, backup.container_data_dir = self._real
+        backup.find_volume_data_dir = self._real_search
         if self._saved_env is not None:
             os.environ["OMNIROUTE_DATA_DIR"] = self._saved_env
 
@@ -230,9 +248,91 @@ class DetectDataDirViaTheContainer(unittest.TestCase):
             self.arrange([], [{"Destination": "/data", "Source": tmp}])
             self.assertEqual(backup.detect_data_dir("", "omniroute"), Path(tmp))
 
-    def test_no_container_at_all_is_the_host_run_gateway(self) -> None:
-        self.arrange([], [])
-        self.assertEqual(backup.detect_data_dir("", "missing"), backup.DEFAULT_HOST_DATA_DIR)
+    def test_no_container_at_all_falls_back_to_the_host_run_gateway(self) -> None:
+        # A host-run gateway (setup.sh's) is a real deployment: its data dir is the
+        # fallback, and only a *missing* one is an error.
+        with tempfile.TemporaryDirectory() as home:
+            saved = os.environ.get("HOME")
+            self._real_fallback = backup.DEFAULT_HOST_DATA_DIR
+            backup.DEFAULT_HOST_DATA_DIR = Path(home)
+            (Path(home) / "server.env").write_text("STORAGE_ENCRYPTION_KEY=x\n")
+            try:
+                self.arrange([], [])
+                self.assertEqual(backup.detect_data_dir("", "missing"), Path(home))
+            finally:
+                backup.DEFAULT_HOST_DATA_DIR = self._real_fallback
+                if saved is not None:
+                    os.environ["HOME"] = saved
+
+
+class FindVolumeDataDir(unittest.TestCase):
+    """Finding the data dir by the file that identifies it, when Docker can't say.
+
+    The reported failure these replace: "could not read
+    /root/.omniroute/server.env" on an estate that runs the gateway in a
+    container. The fallback was the host-run location, which is empty there, so
+    the message blamed a missing file rather than naming the volume that had it.
+    """
+
+    def volume(self, root: Path, name: str, contents: str | None) -> Path:
+        data = root / name / "_data"
+        data.mkdir(parents=True)
+        if contents is not None:
+            (data / "server.env").write_text(contents)
+        return data
+
+    def test_the_volume_holding_server_env_is_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.volume(root, "someone-elses-volume", "API_KEY=x\n")
+            live = self.volume(root, "capstone_omniroute_data", "STORAGE_ENCRYPTION_KEY=x\n")
+            self.assertEqual(backup.find_volume_data_dir(root), live)
+
+    def test_a_server_env_without_the_key_is_not_the_data_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.volume(root, "not-the-gateway", "SOMETHING_ELSE=x\n")
+            self.assertIsNone(backup.find_volume_data_dir(root))
+
+    def test_two_candidates_are_refused_rather_than_guessed_between(self) -> None:
+        # A stale copy beside the live one is the backup's whole failure mode, so
+        # picking one silently is worse than stopping.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.volume(root, "capstone_omniroute_data", "STORAGE_ENCRYPTION_KEY=x\n")
+            self.volume(root, "older_omniroute", "STORAGE_ENCRYPTION_KEY=y\n")
+            with self.assertRaises(backup.Failure) as caught:
+                backup.find_volume_data_dir(root)
+            self.assertIn("--data-dir", str(caught.exception))
+
+    def test_a_host_with_no_volumes_at_all_is_not_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(backup.find_volume_data_dir(Path(tmp) / "absent"))
+
+
+class FindDocker(unittest.TestCase):
+    def test_an_override_wins_when_it_exists(self) -> None:
+        with tempfile.NamedTemporaryFile() as handle:
+            saved = os.environ.get("DOCKER_BIN")
+            os.environ["DOCKER_BIN"] = handle.name
+            try:
+                self.assertEqual(backup.find_docker(), handle.name)
+            finally:
+                if saved is None:
+                    os.environ.pop("DOCKER_BIN", None)
+                else:
+                    os.environ["DOCKER_BIN"] = saved
+
+    def test_an_override_that_does_not_exist_is_refused(self) -> None:
+        saved = os.environ.get("DOCKER_BIN")
+        os.environ["DOCKER_BIN"] = "/definitely/not/here/docker"
+        try:
+            self.assertIsNone(backup.find_docker())
+        finally:
+            if saved is None:
+                os.environ.pop("DOCKER_BIN", None)
+            else:
+                os.environ["DOCKER_BIN"] = saved
 
 
 class Backup(unittest.TestCase):

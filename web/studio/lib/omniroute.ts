@@ -48,7 +48,81 @@ export type TokenUsage = {
  */
 const DEFAULT_BASE_URL = "http://192.168.1.46:20129/v1";
 const DEFAULT_CHAT_PATH = "/chat/completions";
-const DEFAULT_MODEL = "auto/coding";
+/**
+ * What an unset `OMNIROUTE_MODEL` means, and therefore what every build uses
+ * unless somebody chooses otherwise: OmniRoute's free router. It is the default
+ * because a build that spends nothing is the right posture for a tool people are
+ * invited to try — a paid default turns a first experiment into a provider bill.
+ */
+const DEFAULT_MODEL = "auto/best-free";
+
+/**
+ * The presets the picker offers above the raw model list.
+ *
+ * "Preset" means a gateway *router* (`auto/…`), not a provider's model id: those
+ * survive a provider key being unlinked, and they are the only ids a user can pick
+ * without knowing which provider today's best model happens to live on. The free
+ * ones are marked, because that is the distinction the entitlement gate turns on.
+ */
+export const MODEL_PRESETS: readonly {
+  id: string;
+  label: string;
+  note: string;
+  free: boolean;
+}[] = [
+  {
+    id: "auto/best-free",
+    label: "Best free model",
+    note: "the strongest provider that needs no paid key — the default",
+    free: true,
+  },
+  {
+    id: "auto/coding:free",
+    label: "Best free model for code",
+    note: "free-only, weighted for code",
+    free: true,
+  },
+  {
+    id: "auto/best-fast",
+    label: "Fastest available",
+    note: "latency first, paid providers included",
+    free: false,
+  },
+  {
+    id: "auto/best-coding",
+    label: "Best for code",
+    note: "paid providers included",
+    free: false,
+  },
+  {
+    id: "auto/coding",
+    label: "Balanced router",
+    note: "OmniRoute's general-purpose coding router",
+    free: false,
+  },
+];
+
+/**
+ * Is this a model that costs nothing to call?
+ *
+ * Read from the id, because that is what the gateway publishes: its free routers
+ * end in `:free`, and its free provider connections carry `free` in the model name
+ * (`oc/deepseek-v4-flash-free`). A paid model that happens to include the word
+ * would be a provider naming a paid tier "free", which would be a problem in the
+ * gateway long before it is one here.
+ */
+export function isFreeModelId(id: string): boolean {
+  const value = id.trim().toLowerCase();
+  if (!value) return false;
+  const preset = MODEL_PRESETS.find((entry) => entry.id === value);
+  if (preset) return preset.free;
+  return value.endsWith(":free") || /(^|[/:._-])free([/:._-]|$)/.test(value);
+}
+
+/** May this id be chosen by a caller with (or without) a paid subscription? */
+export function modelAllowedFor(id: string, paid: boolean): boolean {
+  return paid || isFreeModelId(id);
+}
 
 /** Values shipped in `.env.example` that must not be treated as real credentials. */
 const PLACEHOLDER_PREFIXES = ["change-me", "changeme", "your-", "xxx", "todo"];
@@ -277,10 +351,27 @@ export function resolveModel(
 export async function chooseModel(
   config: OmniRouteConfig,
   requested: string,
+  options: { allowPaid?: boolean } = {},
 ): Promise<{ model: string; reject: string | null }> {
+  // Paid models are for subscribers, and the check is here rather than in the
+  // picker: a route that trusts the browser's list is a route that spends money on
+  // a model the caller did not pay for, one hand-written request at a time.
+  const allowPaid = options.allowPaid !== false;
   try {
     const models = await listModels(config);
     const resolved = resolveModel(config, models, requested);
+    if (!allowPaid && !isFreeModelId(resolved.model)) {
+      if (requested) {
+        return {
+          model: resolved.model,
+          reject: "That model needs an active subscription (your account has none for this plan).",
+        };
+      }
+      // Nobody asked for a paid model — the default is one. Fall back instead of
+      // failing: an unset `OMNIROUTE_MODEL` must not be able to bill a
+      // non-subscriber, and "best free model" is what they get.
+      return { model: DEFAULT_MODEL, reject: null };
+    }
     return { model: resolved.model, reject: requested && resolved.reason ? resolved.reason : null };
   } catch {
     return { model: requested || config.model, reject: null };

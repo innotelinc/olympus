@@ -253,7 +253,7 @@ def detect_data_dir(explicit: str, container: str) -> Path:
     if env_dir:
         return Path(env_dir).expanduser()
 
-    docker = shutil.which("docker")
+    docker = find_docker()
     if docker:
         mounts = inspect_mounts(docker, container)
         wanted = container_data_dir(docker, container)
@@ -293,7 +293,107 @@ def detect_data_dir(explicit: str, container: str) -> Path:
                 "service in 2-voice/capstone/docker-compose.yml), or point\n"
                 "OMNIROUTE_DATA_DIR / --data-dir at the real data dir."
             )
+
+        # The container could not be asked — it is stopped, it is named
+        # something else, or this unit ran with a PATH that has no `docker` in
+        # it. Before giving up, look for the gateway by its own data: the only
+        # directory on this host that holds a `server.env` with
+        # STORAGE_ENCRYPTION_KEY *is* the data dir, whatever it is called.
+        #
+        # This is the case that produced "could not read
+        # /root/.omniroute/server.env": the fallback below is the host-run
+        # location, which is empty on an estate that runs the gateway in a
+        # container, so the message blamed a missing file instead of naming the
+        # volume that had the file all along.
+        if not mounts:
+            found = find_volume_data_dir()
+            if found is not None:
+                return found
+
+        # No container to ask at all, and the host-run data dir is not there
+        # either. Reporting that as "could not read /root/.omniroute/server.env"
+        # reads like the backup is misconfigured when the real answer is usually
+        # that the gateway is simply not running — which is exactly what a
+        # maintenance window looks like, and the message should say so.
+        if not mounts and not (DEFAULT_HOST_DATA_DIR / "server.env").is_file():
+            raise Failure(
+                f"cannot find the gateway: `docker inspect {container}` found no such\n"
+                "container, and there is no host-run data dir at "
+                f"{DEFAULT_HOST_DATA_DIR} either.\n"
+                f"If the gateway runs under another name, pass --container NAME; if it is\n"
+                "stopped, start it first (docker compose up -d omniroute) — there is\n"
+                "nothing to back up until it is running and its data dir is mounted."
+            )
     return DEFAULT_HOST_DATA_DIR
+
+
+# Where Docker keeps named volumes. `dir` and `local` drivers both land here.
+DOCKER_VOLUMES_ROOT = Path("/var/lib/docker/volumes")
+
+
+def find_docker() -> str | None:
+    """The docker CLI, or None.
+
+    Same reason the restore script resolves `omniroute` rather than trusting
+    `PATH`: a systemd unit runs with a minimal environment, and a unit that
+    cannot find `docker` used to fall through to the host-run data dir and fail
+    with a message about a file rather than about the container it never
+    inspected.
+    """
+    override = (os.environ.get("DOCKER_BIN") or "").strip()
+    if override:
+        return override if shutil.which(override) or Path(override).is_file() else None
+    found = shutil.which("docker")
+    if found:
+        return found
+    for candidate in ("/usr/bin/docker", "/usr/local/bin/docker", "/snap/bin/docker"):
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def find_volume_data_dir(root: Path | None = None) -> Path | None:
+    """A Docker volume holding the gateway's data dir, by the file that names it.
+
+    `server.env` with STORAGE_ENCRYPTION_KEY is the gateway's data dir by
+    definition — nothing else on a host writes one — so finding that file is a
+    better answer than any path guess. Ambiguity is left alone rather than
+    guessed at: two volumes that both look like a data dir is a question for a
+    person, and picking one silently could back up the stale copy beside the
+    live one.
+    """
+    base = root or DOCKER_VOLUMES_ROOT
+    try:
+        candidates = [
+            entry / "_data"
+            for entry in base.iterdir()
+            if (entry / "_data").is_dir()
+        ]
+    except OSError:
+        return None
+
+    holding = []
+    for candidate in candidates:
+        server_env = candidate / "server.env"
+        try:
+            if not server_env.is_file():
+                continue
+            if "STORAGE_ENCRYPTION_KEY" not in server_env.read_text(encoding="utf-8", errors="replace"):
+                continue
+        except OSError:
+            continue
+        holding.append(candidate)
+
+    if len(holding) == 1:
+        return holding[0]
+    if len(holding) > 1:
+        names = ", ".join(sorted(path.parent.name for path in holding))
+        raise Failure(
+            f"{len(holding)} Docker volumes look like the gateway's data dir ({names}).\n"
+            "Pass --data-dir to say which one is live — guessing could back up the stale\n"
+            "copy sitting beside it."
+        )
+    return None
 
 
 def inspect_mounts(docker: str, container: str) -> list[dict]:

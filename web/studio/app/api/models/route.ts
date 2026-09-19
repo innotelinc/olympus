@@ -1,5 +1,14 @@
 import { authorizeRequest } from "@/lib/auth";
-import { isPlaceholderSecret, listModels, readConfig, resolveModel } from "@/lib/omniroute";
+import { entitlementFor, readEntitlementConfig } from "@/lib/entitlements";
+import {
+  MODEL_PRESETS,
+  isFreeModelId,
+  isPlaceholderSecret,
+  listModels,
+  modelAllowedFor,
+  readConfig,
+  resolveModel,
+} from "@/lib/omniroute";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,15 +57,36 @@ export async function GET(request: Request): Promise<Response> {
   const resolved = resolveModel(config, models, "");
   const providers = [...new Set(models.map((model) => model.provider))].sort();
 
+  // Paid models are for subscribers. The decision is Magnate's (see
+  // lib/entitlements): without a definite "entitled", the picker offers the free
+  // routers and the free connections only, and both model routes refuse a paid id
+  // if one is sent anyway — a picker is a courtesy, not a gate.
+  const entitlement = await entitlementFor(readEntitlementConfig(), gate.session?.email ?? "");
+  const visible = models.filter((model) => modelAllowedFor(model.id, entitlement.paid));
+
   return Response.json(
     {
-      models,
+      models: visible,
       providers,
       // What Studio will use when the caller does not choose, and why — so the
       // picker can say "default" against a real entry rather than guessing.
       default: resolved.model,
       configured: config.model,
       note: resolved.reason ?? null,
+      paid: entitlement.paid,
+      entitlement: entitlement.reason,
+      plan: entitlement.plan,
+      presets: MODEL_PRESETS.map((preset) => ({
+        ...preset,
+        allowed: modelAllowedFor(preset.id, entitlement.paid),
+      })),
+      hiddenPaidModels: models.length - visible.length,
+      freeOnly: !entitlement.paid,
+      // Why the list is short, in the words the picker can show verbatim.
+      accessNote: entitlement.paid
+        ? null
+        : "Free models only: your account has no active subscription for this plan. " +
+          "Paid models appear once Magnate says the subscription is active.",
     },
     {
       status: 200,
