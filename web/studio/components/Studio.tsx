@@ -397,6 +397,22 @@ type ModelOption = {
   capabilities: Record<string, boolean>;
 };
 
+/**
+ * An `auto/…` gateway router offered above the raw model list.
+ *
+ * A preset is a router, not a provider's model id, so it survives a key being
+ * unlinked and it is the only choice a user can make without knowing which
+ * provider today's best model happens to live on. `allowed` is the server's
+ * answer to whether this account may pick it; the picker does not decide.
+ */
+type ModelPreset = {
+  id: string;
+  label: string;
+  note: string;
+  free: boolean;
+  allowed: boolean;
+};
+
 /** `auto/coding · combo · 1M` — enough to choose between two names that differ by a word. */
 function describeModel(model: ModelOption): string {
   const context =
@@ -480,6 +496,12 @@ export default function Studio({
   const [modelBusy, setModelBusy] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
   const [modelDefault, setModelDefault] = useState("");
+  // The routers offered above the list, and the reason the paid half of both is
+  // missing when it is. The server owns the entitlement decision; these are its
+  // words, so the picker cannot claim access the routes would refuse.
+  const [presets, setPresets] = useState<ModelPreset[]>([]);
+  const [accessNote, setAccessNote] = useState<string | null>(null);
+  const [hiddenPaid, setHiddenPaid] = useState(0);
 
   // The plan step: what the model proposes before anything is written, held here
   // until the person building it says go.
@@ -783,17 +805,30 @@ export default function Studio({
       try {
         const payload = (await (
           await request(`/api/models${fresh ? "?fresh=1" : ""}`)
-        ).json()) as { models?: ModelOption[]; default?: string; note?: string | null };
+        ).json()) as {
+          models?: ModelOption[];
+          default?: string;
+          note?: string | null;
+          presets?: ModelPreset[];
+          accessNote?: string | null;
+          hiddenPaidModels?: number;
+        };
         if (!Array.isArray(payload.models) || payload.models.length === 0) {
           throw new Error("The gateway has no models linked in.");
         }
         setModels(payload.models);
         setModelDefault(payload.default ?? "");
         setModelError(payload.note ?? null);
+        setPresets(Array.isArray(payload.presets) ? payload.presets : []);
+        setAccessNote(payload.accessNote ?? null);
+        setHiddenPaid(typeof payload.hiddenPaidModels === "number" ? payload.hiddenPaidModels : 0);
       } catch (thrown) {
         // Not fatal: generation still works on the configured default, so this is
         // reported where the picker is rather than as a banner over the build.
         setModels([]);
+        setPresets([]);
+        setAccessNote(null);
+        setHiddenPaid(0);
         setModelError(thrown instanceof Error ? thrown.message : "Could not read the model list.");
       } finally {
         setModelBusy(false);
@@ -2277,6 +2312,28 @@ export default function Studio({
                       }. Pick a model to build with that instead.`}
                 </span>
 
+                {presets.length > 0 ? (
+                  <div className="settings-inline preset-row">
+                    {presets.map((preset) => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        className={model === preset.id ? "" : "ghost"}
+                        disabled={!preset.allowed}
+                        title={
+                          preset.allowed
+                            ? preset.note
+                            : `${preset.note} — needs an active subscription.`
+                        }
+                        onClick={() => saveModel(preset.id)}
+                      >
+                        {preset.label}
+                        {preset.free ? " · free" : ""}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+
                 <div className="settings-inline">
                   <input
                     type="search"
@@ -2328,6 +2385,14 @@ export default function Studio({
                     {modelFilter ? ` matching “${modelFilter.trim()}”` : ""}.
                   </span>
                 ) : null}
+
+                {hiddenPaid > 0 ? (
+                  <span className="hint">
+                    {hiddenPaid} paid model{hiddenPaid === 1 ? "" : "s"} hidden.
+                  </span>
+                ) : null}
+
+                {accessNote ? <span className="hint">{accessNote}</span> : null}
 
                 {modelError ? <span className="hint">{modelError}</span> : null}
               </div>

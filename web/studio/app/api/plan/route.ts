@@ -3,6 +3,7 @@ import { PlanError, planMessages, parsePlan } from "@/lib/plan";
 import { authorizeRequest, identityKey } from "@/lib/auth";
 import { checkRateLimit } from "@/lib/ratelimit";
 import { beginTurn, finishTurn } from "@/lib/tenancy";
+import { entitlementFor, readEntitlementConfig } from "@/lib/entitlements";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -122,7 +123,11 @@ export async function POST(request: Request): Promise<Response> {
   const priorFiles = readPriorFiles(body.files);
 
   const requestedModel = typeof body.model === "string" ? body.model.trim().slice(0, 200) : "";
-  const chosen = await chooseModel(config, requestedModel);
+  const entitlement = await entitlementFor(
+    readEntitlementConfig(),
+    turn.caller?.email ?? gate.session?.email ?? "",
+  );
+  const chosen = await chooseModel(config, requestedModel, { allowPaid: entitlement.paid });
   if (chosen.reject) {
     return fail(`${chosen.reject} Pick one from the list, or leave it on the default.`, 400);
   }

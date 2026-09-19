@@ -11,6 +11,7 @@ import { parseKind } from "@/lib/projects";
 import { authorizeRequest, identityKey } from "@/lib/auth";
 import { checkRateLimit } from "@/lib/ratelimit";
 import { beginTurn, finishTurn } from "@/lib/tenancy";
+import { entitlementFor, readEntitlementConfig } from "@/lib/entitlements";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -132,7 +133,14 @@ export async function POST(request: Request): Promise<Response> {
   // and the gateway owns the answer. Failing here would turn a read-only hiccup
   // into an outage.
   const requestedModel = typeof body.model === "string" ? body.model.trim().slice(0, 200) : "";
-  const chosen = await chooseModel(config, requestedModel);
+  // Paid models are for subscribers; the picker hides the rest, and this is what
+  // makes that true rather than decorative. See lib/entitlements for why an
+  // unreachable Magnate reads as "not paid".
+  const entitlement = await entitlementFor(
+    readEntitlementConfig(),
+    turn.caller?.email ?? gate.session?.email ?? "",
+  );
+  const chosen = await chooseModel(config, requestedModel, { allowPaid: entitlement.paid });
   if (chosen.reject) {
     return fail(`${chosen.reject} Pick one from the list, or leave it on the default.`, 400);
   }
