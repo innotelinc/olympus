@@ -15,6 +15,20 @@ It flags:
      ``%s``), a template (``<...>``), an ellipsis, or a regex fragment is left
      alone — those are configuration, not credentials.
 
+     A name that appears *inside* a string literal is not an assignment either.
+     The rule is a regex over source text, so without that distinction
+     ``line.startswith("VAULT_TOKEN_FILE=")`` reads a name out of the literal and
+     takes its closing quote as the opening quote of a value — which is how a
+     marker constant came to be reported as a credential in this repository.
+
+     A value the line *builds* at run time is not stored either. When the literal
+     is one operand of a concatenation and the same line draws on a random
+     source (``os.urandom``, ``secrets``, ``token_hex`` …), no committed text is
+     the credential: ``3-media/monarch/scripts/verify-sso.py``'s throwaway
+     ``"E2e-Sso-" + os.urandom(6).hex() + "!Aa1"`` is the case this spares. Both
+     halves are required, so a secret merely split across two literals
+     (``"hunter2" + "hunter2"``) still reads as a stored credential.
+
 Matched values are masked in the output, so a finding never re-prints the
 secret it found.
 
@@ -50,6 +64,17 @@ ASSIGNMENT = re.compile(
 NAMESPACED_IDENTIFIER_KEY = re.compile(r"_key$", re.IGNORECASE)
 NAMESPACED_IDENTIFIER_VALUE = re.compile(r"^[a-z0-9]+(\.[a-z0-9]+)+$")
 
+# A <something>_MOUNT/_PATH/_DIR/_FILE holding an absolute path is pointing at
+# where a secret lives, not carrying one — e.g. SECRETS_MOUNT = "/run/ontrak",
+# the volume the first run writes the shared keys into. Both halves are required:
+# the name has to say "location" *and* the value has to be a path. Either alone
+# would be loose enough to hide a credential behind a name like SECRET_PATH.
+LOCATION_NAME = re.compile(
+    r"(_mount|_mountpoint|_path|_dir|_file|_socket|_endpoint|_url|_host|_ref)$",
+    re.IGNORECASE,
+)
+LOCATION_VALUE = re.compile(r"^/[A-Za-z0-9._~/-]+$")
+
 # A value that is itself a SCREAMING_SNAKE_CASE name is naming a field or env var,
 # not carrying a credential — e.g. SECRET_KEY = "INITIAL_PASSWORD", which says
 # *which* Vault field to read. Two or more all-uppercase words joined by
@@ -60,6 +85,17 @@ FIELD_NAME_VALUE = re.compile(r"^[A-Z]+(_[A-Z]+)+$")
 # A vault:// reference names the secret to fetch at runtime (scheme, path,
 # optional #field) — the value in the file is a pointer, not the secret.
 VAULT_REFERENCE = re.compile(r"^vault://", re.IGNORECASE)
+
+# A value built at run time: the literal is one operand of a concatenation *and*
+# the same line draws on a random source. Both halves are required (see the
+# module docstring): each alone would be loose enough to hide a real secret —
+# concatenation alone excuses a value split across literals, and a random source
+# alone excuses any line that happens to mention one.
+RUNTIME_SECRET_SOURCE = re.compile(
+    r"\b(os\.urandom|secrets\.\w+|random\.\w+|uuid\.uuid4|token_hex|token_urlsafe|getrandom|Crypto\.Random)\b"
+)
+CONCATENATION_AFTER = re.compile(r"^\s*\+")
+CONCATENATION_BEFORE = re.compile(r"\+\s*$")
 
 # Values that look like configuration rather than credentials.
 PLACEHOLDER_HINTS = (
@@ -112,6 +148,57 @@ def mask(value: str) -> str:
     return f"{value[:2]}{'*' * min(len(value) - 4, 12)}{value[-2:]}"
 
 
+def string_spans(line: str) -> list[tuple[int, int]]:
+    """Character ranges covered by the string literals on a line.
+
+    Deliberately simple: quotes, and a backslash escapes the next character.
+    That is enough for the languages this scans (Python, shell, JS/TS, YAML
+    values), and it answers the only question the assignment rule asks — does
+    this name start inside a literal?
+    """
+    spans: list[tuple[int, int]] = []
+    index = 0
+    length = len(line)
+    while index < length:
+        if line[index] not in "\"'":
+            index += 1
+            continue
+        quote = line[index]
+        start = index
+        index += 1
+        while index < length:
+            if line[index] == "\\":
+                index += 2
+                continue
+            if line[index] == quote:
+                index += 1
+                break
+            index += 1
+        spans.append((start, index))
+    return spans
+
+
+def inside_spans(position: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start < position < end for start, end in spans)
+
+
+def is_runtime_composed(line: str, match: re.Match[str]) -> bool:
+    """Is this literal one operand of a value the line generates at run time?
+
+    The assignment rule sees a password literal such as ``"E2e-Sso-"`` inside a
+    longer expression; if the literal is joined to something else and the line
+    reaches for a random source, the committed text is a prefix, not the
+    credential. (Written without the assignment shape on purpose: this file is
+    scanned by its own hook, and ``name = "literal"`` in a docstring is exactly
+    the false positive rule 2 exists to avoid.)
+    """
+    if not RUNTIME_SECRET_SOURCE.search(line):
+        return False
+    after = line[match.end("value") + 1:]        # skip the closing quote
+    before = line[:match.start("value") - 1]     # drop the opening quote
+    return bool(CONCATENATION_AFTER.match(after) or CONCATENATION_BEFORE.search(before))
+
+
 def is_placeholder(value: str) -> bool:
     lowered = value.strip().lower()
     if not lowered:
@@ -120,9 +207,7 @@ def is_placeholder(value: str) -> bool:
         return True
     if any(token in value for token in INTERPOLATION_CHARS):
         return True
-    if any(token in value for token in REGEX_HINTS):
-        return True
-    return False
+    return any(token in value for token in REGEX_HINTS)
 
 
 def scan_text(label: str, text: str) -> list[Finding]:
@@ -130,6 +215,8 @@ def scan_text(label: str, text: str) -> list[Finding]:
     relaxed = bool(TEST_PATH.search(label))
 
     for number, line in enumerate(text.splitlines(), start=1):
+        # Shape rules run on the raw line on purpose: a provider key sitting
+        # inside a string literal is exactly what they are for.
         for rule, pattern in SHAPES:
             match = pattern.search(line)
             if match:
@@ -138,7 +225,12 @@ def scan_text(label: str, text: str) -> list[Finding]:
         if relaxed:
             continue
 
+        spans = string_spans(line)
         for match in ASSIGNMENT.finditer(line):
+            # A "name" quoted in a literal is code or a marker string, not an
+            # assignment: see string_spans.
+            if inside_spans(match.start("name"), spans):
+                continue
             name = match.group("name")
             value = match.group("value")
             if not SENSITIVE_NAME.search(name):
@@ -149,7 +241,11 @@ def scan_text(label: str, text: str) -> list[Finding]:
                 continue
             if FIELD_NAME_VALUE.match(value):
                 continue
+            if LOCATION_NAME.search(name) and LOCATION_VALUE.match(value):
+                continue
             if VAULT_REFERENCE.match(value):
+                continue
+            if is_runtime_composed(line, match):
                 continue
             findings.append((label, number, f"literal-secret ({name})", mask(value)))
 
