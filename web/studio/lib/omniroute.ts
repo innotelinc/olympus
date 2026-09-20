@@ -196,7 +196,32 @@ export function managementBaseUrl(config: OmniRouteConfig): string {
 }
 
 /**
- * The provider ids that have a real connection, out of `GET /api/providers`.
+ * A `testStatus` that means the connection failed its own test, rather than one
+ * that says nothing useful. The gateway's field is free-form, so only the values
+ * that plainly mean "this cannot serve" are listed; an unknown word is left alone
+ * rather than guessed at, because the cost of guessing wrong is a picker that
+ * hides a provider the user did pay for.
+ */
+const UNUSABLE_TEST_STATUSES = new Set(["error", "failed", "invalid", "unauthorized", "expired"]);
+
+/**
+ * Can this connection serve a request? Only the gateway knows, and this reads the
+ * three things it publishes about it: whether the connection is switched on, whether
+ * it is in backoff, and whether it is sitting out a rate limit. A provider with two
+ * connections is offered if *either* is usable — one dead key beside a live one is a
+ * provider that works.
+ */
+function connectionIsUsable(row: Record<string, unknown>): boolean {
+  if (row.isActive === false) return false;
+  const backoff = row.backoffLevel;
+  if (typeof backoff === "number" && backoff > 0) return false;
+  if (row.rateLimitProtection === true) return false;
+  return !UNUSABLE_TEST_STATUSES.has(asString(row.testStatus).toLowerCase());
+}
+
+/**
+ * The provider ids that have a connection **the user enabled and the gateway can
+ * currently use**, out of `GET /api/providers`.
  *
  * `null` means "could not tell" — the payload was not the connections shape, or
  * the call failed — and every caller must read that as *do not filter*, never as
@@ -204,6 +229,14 @@ export function managementBaseUrl(config: OmniRouteConfig): string {
  * briefly refuses a read-only route must not empty the model picker or pin a
  * default, so an unreadable list leaves the catalogue exactly as the gateway
  * published it.
+ *
+ * A connection that is switched off is not part of "the providers I have
+ * enabled", which is the rule the picker is held to: this estate has a disabled
+ * OpenCode pair sitting beside the live keys, and offering its models is offering a
+ * build that cannot run. The same goes for a connection in backoff, sitting out a
+ * rate limit, or failed its own test. What this cannot see is a *model* the
+ * gateway will not route — that is per-model and only shows up in an answer, so it
+ * is learned instead (see `retireModel`).
  *
  * Only `connections` is read. A bare array is the other shape the endpoint has
  * been seen to answer with; a `{ data: […] }` envelope is the *model* list, and
@@ -220,8 +253,9 @@ export function parseConnections(payload: unknown): Set<string> | null {
   const providers = new Set<string>();
   for (const row of rows) {
     if (typeof row !== "object" || row === null) continue;
-    const provider = asString((row as Record<string, unknown>).provider);
-    if (provider) providers.add(provider);
+    const record = row as Record<string, unknown>;
+    const provider = asString(record.provider);
+    if (provider && connectionIsUsable(record)) providers.add(provider);
   }
   return providers;
 }
@@ -285,6 +319,83 @@ let modelCache: { at: number; models: GatewayModel[] } | null = null;
 /** Only for tests: a cached catalog would leak between cases. */
 export function resetModelCache(): void {
   modelCache = null;
+}
+
+/* ---- models the gateway has told us it cannot route ---------------------- */
+
+/**
+ * How long a refusal is remembered. Long enough that a picker stops offering the
+ * model to the person who just hit it, short enough that a provider coming back — a
+ * key topped up, a rate limit expiring, Google rotating a preview model back — is
+ * offered again without anyone restarting Studio.
+ */
+const RETIRED_TTL_MS = 30 * 60_000;
+
+let retiredModels = new Map<string, number>();
+
+/** Only for tests: a remembered refusal would leak between cases. */
+export function resetRetiredModels(): void {
+  retiredModels.clear();
+}
+
+/**
+ * Remember that the gateway refused this model. Drops the cached catalogue too, so
+ * the next read of the picker is filtered rather than waiting out the cache.
+ */
+export function retireModel(id: string, ttlMs = RETIRED_TTL_MS, now = Date.now()): void {
+  const key = id.trim();
+  if (!key) return;
+  retiredModels.set(key, now + ttlMs);
+  modelCache = null;
+}
+
+export function isModelRetired(id: string, now = Date.now()): boolean {
+  const key = id.trim();
+  const until = retiredModels.get(key);
+  if (until === undefined) return false;
+  if (until <= now) {
+    retiredModels.delete(key);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Is this the gateway saying "that model is not in my live catalogue"?
+ *
+ * Worth telling apart from its other refusals, because it is the deterministic one.
+ * Measured on this gateway (2026-09-20) across every model it lists: the ones it
+ * cannot route answer `400` with `Model 'x' is not available in the active live
+ * catalog for provider 'y'`, while a provider that is merely unhappy answers with
+ * its own status — `401` for a dead key, `402` for a key with nothing on it, `406`,
+ * `429`, `500`, or a `502` whose body says the upstream returned nothing. The first
+ * is a model to stop offering; the rest are a provider having a bad day, and
+ * hiding a model for those would empty the picker during an outage that fixes
+ * itself.
+ */
+export function isModelUnroutableRefusal(status: number, body: string): boolean {
+  if (status !== 400 && status !== 404) return false;
+  return /not available in the active live catalog|model_not_found/i.test(body);
+}
+
+/** Retire the model when the refusal is the deterministic one. */
+export function noteModelRefusal(id: string, status: number, body: string): void {
+  if (isModelUnroutableRefusal(status, body)) retireModel(id);
+}
+
+/**
+ * The free model to use when nobody chose one.
+ *
+ * The fallback follows the same rule the picker is held to — free, and from a
+ * provider this deployment has enabled — rather than a hardcoded id that may since
+ * have been unlinked or refused. Combos are skipped because they are routers, and
+ * on this gateway `auto/best-free` reports its candidate chain's failures (Felo
+ * `400`/`429`) instead of falling through to a provider that works.
+ */
+export function firstAvailableFreeModel(models: GatewayModel[]): GatewayModel | null {
+  return (
+    models.find((model) => !model.combo && !isModelRetired(model.id) && isFreeModelId(model.id)) ?? null
+  );
 }
 
 function asString(value: unknown): string {
@@ -395,10 +506,16 @@ export async function listModels(
   // connected" the picker's rule. A list that cannot be read (`null`) filters
   // nothing, so a hiccup on the read-only route cannot empty the catalogue.
   const connected = await listConnectedProviders(config, { signal: options.signal });
-  const models =
+  const linked =
     connected && connected.size > 0
       ? catalogue.filter((model) => model.combo || connected.has(model.provider))
       : catalogue;
+  // And a model the gateway has already refused for being outside its live
+  // catalogue is not offered again — that is the half of "available" `/v1/models`
+  // cannot answer, because it lists models the gateway will not route (measured:
+  // every `gemini/*` and `agentrouter/*` entry it publishes answers `400`, "not
+  // available in the active live catalog").
+  const models = linked.filter((model) => !isModelRetired(model.id));
   modelCache = { at: now, models };
   return models;
 }
@@ -434,7 +551,7 @@ export function resolveModel(
     const match = findModel(models, requested);
     if (!match) {
       return {
-        model: config.model,
+        model: firstAvailableFreeModel(models)?.id ?? config.model,
         source: "fallback",
         reason: `"${requested}" is not one of the ${models.length} models the gateway has linked in.`,
       };
@@ -442,16 +559,20 @@ export function resolveModel(
     return { model: match.id, source: "requested" };
   }
 
-  if (modelsById.has(config.model)) return { model: config.model, source: "configured" };
+  if (modelsById.has(config.model) && !isModelRetired(config.model)) {
+    return { model: config.model, source: "configured" };
+  }
 
-  // The configured default is gone — the provider behind it was unlinked, or the
-  // key was removed. `auto/coding` is OmniRoute's own router and survives that, so
-  // it is the honest fallback; guessing a provider-specific id would not be.
-  const combo = models.find((model) => model.id === DEFAULT_MODEL);
+  // The configured default is gone — the provider behind it was unlinked, the key
+  // was removed, or the gateway has since refused it as unroutable. A free model
+  // from an enabled provider is the honest replacement: it is what the picker is
+  // allowed to offer, and it is what an unset default already resolves to.
   return {
-    model: combo?.id ?? config.model,
+    model: firstAvailableFreeModel(models)?.id ?? config.model,
     source: "fallback",
-    reason: `The configured model "${config.model}" is no longer linked in by the gateway.`,
+    reason: isModelRetired(config.model)
+      ? `The gateway does not have "${config.model}" in its live catalogue.`
+      : `The configured model "${config.model}" is no longer linked in by the gateway.`,
   };
 }
 
@@ -587,8 +708,14 @@ export async function completeChat(
       detail = "";
     }
     const suffix = detail ? ` — ${detail}` : "";
-    const hint =
-      response.status === 401 || response.status === 403
+    // A model outside the gateway's live catalogue is retired before the error is
+    // raised, so the picker stops offering the thing the caller just proved does
+    // not work. Only the deterministic refusal counts; see isModelUnroutableRefusal.
+    const unroutable = isModelUnroutableRefusal(response.status, detail);
+    if (unroutable) noteModelRefusal(options.model, response.status, detail);
+    const hint = unroutable
+      ? " That model is not in the gateway's live catalogue, so it has been dropped from the model list."
+      : response.status === 401 || response.status === 403
         ? " The configured OMNIROUTE_API_KEY was rejected."
         : "";
     throw new GatewayError(
