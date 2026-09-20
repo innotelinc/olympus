@@ -1,6 +1,8 @@
 import {
   chatCompletionsUrl,
   chooseModel,
+  isModelUnroutableRefusal,
+  noteModelRefusal,
   sseToTextStream,
   withStreamEnd,
   type PriorFile,
@@ -177,8 +179,15 @@ export async function POST(request: Request): Promise<Response> {
       detail = "";
     }
     const suffix = detail ? ` — ${detail}` : "";
-    const hint =
-      upstream.status === 401 || upstream.status === 403
+    // A model the gateway does not have in its live catalogue is retired here, so
+    // the next read of the picker stops offering the one the user just proved does
+    // not work. Only the deterministic refusal is treated this way — a provider
+    // having a bad day must not delete its models from the list.
+    const unroutable = isModelUnroutableRefusal(upstream.status, detail);
+    if (unroutable) noteModelRefusal(model, upstream.status, detail);
+    const hint = unroutable
+      ? " That model is not in the gateway's live catalogue, so it has been dropped from the model list."
+      : upstream.status === 401 || upstream.status === 403
         ? " The configured OMNIROUTE_API_KEY was rejected."
         : "";
     return fail(`Gateway responded ${upstream.status} for model "${model}".${hint}${suffix}`, 502);

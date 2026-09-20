@@ -33,7 +33,12 @@ const MANAGED = [
 
 const CATALOG = {
   data: [
-    { id: DEFAULT_MODEL, owned_by: "combo" },
+    // A provider model, which is what DEFAULT_MODEL is: labelling it "combo" here
+    // would make it a router, and a router is deliberately not what the free
+    // fallback reaches for (auto/best-free answers 400 on this gateway).
+    { id: DEFAULT_MODEL, owned_by: "openrouter" },
+    // A real router, so the probe still counts one.
+    { id: "auto/coding", owned_by: "combo" },
     { id: "anthropic/claude-3-5", owned_by: "anthropic", context_length: 200000 },
     { id: "openai/gpt-4o", owned_by: "openai", context_length: 128000 },
   ],
@@ -196,7 +201,7 @@ describe("the collected panel", () => {
     const state = await collectStatus(null);
 
     expect(state.gateway.door).toBe(true);
-    expect(state.gateway.probe).toMatchObject({ ok: true, models: 3, providers: 3, combos: 1 });
+    expect(state.gateway.probe).toMatchObject({ ok: true, models: 4, providers: 4, combos: 1 });
     expect(state.gateway.resolvedModel).toBe(DEFAULT_MODEL);
     expect(state.runner).toMatchObject({ live: true, host: "olympus-host", pid: 4242 });
     expect(state.queue).toMatchObject({ running: 1, finished: 1 });

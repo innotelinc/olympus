@@ -6,6 +6,9 @@ import {
   chooseModel,
   completeChat,
   findModel,
+  firstAvailableFreeModel,
+  isModelRetired,
+  isModelUnroutableRefusal,
   isPlaceholderSecret,
   listConnectedProviders,
   listModels,
@@ -15,7 +18,9 @@ import {
   parseModels,
   readConfig,
   resetModelCache,
+  resetRetiredModels,
   resolveModel,
+  retireModel,
   sseToTextStream,
 } from "@/lib/omniroute";
 
@@ -46,6 +51,7 @@ afterEach(() => {
   }
   vi.unstubAllGlobals();
   resetModelCache();
+  resetRetiredModels();
 });
 
 beforeEach(() => {
@@ -168,6 +174,42 @@ describe("parseConnections", () => {
     const providers = parseConnections({ connections: [{}, { provider: "  " }, { provider: "x" }] });
     expect([...(providers ?? [])]).toEqual(["x"]);
   });
+
+  // "The providers I have enabled" is the rule the picker is held to, and a
+  // switched-off connection is not one of them. Measured on this gateway: the
+  // OpenCode pair sits beside the live keys with isActive false, and offering its
+  // models offers builds that cannot run.
+  it("skips a connection the user switched off", () => {
+    const providers = parseConnections({
+      connections: [
+        { provider: "opencode", isActive: false },
+        { provider: "openrouter", isActive: true },
+      ],
+    });
+    expect([...(providers ?? [])]).toEqual(["openrouter"]);
+  });
+
+  it("skips a connection in backoff, rate limited, or failed its own test", () => {
+    const providers = parseConnections({
+      connections: [
+        { provider: "backed-off", isActive: true, backoffLevel: 2 },
+        { provider: "rate-limited", isActive: true, rateLimitProtection: true },
+        { provider: "failed", isActive: true, testStatus: "error" },
+        { provider: "fine", isActive: true, testStatus: "active", backoffLevel: 0 },
+      ],
+    });
+    expect([...(providers ?? [])]).toEqual(["fine"]);
+  });
+
+  it("keeps a provider that has one usable connection beside a dead one", () => {
+    const providers = parseConnections({
+      connections: [
+        { provider: "openrouter", isActive: false },
+        { provider: "openrouter", isActive: true },
+      ],
+    });
+    expect([...(providers ?? [])]).toEqual(["openrouter"]);
+  });
 });
 
 describe("listModels, filtered to the connected providers", () => {
@@ -210,6 +252,68 @@ describe("listModels, filtered to the connected providers", () => {
     stubRoutes("nope", 500);
 
     expect(await listModels(config, { fresh: true })).toHaveLength(3);
+  });
+
+  // `/v1/models` publishes models the gateway will not route — measured 2026-09-20,
+  // every `gemini/*` entry answers 400 "not available in the active live catalog" —
+  // so a model that has answered that way is dropped rather than offered again.
+  it("drops a model the gateway has refused as outside its live catalogue", async () => {
+    stubRoutes({ connections: [{ provider: "openrouter", isActive: true }] });
+    retireModel("openrouter/auto");
+
+    const models = await listModels(config, { fresh: true });
+    expect(models.map((model) => model.id)).toEqual(["auto/coding"]);
+  });
+});
+
+describe("refusals the gateway means", () => {
+  // The deterministic one, verbatim from the gateway on 2026-09-20. This is the
+  // only refusal worth believing about a *model*, because it does not depend on a
+  // provider's mood.
+  it("recognises the live-catalogue refusal", () => {
+    expect(
+      isModelUnroutableRefusal(400, '{"error":{"message":"Model \'gemini-3.7-flash\' is not available in the active live catalog for provider \'gemini\'","code":"model_not_found"}}'),
+    ).toBe(true);
+  });
+
+  it("does not mistake a provider outage for a model that is gone", () => {
+    // Every one of these is a provider having a bad day, measured against this
+    // gateway: a key with nothing on it, a dead key, a rate limit, an upstream
+    // that returned nothing. Hiding a model for these would empty the picker
+    // during an outage that fixes itself.
+    expect(isModelUnroutableRefusal(402, '{"error":{"message":"insufficient credits"}}')).toBe(false);
+    expect(isModelUnroutableRefusal(401, '{"error":{"message":"unauthorized"}}')).toBe(false);
+    expect(isModelUnroutableRefusal(429, '{"error":{"message":"rate limited"}}')).toBe(false);
+    expect(isModelUnroutableRefusal(502, '{"error":{"message":"upstream returned an empty response without usable output"}}')).toBe(false);
+    expect(isModelUnroutableRefusal(500, "<html>502 Bad Gateway</html>")).toBe(false);
+  });
+
+  it("remembers a refusal, and forgets it once the ttl is up", () => {
+    const now = Date.now();
+    retireModel("gemini/gemini-3-flash-preview", 1000, now);
+
+    expect(isModelRetired("gemini/gemini-3-flash-preview", now + 500)).toBe(true);
+    expect(isModelRetired("gemini/gemini-3-flash-preview", now + 1500)).toBe(false);
+    expect(isModelRetired("openrouter/auto", now)).toBe(false);
+  });
+});
+
+describe("firstAvailableFreeModel", () => {
+  const models = parseModels({
+    data: [
+      { id: "auto/best-free", owned_by: "combo" },
+      { id: "openai/gpt-4o", owned_by: "openai" },
+      { id: "openrouter/x/free-model:free", owned_by: "openrouter" },
+    ],
+  });
+
+  it("picks a free provider model, not a router that reports its own failures", () => {
+    expect(firstAvailableFreeModel(models)?.id).toBe("openrouter/x/free-model:free");
+  });
+
+  it("skips one the gateway has refused", () => {
+    retireModel("openrouter/x/free-model:free");
+    expect(firstAvailableFreeModel(models)).toBeNull();
   });
 });
 
@@ -409,6 +513,25 @@ describe("resolveModel", () => {
     expect(resolved.source).toBe("fallback");
     expect(resolved.reason).toMatch(/retired\/model/);
   });
+
+  // The configured default can be a model the gateway still *lists* and will not
+  // route — exactly the case that answered 502 for a person picking it. It is no
+  // longer "the configured model", so the fallback takes over.
+  it("does not keep using a configured default the gateway has refused", () => {
+    retireModel(DEFAULT_MODEL);
+    const withAnotherFree = parseModels({
+      data: [
+        { id: "auto/coding", owned_by: "combo" },
+        { id: DEFAULT_MODEL, owned_by: "openrouter" },
+        { id: "openrouter/other:free", owned_by: "openrouter" },
+      ],
+    });
+
+    const resolved = resolveModel({ ...config, model: DEFAULT_MODEL }, withAnotherFree, "");
+    expect(resolved.model).toBe("openrouter/other:free");
+    expect(resolved.source).toBe("fallback");
+    expect(resolved.reason).toMatch(/live catalogue/);
+  });
 });
 
 describe("chooseModel", () => {
@@ -486,6 +609,28 @@ describe("completeChat", () => {
 
     const error = (await completeChat(config, { model: "m", messages: [] }).catch((e: unknown) => e)) as Error;
     expect(error.message).toMatch(/OMNIROUTE_API_KEY/);
+  });
+
+  it("retires a model the gateway does not have, and says so", async () => {
+    stub(
+      () =>
+        new Response(
+          '{"error":{"message":"Model \'gemini-3-flash-preview\' is not available in the active live catalog for provider \'gemini\'"}}',
+          { status: 400 },
+        ),
+    );
+
+    const error = (await completeChat(config, { model: "gemini/gemini-3-flash-preview", messages: [] }).catch((e: unknown) => e)) as Error;
+    expect(error).toBeInstanceOf(GatewayError);
+    expect(error.message).toMatch(/dropped from the model list/);
+    expect(isModelRetired("gemini/gemini-3-flash-preview")).toBe(true);
+  });
+
+  it("does not retire a model over a provider's bad day", async () => {
+    stub(() => new Response('{"error":{"message":"upstream returned an empty response"}}', { status: 502 }));
+
+    await completeChat(config, { model: "gemini/gemini-3-flash-preview", messages: [] }).catch(() => undefined);
+    expect(isModelRetired("gemini/gemini-3-flash-preview")).toBe(false);
   });
 
   it("throws when there is no usable text", async () => {
