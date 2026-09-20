@@ -144,11 +144,33 @@ export function isPlaceholderSecret(value: string): boolean {
   return PLACEHOLDER_PREFIXES.some((prefix) => lowered.startsWith(prefix));
 }
 
+/**
+ * The inference base URL, whether or not the caller remembered the `/v1`.
+ *
+ * `OMNIROUTE_BASE_URL` is written two ways across this estate and both mean the
+ * same door: the repository's `/v1` form, and the bare door that the host's own
+ * `profile.d`/`~/.bashrc` export. Compose interpolation gives the *shell*
+ * environment precedence over `.env`, so on a host that exports the bare form the
+ * bare form wins — and a bare door silently turns `/models` and
+ * `/chat/completions` into routes the SSO proxy answers with a login redirect
+ * (measured: `/models` -> 302, and Studio reported the gateway "answer[ing] 400"
+ * for a model list that never reached it). Appending the missing `/v1` makes both
+ * spellings work rather than making the deployment depend on which one won.
+ *
+ * Only the suffix is added: a base that already ends in `/v1` — including one
+ * behind a path prefix, `https://gw/omniroute/v1` — is left exactly as it came.
+ */
+export function normalizeBaseUrl(url: string): string {
+  const trimmed = url.trim().replace(/\/+$/, "");
+  if (!trimmed) return trimmed;
+  return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
+}
+
 export function readConfig(): OmniRouteConfig {
   loadRepoEnv();
 
   return {
-    baseUrl: (process.env.OMNIROUTE_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, ""),
+    baseUrl: normalizeBaseUrl(process.env.OMNIROUTE_BASE_URL?.trim() || DEFAULT_BASE_URL),
     chatPath: process.env.OMNIROUTE_CHAT_PATH?.trim() || DEFAULT_CHAT_PATH,
     apiKey: process.env.OMNIROUTE_API_KEY?.trim() || "",
     model: process.env.OMNIROUTE_MODEL?.trim() || DEFAULT_MODEL,
@@ -158,6 +180,76 @@ export function readConfig(): OmniRouteConfig {
 export function chatCompletionsUrl(config: OmniRouteConfig): string {
   const path = config.chatPath.startsWith("/") ? config.chatPath : `/${config.chatPath}`;
   return `${config.baseUrl}${path}`;
+}
+
+/**
+ * The gateway's management API, which lives at its root and not under `/v1`.
+ *
+ * `OMNIROUTE_BASE_URL` names the OpenAI-compatible surface (`…/v1`, or the bare
+ * door, depending on the deployment), and `/api/providers` is a sibling of that
+ * prefix rather than a child of it. So the address is the same door with a
+ * trailing `/v1` removed — the same rule `scripts/omniroute-restore-providers.py`
+ * applies, for the same reason.
+ */
+export function managementBaseUrl(config: OmniRouteConfig): string {
+  return config.baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
+}
+
+/**
+ * The provider ids that have a real connection, out of `GET /api/providers`.
+ *
+ * `null` means "could not tell" — the payload was not the connections shape, or
+ * the call failed — and every caller must read that as *do not filter*, never as
+ * *nothing is connected*. The distinction is the whole point: a gateway that
+ * briefly refuses a read-only route must not empty the model picker or pin a
+ * default, so an unreadable list leaves the catalogue exactly as the gateway
+ * published it.
+ *
+ * Only `connections` is read. A bare array is the other shape the endpoint has
+ * been seen to answer with; a `{ data: […] }` envelope is the *model* list, and
+ * treating it as connections would filter every model away on a test stub that
+ * answers both calls with the catalogue.
+ */
+export function parseConnections(payload: unknown): Set<string> | null {
+  const rows = Array.isArray(payload)
+    ? payload
+    : typeof payload === "object" && payload !== null && Array.isArray((payload as Record<string, unknown>).connections)
+      ? ((payload as Record<string, unknown>).connections as unknown[])
+      : null;
+  if (!rows) return null;
+  const providers = new Set<string>();
+  for (const row of rows) {
+    if (typeof row !== "object" || row === null) continue;
+    const provider = asString((row as Record<string, unknown>).provider);
+    if (provider) providers.add(provider);
+  }
+  return providers;
+}
+
+/**
+ * Ask the gateway which providers it actually has connected.
+ *
+ * This is the read-only half of the SSO door (`--skip-auth-route=^/api/providers$`
+ * in `compose.gateway-sso.yml`); through any other address the management API is
+ * behind the Authentik session and unreachable from a bridge container, which is
+ * why the repository raises this route at the door rather than reaching the
+ * gateway's own loopback port.
+ */
+export async function listConnectedProviders(
+  config: OmniRouteConfig,
+  options: { signal?: AbortSignal } = {},
+): Promise<Set<string> | null> {
+  try {
+    const response = await fetch(`${managementBaseUrl(config)}/api/providers?limit=5000`, {
+      headers: { authorization: `Bearer ${config.apiKey}` },
+      signal: options.signal,
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    return parseConnections(await response.json());
+  } catch {
+    return null;
+  }
 }
 
 /* ---- which model, out of whatever is linked in ---------------------------- */
@@ -254,9 +346,14 @@ export function parseModels(payload: unknown): GatewayModel[] {
 }
 
 /**
- * The linked models. Throws with a sentence a person can act on — the caller is a
- * route that turns it into a response, and the alternative is a picker that is
- * empty for no stated reason.
+ * The linked models, trimmed to the providers that are actually connected.
+ *
+ * Throws with a sentence a person can act on — the caller is a route that turns it
+ * into a response, and the alternative is a picker that is empty for no stated
+ * reason. A readable connection list is what makes this "the models a build can
+ * actually use": `/v1/models` alone cannot tell a credentialed provider from the
+ * anonymous no-auth ones bundled with the gateway, so the connections are read
+ * alongside it and the catalogue is filtered to them.
  */
 export async function listModels(
   config: OmniRouteConfig,
@@ -288,7 +385,20 @@ export async function listModels(
     throw new Error(`The gateway answered ${response.status} for its model list.${hint}`);
   }
 
-  const models = parseModels(await response.json());
+  const catalogue = parseModels(await response.json());
+  // "Whatever is linked in" means the providers with a *connection*, not every
+  // provider the gateway can name. `/v1/models` also lists the anonymous no-auth
+  // providers that ship inside OmniRoute (Felo, DuckDuckGo, Auggie, the Codex
+  // app-server), and those are exactly the ones that refuse a build — the OpenCode
+  // `403` and Felo `400`/`429` that took `auto/best-free` down on 2026-09-19
+  // (docs/stack.md). Filtering them out is what makes "the providers I have
+  // connected" the picker's rule. A list that cannot be read (`null`) filters
+  // nothing, so a hiccup on the read-only route cannot empty the catalogue.
+  const connected = await listConnectedProviders(config, { signal: options.signal });
+  const models =
+    connected && connected.size > 0
+      ? catalogue.filter((model) => model.combo || connected.has(model.provider))
+      : catalogue;
   modelCache = { at: now, models };
   return models;
 }

@@ -7,7 +7,11 @@ import {
   completeChat,
   findModel,
   isPlaceholderSecret,
+  listConnectedProviders,
   listModels,
+  managementBaseUrl,
+  normalizeBaseUrl,
+  parseConnections,
   parseModels,
   readConfig,
   resetModelCache,
@@ -78,6 +82,14 @@ describe("readConfig", () => {
     expect(readConfig().baseUrl).toBe("http://gateway:20128/v1");
   });
 
+  it("adds the /v1 to a bare door, which is how the gateway host exports it", () => {
+    // Measured on this host: `/etc/profile.d/omniroute.sh` and `~/.bashrc` export
+    // the door without `/v1`, and compose interpolation lets the shell win over
+    // `.env`. Without this, every model list and completion 302s to Authentik.
+    process.env.OMNIROUTE_BASE_URL = "http://192.168.1.46:20129";
+    expect(readConfig().baseUrl).toBe("http://192.168.1.46:20129/v1");
+  });
+
   it("honours overrides", () => {
     process.env.OMNIROUTE_MODEL = "auto/fast";
     process.env.OMNIROUTE_CHAT_PATH = "responses";
@@ -97,6 +109,126 @@ describe("chatCompletionsUrl", () => {
         model: "auto/coding",
       }),
     ).toBe("http://omniroute:20128/v1/chat/completions");
+  });
+});
+
+describe("normalizeBaseUrl", () => {
+  it("adds a missing /v1", () => {
+    expect(normalizeBaseUrl("http://gw:20129")).toBe("http://gw:20129/v1");
+    expect(normalizeBaseUrl("http://gw:20129/")).toBe("http://gw:20129/v1");
+  });
+
+  it("leaves an existing /v1 alone", () => {
+    expect(normalizeBaseUrl("http://gw:20129/v1")).toBe("http://gw:20129/v1");
+    expect(normalizeBaseUrl("http://gw:20129/v1///")).toBe("http://gw:20129/v1");
+  });
+
+  it("keeps a path prefix", () => {
+    expect(normalizeBaseUrl("https://gw/omniroute")).toBe("https://gw/omniroute/v1");
+    expect(normalizeBaseUrl("https://gw/omniroute/v1")).toBe("https://gw/omniroute/v1");
+  });
+});
+
+describe("managementBaseUrl", () => {
+  function config(baseUrl: string) {
+    return { baseUrl, chatPath: "/chat/completions", apiKey: "k", model: "m" };
+  }
+
+  it("drops the /v1 prefix the inference surface uses", () => {
+    expect(managementBaseUrl(config("http://gw:20129/v1"))).toBe("http://gw:20129");
+  });
+
+  it("leaves a bare door and a trailing slash consistent", () => {
+    expect(managementBaseUrl(config("http://gw:20129/"))).toBe("http://gw:20129");
+    expect(managementBaseUrl(config("http://gw:20129"))).toBe("http://gw:20129");
+  });
+});
+
+describe("parseConnections", () => {
+  it("reads the connections envelope", () => {
+    const providers = parseConnections({
+      connections: [{ provider: "openai" }, { provider: "gemini" }, { provider: "openai" }],
+    });
+    expect([...(providers ?? [])]).toEqual(["openai", "gemini"]);
+  });
+
+  it("reads a bare array", () => {
+    expect([...(parseConnections([{ provider: "openrouter" }]) ?? [])]).toEqual(["openrouter"]);
+  });
+
+  it("returns null for the model catalogue, which is not a connection list", () => {
+    // The distinction is load-bearing: a `{ data: [...] }` envelope mistaken for
+    // connections would filter every model away.
+    expect(parseConnections({ data: [{ id: "a/b", owned_by: "a" }] })).toBeNull();
+    expect(parseConnections(null)).toBeNull();
+    expect(parseConnections("nope")).toBeNull();
+  });
+
+  it("ignores rows with no usable provider name", () => {
+    const providers = parseConnections({ connections: [{}, { provider: "  " }, { provider: "x" }] });
+    expect([...(providers ?? [])]).toEqual(["x"]);
+  });
+});
+
+describe("listModels, filtered to the connected providers", () => {
+  const config = { baseUrl: "http://gw:20129/v1", chatPath: "/chat/completions", apiKey: "k", model: "auto/coding" };
+
+  const CATALOGUE = {
+    data: [
+      { id: "auto/coding", owned_by: "combo" },
+      { id: "openrouter/auto", owned_by: "openrouter" },
+      { id: "felo/felo-chat", owned_by: "felo-web" },
+    ],
+  };
+
+  function stubRoutes(connections: unknown, status = 200) {
+    const mock = vi.fn(async (url: string | URL) =>
+      String(url).includes("/api/providers")
+        ? Response.json(connections, { status })
+        : Response.json(CATALOGUE),
+    );
+    vi.stubGlobal("fetch", mock);
+    return mock;
+  }
+
+  it("keeps connected providers and the combos, and drops the rest", async () => {
+    stubRoutes({ connections: [{ provider: "openrouter" }] });
+
+    const models = await listModels(config, { fresh: true });
+    expect(models.map((model) => model.id)).toEqual(["auto/coding", "openrouter/auto"]);
+  });
+
+  it("asks the management route at the gateway's root, not under /v1", async () => {
+    const mock = stubRoutes({ connections: [{ provider: "openrouter" }] });
+
+    await listModels(config, { fresh: true });
+    const urls = mock.mock.calls.map(([url]) => String(url));
+    expect(urls).toContain("http://gw:20129/api/providers?limit=5000");
+  });
+
+  it("leaves the catalogue alone when the connections cannot be read", async () => {
+    stubRoutes("nope", 500);
+
+    expect(await listModels(config, { fresh: true })).toHaveLength(3);
+  });
+});
+
+describe("listConnectedProviders", () => {
+  const config = { baseUrl: "http://gw:20129/v1", chatPath: "/chat/completions", apiKey: "k", model: "m" };
+
+  it("returns null rather than throwing when the route refuses", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("no", { status: 403 })));
+    expect(await listConnectedProviders(config)).toBeNull();
+  });
+
+  it("returns null when the gateway cannot be reached", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("connect ECONNREFUSED");
+      }),
+    );
+    expect(await listConnectedProviders(config)).toBeNull();
   });
 });
 
