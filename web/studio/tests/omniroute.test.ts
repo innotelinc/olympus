@@ -12,6 +12,7 @@ import {
   isPlaceholderSecret,
   listConnectedProviders,
   listModels,
+  listRetiredModels,
   managementBaseUrl,
   normalizeBaseUrl,
   parseConnections,
@@ -295,6 +296,25 @@ describe("refusals the gateway means", () => {
     expect(isModelRetired("gemini/gemini-3-flash-preview", now + 500)).toBe(true);
     expect(isModelRetired("gemini/gemini-3-flash-preview", now + 1500)).toBe(false);
     expect(isModelRetired("openrouter/auto", now)).toBe(false);
+  });
+
+  it("lists what was refused, so the panel can show a disappearance", () => {
+    const now = Date.now();
+    retireModel("gemini/gemini-3.7-flash", 60_000, now);
+    retireModel("gemini/gemini-3-flash-preview", 30_000, now);
+    retireModel("gemini/gone", 1_000, now);
+
+    const listed = listRetiredModels(now);
+    expect(listed.map((entry) => entry.id)).toEqual([
+      "gemini/gemini-3-flash-preview",
+      "gemini/gemini-3.7-flash",
+      "gemini/gone",
+    ]);
+    // Reading it drops the expired one, so the next read does not re-report it.
+    expect(listRetiredModels(now + 2_000).map((entry) => entry.id)).toEqual([
+      "gemini/gemini-3-flash-preview",
+      "gemini/gemini-3.7-flash",
+    ]);
   });
 });
 

@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { classifyGatewayUrl, collectStatus, listBuilds, worstState, type AdminCheck } from "@/lib/admin";
-import { DEFAULT_MODEL, resetModelCache } from "@/lib/omniroute";
+import { DEFAULT_MODEL, resetModelCache, resetRetiredModels, retireModel } from "@/lib/omniroute";
 
 // The repo .env loader would otherwise put OIDC settings back after a test deletes
 // them, on any machine whose checkout carries credentials. See models-route.test.ts.
@@ -63,6 +63,7 @@ beforeEach(() => {
   process.env.STUDIO_BUILDS_DIR = BUILDS;
 
   resetModelCache();
+  resetRetiredModels();
 });
 
 afterEach(() => {
@@ -299,6 +300,30 @@ describe("the collected panel", () => {
     const state = await collectStatus(null);
     expect(state.runner.ageSeconds).toBeNull();
     expect(check(state.checks, "runner").detail).toMatch(/no heartbeat/i);
+  });
+
+  // A retirement is deliberately invisible in the picker, so the panel is the only
+  // place a disappearance can be seen as a decision rather than as a bug.
+  it("shows a model the gateway refused, and when it comes back", async () => {
+    stubCatalog();
+    retireModel("gemini/gemini-3.7-flash", 90_000);
+
+    const state = await collectStatus(null);
+
+    const refused = check(state.checks, "models-refused");
+    expect(refused.state).toBe("warn");
+    expect(refused.detail).toMatch(/gemini\/gemini-3\.7-flash/);
+    expect(refused.detail).toMatch(/minute/);
+    expect(state.gateway.refusedModels.map((entry) => entry.id)).toEqual(["gemini/gemini-3.7-flash"]);
+  });
+
+  it("says so plainly when nothing has been refused", async () => {
+    stubCatalog();
+
+    const state = await collectStatus(null);
+
+    expect(check(state.checks, "models-refused").state).toBe("ok");
+    expect(state.gateway.refusedModels).toEqual([]);
   });
 
   it("warns when the configured model is no longer linked in", async () => {
