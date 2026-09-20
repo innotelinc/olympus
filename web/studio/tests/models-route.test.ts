@@ -43,11 +43,25 @@ function get(query = ""): Promise<Response> {
   return GET(new Request(`http://studio.test/api/models${query}`));
 }
 
-function stubCatalog(payload: unknown, status = 200) {
+/**
+ * Stub the gateway's two reads: the catalogue, and the connections list the
+ * connected-provider filter is built from. `calls()` counts only the catalogue
+ * fetches, because that is the cache the assertions below are about — counting
+ * the connections call too would turn "asked once" into "asked twice" for a
+ * reason that has nothing to do with caching.
+ */
+function stubCatalog(
+  payload: unknown,
+  status = 200,
+  connections: unknown = {
+    connections: [{ provider: "combo" }, { provider: "openai" }, { provider: "anthropic" }],
+  },
+) {
   let calls = 0;
   vi.stubGlobal(
     "fetch",
-    vi.fn(async () => {
+    vi.fn(async (url: string | URL) => {
+      if (String(url).includes("/api/providers")) return Response.json(connections);
       calls += 1;
       return Response.json(payload, { status });
     }),
@@ -126,6 +140,32 @@ describe("the catalogue", () => {
 
     const response = await get();
     expect(response.headers.get("cache-control")).toBe("private, max-age=60");
+  });
+});
+
+describe("the connected-provider filter", () => {
+  it("hides models from providers the gateway has not connected", async () => {
+    // `/v1/models` publishes the anonymous no-auth providers too; the connections
+    // table is what says which providers a build can actually use.
+    stubCatalog(CATALOG, 200, { connections: [{ provider: "combo" }, { provider: "openai" }] });
+
+    const body = await (await get()).json();
+    expect(body.models.map((model: { id: string }) => model.id)).toEqual([DEFAULT_MODEL, "openai/gpt-4o:free"]);
+    expect(body.providers).toEqual(["combo", "openai"]);
+  });
+
+  it("offers the whole catalogue when the connection list cannot be read", async () => {
+    // A payload that is not a connection list means "could not tell", not "nothing
+    // is connected" — an unfiltered picker beats an empty one.
+    stubCatalog(CATALOG, 200, "not a connections payload");
+
+    expect((await (await get()).json()).models).toHaveLength(3);
+  });
+
+  it("does not read an empty connection list as nothing is connected", async () => {
+    stubCatalog(CATALOG, 200, { connections: [] });
+
+    expect((await (await get()).json()).models).toHaveLength(3);
   });
 });
 

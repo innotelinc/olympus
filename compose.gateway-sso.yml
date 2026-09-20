@@ -137,6 +137,37 @@ services:
       # Authentik.
       - --skip-auth-route=^/v1/
       - --skip-auth-route=^/healthz$
+      # THE READ-ONLY DOOR FOR STUDIO'S PROVIDER SET, and it is deliberately this
+      # narrow. Studio owns no provider credentials and no model list of its own:
+      # which models a build may use is "whatever the gateway has *connected*", and
+      # the gateway answers that at `/api/providers` — the connections table, not
+      # `/v1/models`, which also advertises the anonymous no-auth providers (Felo,
+      # DuckDuckGo, Auggie, the Codex app-server) that are built into the gateway
+      # but that nobody has linked a credential for. Reading the model list alone
+      # cannot tell those apart, so without this route Studio either offers models
+      # that cannot answer or pins a default the gateway has no credentials for —
+      # the `503 No credentials for …` failure docs/stack.md measures.
+      #
+      # Exactly `^/api/providers$`, not `^/api/`: the rest of the management API
+      # (settings, connection writes, the dashboard's own routes) stays behind the
+      # Authentik session and the allowed group, because it can write. This one
+      # route is a GET of provider *names* and masked keys; it is the smallest
+      # thing that answers "what is connected".
+      #
+      # THE SAME LISTENER CARRIES THE PUBLIC NAME, so this is a LAN-and-public
+      # exemption, not a LAN-only one — oauth2-proxy cannot tell the two apart (it
+      # is one `--http-address`). `/v1` has the same shape and is closed at the edge
+      # by `make gateway-edge --deny-path /v1`; this route's public exposure is the
+      # model list and provider names, not inference, so it is left open for the
+      # dashboard to keep working. Close it at the edge the same way if that trade
+      # is not wanted: `make gateway-edge ARGS="--deny-path /api/providers"`.
+      #
+      # `(\?.*)?$` and not a bare `$`: oauth2-proxy matches these routes against
+      # the *request URI*, query string included, so `^/api/providers$` exempts the
+      # bare path and 302s `/api/providers?limit=5000` to Authentik — measured on
+      # this deployment, and exactly the kind of half-open door that reads as "the
+      # filter silently did nothing".
+      - '--skip-auth-route=^/api/providers(\?.*)?$'
       # NO --redirect-url, AND THAT IS THE FEATURE. With it pinned, this proxy
       # completes every login on ONE name: a request that arrives on a second name
       # is sent to Authentik with the first name's `redirect_uri`, so the callback

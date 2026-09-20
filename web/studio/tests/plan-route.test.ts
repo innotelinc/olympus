@@ -73,18 +73,33 @@ const GOOD_PLAN = JSON.stringify({
 });
 
 /**
- * Stub the gateway: the model catalog always answers, and the completion
- * answers whatever the case needs. Returns the mock so a test can assert on the
- * request that was actually sent.
+ * Stub the gateway, route by route.
+ *
+ * Three URLs are answered: the model catalogue, the connections list the
+ * provider filter reads, and the completion the case supplies. They are matched
+ * on the path rather than on call order, because a shared `Response` body can
+ * only be read once — a positional stub would hand the catalogue read to the
+ * connections call and leave the completion with an exhausted body. The
+ * completion is cloned per call for the same reason, so a case that passes a
+ * single `Response` can be asked for it more than once.
  */
-function stubGateway(completion: Response | (() => Response)) {
+function stubGateway(
+  completion: Response | (() => Response),
+  options: { connections?: unknown; connectionsStatus?: number } = {},
+) {
   const mock = vi.fn(async (url: string | URL, init?: RequestInit) => {
     const href = String(url);
     if (href.endsWith("/models")) {
       return Response.json(MODELS);
     }
+    if (href.includes("/api/providers")) {
+      if (options.connectionsStatus && options.connectionsStatus !== 200) {
+        return new Response("no", { status: options.connectionsStatus });
+      }
+      return Response.json(options.connections ?? { connections: [{ provider: "combo" }, { provider: "openai" }] });
+    }
     void init;
-    return typeof completion === "function" ? completion() : completion;
+    return typeof completion === "function" ? completion() : completion.clone();
   });
   vi.stubGlobal("fetch", mock);
   return mock;
@@ -280,6 +295,27 @@ describe("planning", () => {
     // A *free* model on purpose: the paid ones are gated on a Magnate
     // entitlement this suite does not configure, and a test that asked for one
     // would be testing the gate rather than the model choice.
+    const response = await post({ prompt: "a tracker", model: "openai/gpt-4o:free" });
+    expect(response.status).toBe(200);
+    expect((await response.json()).model).toBe("openai/gpt-4o:free");
+  });
+
+  it("refuses a model whose provider has no connection at the gateway", async () => {
+    // "Linked in" means the provider has a connection, not merely that the gateway
+    // can name it. `/v1/models` also lists the anonymous no-auth providers that
+    // ship inside OmniRoute, and those are the ones that refuse a build.
+    stubGateway(completionResponse(GOOD_PLAN), { connections: { connections: [{ provider: "combo" }] } });
+
+    const response = await post({ prompt: "a tracker", model: "openai/gpt-4o:free" });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toMatch(/not one of the/);
+  });
+
+  it("still builds when the connection list cannot be read", async () => {
+    // A read-only hiccup must not become an outage: with no connection list there
+    // is nothing to filter against, so the gateway owns the answer.
+    stubGateway(completionResponse(GOOD_PLAN), { connectionsStatus: 403 });
+
     const response = await post({ prompt: "a tracker", model: "openai/gpt-4o:free" });
     expect(response.status).toBe(200);
     expect((await response.json()).model).toBe("openai/gpt-4o:free");
