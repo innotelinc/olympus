@@ -36,7 +36,14 @@ import {
 } from "./build-queue";
 import { readAuthConfig, type Session } from "./auth";
 import { loadRepoEnv, repoRoot } from "./env";
-import { isPlaceholderSecret, listModels, readConfig, resolveModel, type OmniRouteConfig } from "./omniroute";
+import {
+  isPlaceholderSecret,
+  listModels,
+  listRetiredModels,
+  readConfig,
+  resolveModel,
+  type OmniRouteConfig,
+} from "./omniroute";
 
 export type CheckState = "ok" | "warn" | "fail";
 
@@ -81,6 +88,8 @@ export type AdminStatus = {
     probe: GatewayProbe;
     resolvedModel: string | null;
     resolution: string | null;
+    /** Models the gateway has refused as outside its live catalogue, and for how much longer they stay out. */
+    refusedModels: Array<{ id: string; until: string; remainingMs: number }>;
   };
   runner: RunnerState;
   queue: {
@@ -309,6 +318,34 @@ export async function probeGateway(
 
 /* ---- the panel's own checks --------------------------------------------- */
 
+/**
+ * The models the gateway has refused, as a panel row.
+ *
+ * A retirement is invisible by design — the model simply stops being offered — so
+ * without this the only evidence is the error somebody already saw, and an operator
+ * cannot tell a model that was dropped from one that was never listed. Reported as
+ * a warning rather than a failure: the catalogue is still usable, and the entries
+ * come back on their own when the timer runs out.
+ */
+function refusedModelsCheck(refused: AdminStatus["gateway"]["refusedModels"]): AdminCheck {
+  if (refused.length === 0) {
+    return {
+      id: "models-refused",
+      title: "No model has been refused by the gateway",
+      state: "ok",
+      detail: "Nothing has answered \"not available in the active live catalog\" since Studio started.",
+    };
+  }
+  const soonest = refused.reduce((left, right) => (left.remainingMs <= right.remainingMs ? left : right));
+  return {
+    id: "models-refused",
+    title: `${refused.length} model(s) the gateway cannot route`,
+    state: "warn",
+    detail: `${refused.map((entry) => entry.id).join(", ")} — not in the gateway's live catalogue, so the picker does not offer them. The first is back in ${Math.ceil(soonest.remainingMs / 60000)} minute(s).`,
+    hint: "A model listed at /v1/models is not necessarily one OmniRoute will route; a provider that is merely having a bad day is not retired, so these are the ones it refuses outright.",
+  };
+}
+
 function gatewayCheck(baseUrl: string): AdminCheck {
   const { door, detail } = classifyGatewayUrl(baseUrl);
   return {
@@ -510,6 +547,12 @@ export async function collectStatus(session: Session | null = null): Promise<Adm
     }
   }
 
+  const refusedModels = listRetiredModels().map((entry) => ({
+    id: entry.id,
+    until: new Date(entry.until).toISOString(),
+    remainingMs: entry.remainingMs,
+  }));
+
   const gateway = {
     baseUrl: gatewayConfig.baseUrl,
     model: gatewayConfig.model,
@@ -519,6 +562,7 @@ export async function collectStatus(session: Session | null = null): Promise<Adm
     probe,
     resolvedModel,
     resolution,
+    refusedModels,
   };
 
   const queue = {
@@ -593,6 +637,7 @@ export async function collectStatus(session: Session | null = null): Promise<Adm
     authCheck(config, session),
     adminPolicyCheck(config),
     tenancyCheck(),
+    refusedModelsCheck(refusedModels),
   ];
 
   return {

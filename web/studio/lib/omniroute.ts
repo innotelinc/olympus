@@ -81,16 +81,21 @@ export const MODEL_PRESETS: readonly {
   note: string;
   free: boolean;
 }[] = [
+  // The free routers are offered, but not promised. A router picks from the
+  // providers a request is allowed to reach, and on this gateway the key is scoped
+  // to the connected ones, so a free tier it cannot reach is a `503 all targets were
+  // skipped by pre-dispatch filters` rather than the strongest free model. The note
+  // says so; the default does not depend on it (see DEFAULT_MODEL).
   {
     id: "auto/best-free",
-    label: "Best free model",
-    note: "the strongest provider that needs no paid key — the default",
+    label: "Best free router",
+    note: "OmniRoute's free tier — only picks from providers you have connected",
     free: true,
   },
   {
     id: "auto/coding:free",
-    label: "Best free model for code",
-    note: "free-only, weighted for code",
+    label: "Free router, weighted for code",
+    note: "free-only and code-weighted — the same connected-provider limit",
     free: true,
   },
   {
@@ -347,6 +352,27 @@ export function retireModel(id: string, ttlMs = RETIRED_TTL_MS, now = Date.now()
   if (!key) return;
   retiredModels.set(key, now + ttlMs);
   modelCache = null;
+}
+
+/**
+ * The models this process has been told the gateway cannot route, in id order.
+ *
+ * Exported for the admin panel, because a model that quietly vanishes from the
+ * picker is indistinguishable from one that was never there: the person who just
+ * watched it fail is the person who needs to see that it was retired, and that it
+ * is coming back when the timer runs out. Expired entries are dropped on the way
+ * out, so reading this is also what tidies it.
+ */
+export function listRetiredModels(now = Date.now()): Array<{ id: string; until: number; remainingMs: number }> {
+  const out: Array<{ id: string; until: number; remainingMs: number }> = [];
+  for (const [id, until] of retiredModels) {
+    if (until <= now) {
+      retiredModels.delete(id);
+      continue;
+    }
+    out.push({ id, until, remainingMs: until - now });
+  }
+  return out.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
 }
 
 export function isModelRetired(id: string, now = Date.now()): boolean {
