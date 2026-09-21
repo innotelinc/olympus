@@ -34,12 +34,26 @@ which the scoped `olympus` policy already covers):
     PROVIDERS_JSON   `omniroute auth export` output: every connection, decrypted
     BACKED_UP_AT     when this ran, UTC
     PROVIDER_COUNT   how many connections that JSON held
-    SOURCE           the data dir the backup was read from
+    SOURCE           `<host>:<data dir>` the backup was read from
 
 Nothing is ever printed: the report carries counts, sizes and version numbers.
 Both halves are needed and neither is sufficient — a fresh volume with the
 connections restored is a gateway that cannot decrypt them, and a fresh volume
 with only `server.env` is a gateway with nothing to decrypt.
+
+WHY `SOURCE` NAMES A HOST. The data dir's *path* does not identify a gateway. Two
+hosts running the same compose project carry the same volume path — measured on
+this estate, `/var/lib/docker/volumes/capstone_omniroute_data/_data` exists on two
+machines, one of them holding seven provider connections and the other an empty
+volume — so a path-only `SOURCE` cannot say which gateway was backed up, and a
+restore read from it can write one gateway's `STORAGE_ENCRYPTION_KEY` over
+another's, orphaning every credential the second one had already stored. So the
+host is recorded, and both `--check` and `--restore` compare it with the host they
+are running on: a stored backup from another host is reported as such (and
+`--check` fails, because it says nothing about whether *this* gateway is backed
+up), while a restore is refused unless `--force` states that the keys belong here.
+A backup taken before the host was recorded names none: that is unproven rather
+than foreign, so `--check` says so and a restore proceeds.
 
 Exit codes, kept apart because they send you to different places:
 
@@ -57,6 +71,7 @@ import importlib.util
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -497,6 +512,26 @@ def redact(value: object) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
+def this_host() -> str:
+    """The host this script is running on, as a backup records it."""
+    return socket.gethostname().strip() or "unknown-host"
+
+
+def split_source(value: object) -> tuple[str, str]:
+    """`SOURCE` as `(host, data dir)`.
+
+    `host` is "" for a backup written before the host was recorded — a bare data
+    dir path. That is deliberately not an error: it is the state a restore has
+    to cope with, and treating it as foreign would block recovery of the only
+    copy that exists.
+    """
+    text = str(value or "")
+    host, separator, path = text.partition(":")
+    if separator and path.startswith("/"):
+        return host, path
+    return "", text
+
+
 # --- modes --------------------------------------------------------------------
 
 
@@ -530,17 +565,20 @@ def do_backup(vault: Vault, data_dir: Path, dry_run: bool, as_json: bool, force:
     shrunk = bool(stored_count) and len(entries) < stored_count
 
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    source = f"{this_host()}:{data_dir}"
     values = {
         KEY_SERVER_ENV: server_env,
         KEY_PROVIDERS: providers_json,
         KEY_BACKED_UP_AT: stamp,
         KEY_PROVIDER_COUNT: len(entries),
-        KEY_SOURCE: str(data_dir),
+        KEY_SOURCE: source,
     }
 
     report = {
         "vault": f"{vault.addr} {vault.secret_path}",
+        "host": this_host(),
         "data_dir": str(data_dir),
+        "source": source,
         "providers": len(entries),
         "providers_sha": redact(entries),
         "server_env_bytes": len(server_env),
@@ -562,6 +600,7 @@ def do_backup(vault: Vault, data_dir: Path, dry_run: bool, as_json: bool, force:
         return EXIT_OK
 
     print(f"vault      {vault.addr}  {vault.secret_path}")
+    print(f"host       {this_host()}")
     print(f"data dir   {data_dir}")
     print(f"providers  {len(entries)} connection(s), sha {report['providers_sha']}")
     print(f"server.env {len(server_env)} bytes, sha {report['server_env_sha']} (keys stored, not shown)")
@@ -586,12 +625,21 @@ def do_check(vault: Vault, data_dir: Path, as_json: bool) -> int:
         return EXIT_FAILED
 
     stored_count = count_providers(values)
+    stored_host, stored_path = split_source(values.get(KEY_SOURCE))
+    here = this_host()
+    # A backup from another host says nothing about *this* gateway, and its data
+    # dir path alone cannot distinguish the two (same compose project, same volume
+    # path). So it is reported as what it is rather than compared.
+    foreign = bool(stored_host) and stored_host != here
     report = {
         "vault": f"{vault.addr} {vault.secret_path}",
         "version": version,
         "updated": updated,
         "backed_up_at": values.get(KEY_BACKED_UP_AT),
         "source": values.get(KEY_SOURCE),
+        "source_host": stored_host or None,
+        "host": here,
+        "foreign_host": foreign,
         "providers": stored_count,
         "has_server_env": bool(values.get(KEY_SERVER_ENV)),
         "has_providers": bool(values.get(KEY_PROVIDERS)),
@@ -611,13 +659,30 @@ def do_check(vault: Vault, data_dir: Path, as_json: bool) -> int:
         print(f"stored     version {version}, backup taken {values.get(KEY_BACKED_UP_AT) or 'unknown'}")
         print(f"           from {values.get(KEY_SOURCE) or 'unknown'}")
         print(f"           {stored_count} connection(s); server.env {'present' if report['has_server_env'] else 'MISSING'}")
-        if live is None:
-            print("live       could not read the gateway's data dir — drift not compared")
-        elif live == stored_count:
-            print(f"live       {live} connection(s) — matches")
-        else:
-            print(f"live       {live} connection(s) — does NOT match the backup ({stored_count})")
+        if foreign:
+            print(f"host       taken on {stored_host}; this host is {here}")
+            print(f"           {stored_path} is not unique across hosts — the same compose project")
+            print("           on another machine has the same volume path, so this says nothing")
+            print("           about whether *this* gateway is backed up")
+            print("live       not compared — the stored backup is another host's")
+        elif not stored_host:
+            print(f"host       the stored backup names none (written before the host was recorded)")
+            print(f"           live comparison below is this host's ({here})")
+        if not foreign:
+            if live is None:
+                print("live       could not read the gateway's data dir — drift not compared")
+            elif live == stored_count:
+                print(f"live       {live} connection(s) — matches")
+            else:
+                print(f"live       {live} connection(s) — does NOT match the backup ({stored_count})")
 
+    if foreign:
+        print(
+            f"the stored backup was taken on {stored_host}, not on this host ({here}): it does not\n"
+            "show that this gateway is backed up at all — run this script here to find out",
+            file=sys.stderr,
+        )
+        return EXIT_FAILED
     if not report["has_server_env"] or not report["has_providers"]:
         print("the stored secret is incomplete: a restore would not rebuild a working gateway", file=sys.stderr)
         return EXIT_FAILED
@@ -649,7 +714,29 @@ def do_restore(
     if not values.get(KEY_PROVIDERS) and not values.get(KEY_SERVER_ENV):
         raise Failure(f"{vault.secret_path} holds neither a providers export nor server.env")
 
-    report: dict[str, object] = {"vault_version": version, "updated": updated, "data_dir": str(data_dir)}
+    # Whose keys are these? The data dir path cannot answer that on its own, and
+    # the answer decides whether this is a restore or an outage.
+    stored_host, stored_path = split_source(values.get(KEY_SOURCE))
+    here = this_host()
+    if stored_host and stored_host != here and not force:
+        raise Failure(
+            f"the stored backup was taken on {stored_host}, and this host is {here}.\n"
+            f"Its data dir ({stored_path}) is not unique — another host running the same\n"
+            "compose project carries the same volume path — so these keys may belong to a\n"
+            "different gateway, and writing them here would replace this one's\n"
+            "STORAGE_ENCRYPTION_KEY and orphan every credential it has already stored.\n"
+            "Restore on the host the backup was taken from, or pass --force to say these\n"
+            "keys are for *this* gateway."
+        )
+
+    report: dict[str, object] = {
+        "vault_version": version,
+        "updated": updated,
+        "data_dir": str(data_dir),
+        "host": here,
+        "source": values.get(KEY_SOURCE),
+        "source_host": stored_host or None,
+    }
 
     # 1. server.env — the keys. Refuse to clobber a different set of keys unless
     #    asked: `STORAGE_ENCRYPTION_KEY` decides whether the connections beside it
@@ -715,6 +802,10 @@ def do_restore(
 
     print(f"vault      {vault.addr}  {vault.secret_path} (version {version})")
     print(f"data dir   {data_dir}")
+    if stored_host:
+        print(f"host       {here}  (backup taken on {stored_host})")
+    else:
+        print(f"host       {here}  (the stored backup names no host — cannot be checked)")
     print(f"server.env {report['server_env']}")
     print(f"providers  {restored} connection(s) added")
     print("\nNext: start the gateway on that volume and check it can decrypt what it was given —")

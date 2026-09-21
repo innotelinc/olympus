@@ -361,7 +361,10 @@ class Backup(unittest.TestCase):
         self.assertEqual(written[backup.KEY_SERVER_ENV], self.server_env)
         self.assertEqual(json.loads(written[backup.KEY_PROVIDERS]), self.entries)
         self.assertEqual(written[backup.KEY_PROVIDER_COUNT], 1)
-        self.assertEqual(written[backup.KEY_SOURCE], str(self.data_dir))
+        # The host is part of the provenance: the data dir path alone does not
+        # identify a gateway (two hosts share the same compose project's path).
+        self.assertEqual(written[backup.KEY_SOURCE], f"{backup.this_host()}:{self.data_dir}")
+        self.assertEqual(backup.split_source(written[backup.KEY_SOURCE]), (backup.this_host(), str(self.data_dir)))
         self.assertIn(backup.KEY_BACKED_UP_AT, written)
 
     def test_a_dry_run_writes_nothing(self) -> None:
@@ -506,6 +509,119 @@ class Restore(unittest.TestCase):
     def test_an_empty_vault_is_an_error_not_a_silent_no_op(self) -> None:
         with self.assertRaises(backup.Failure):
             backup.do_restore(StubVault(), self.data_dir, False, "", "", True)
+
+
+class SourceHost(unittest.TestCase):
+    """`SOURCE` names the host, because a data dir path does not identify a gateway.
+
+    The failure these pin, measured on this estate: the same compose project runs
+    on two machines, so both carry
+    `/var/lib/docker/volumes/capstone_omniroute_data/_data` — one holding seven
+    provider connections, the other an empty volume. A path-only `SOURCE` cannot
+    say which gateway was backed up, and a restore read from it can write one
+    gateway's `STORAGE_ENCRYPTION_KEY` over the other's, orphaning every
+    credential the second one had stored.
+    """
+
+    FOREIGN = "a-different-gateway-host"
+
+    def test_a_host_qualified_source_parses(self) -> None:
+        self.assertEqual(
+            backup.split_source("dev:/var/lib/docker/volumes/x/_data"),
+            ("dev", "/var/lib/docker/volumes/x/_data"),
+        )
+
+    def test_a_legacy_source_is_unproven_rather_than_foreign(self) -> None:
+        # Blocking recovery of the only copy that exists is the wrong default.
+        for value in ("/var/lib/docker/volumes/x/_data", "", None):
+            host, path = backup.split_source(value)
+            self.assertEqual(host, "")
+        self.assertEqual(backup.split_source("/vol/x"), ("", "/vol/x"))
+        self.assertEqual(backup.split_source(""), ("", ""))
+        self.assertEqual(backup.split_source(None), ("", ""))
+
+    def stored(self, host: str, count: int = 1, providers: bool = True) -> StubVault:
+        """A stored backup. `providers=False` keeps the restore tests off the CLI
+        path — they are about which host the keys belong to, not about importing
+        connections."""
+        source = f"{host}:/var/lib/docker/volumes/capstone_omniroute_data/_data" if host else (
+            "/var/lib/docker/volumes/capstone_omniroute_data/_data"
+        )
+        values = {
+            backup.KEY_SERVER_ENV: "STORAGE_ENCRYPTION_KEY=x\n",
+            backup.KEY_PROVIDER_COUNT: count,
+            backup.KEY_SOURCE: source,
+        }
+        if providers:
+            values[backup.KEY_PROVIDERS] = json.dumps([{"provider": f"p{i}"} for i in range(count)])
+        return StubVault(values)
+
+    def export(self, entries: list[dict]) -> None:
+        self._real_export = backup.export_connections
+        backup.export_connections = lambda _dir: list(entries)
+
+    def tearDown(self) -> None:
+        if getattr(self, "_real_export", None) is not None:
+            backup.export_connections = self._real_export
+
+    def test_check_fails_when_the_backup_is_another_hosts(self) -> None:
+        self.export([{"provider": "a"}])
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = backup.do_check(self.stored(self.FOREIGN), Path("/tmp"), as_json=False)
+        self.assertEqual(code, 1)
+        text = buffer.getvalue()
+        self.assertIn(self.FOREIGN, text)
+        self.assertIn(backup.this_host(), text)
+        self.assertIn("not compared", text)
+
+    def test_an_identical_count_does_not_rescue_a_foreign_backup(self) -> None:
+        # This is the trap: 7 connections stored, 7 in use, nothing to do — except
+        # the 7 in use are a different gateway's.
+        self.export([{"provider": "p0"}])
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(backup.do_check(self.stored(self.FOREIGN), Path("/tmp"), as_json=True), 1)
+
+    def test_check_passes_for_a_backup_from_this_host(self) -> None:
+        self.export([{"provider": "a"}])
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(backup.do_check(self.stored(backup.this_host()), Path("/tmp"), as_json=False), 0)
+
+    def test_check_still_compares_a_legacy_backup_and_says_so(self) -> None:
+        self.export([{"provider": "a"}])
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = backup.do_check(self.stored(""), Path("/tmp"), as_json=False)
+        self.assertEqual(code, 0)
+        self.assertIn("names none", buffer.getvalue())
+
+    def test_restore_refuses_keys_taken_on_another_host(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            with self.assertRaises(backup.Failure) as caught:
+                backup.do_restore(self.stored(self.FOREIGN), data, False, "", "", True)
+            message = str(caught.exception)
+            self.assertIn(self.FOREIGN, message)
+            self.assertIn(backup.this_host(), message)
+            self.assertIn("--force", message)
+            self.assertFalse((data / "server.env").exists(), "nothing may be written when it refuses")
+
+    def test_force_states_that_the_keys_are_this_gateways(self) -> None:
+        # A gateway that genuinely moved hosts needs a way to say so.
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    backup.do_restore(self.stored(self.FOREIGN, providers=False), data, True, "", "", True), 0
+                )
+            self.assertEqual((data / "server.env").read_text(), "STORAGE_ENCRYPTION_KEY=x\n")
+
+    def test_restore_proceeds_for_a_legacy_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(backup.do_restore(self.stored("", providers=False), data, False, "", "", True), 0)
+            self.assertTrue((data / "server.env").is_file())
 
 
 if __name__ == "__main__":
