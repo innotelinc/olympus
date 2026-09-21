@@ -136,6 +136,25 @@ services:
       # never reaches OmniRoute's `/login`; without one, the public name is a 302 to
       # Authentik.
       - --skip-auth-route=^/v1/
+      # THE BARE PREFIX TOO, because `^/v1/` is not the same route. oauth2-proxy
+      # matches the path it was given, so `^/v1/` exempts `/v1/chat/completions`
+      # and `/v1/models` but sends `/v1` itself to Authentik. That asymmetry is
+      # invisible to a client that only ever POSTs a subpath, and breaks the one
+      # that validates its base URL first: `OMNIROUTE_BASE_URL` is documented one
+      # section up as `http://192.168.1.46:20129/v1` — the bare prefix — and the
+      # Asterisk AI voice engine probes exactly that before accepting a config.
+      # It got a login page back, read the 400 as an API error, and reported its
+      # whole pipeline unhealthy while every runtime call to the same gateway
+      # worked — a failure that reads as "the model is broken".
+      #
+      # Nothing new is exposed. `GET /v1` returns the same model list as
+      # `/v1/models`, which is already on this list, and the public name refuses
+      # both at the edge (`location ^~ /v1/` + `location = /v1` -> 403), which
+      # scripts/gateway-edge-check.py asserts. This route only makes the
+      # LAN exemption cover the prefix it was always documented to cover.
+      # `(\?.*)?$` for the same reason as the `/api/providers` route below: the
+      # match is against the request URI, query string included.
+      - '--skip-auth-route=^/v1(\?.*)?$'
       - --skip-auth-route=^/healthz$
       # THE READ-ONLY DOOR FOR STUDIO'S PROVIDER SET, and it is deliberately this
       # narrow. Studio owns no provider credentials and no model list of its own:

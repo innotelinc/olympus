@@ -36,7 +36,7 @@ the next section — that is not a preference, it is the one path that cannot wo
 | Upstream | `http://127.0.0.1:20128` (the gateway's loopback binding) |
 | Gateway binding | `127.0.0.1:20128` + `172.17.0.1:20128` (this host's docker0). **No LAN binding** — see [the split](#where-this-now-runs) |
 | Gateway own login | **off** (`requireLogin=false`), live — `make gateway-auth-mode --verify` passes. The stored password is kept as the recovery path and grants nothing |
-| LAN path | `/v1/*` and `/healthz` pass through; everything else — dashboard included — requires Authentik |
+| LAN path | `/v1` and `/v1/*` and `/healthz` pass through; everything else — dashboard included — requires Authentik |
 | Authentik application | `OmniRoute Gateway` (slug `omniroute`, provider pk 30) |
 | Client id | `omniroute` |
 | Issuer | `https://auth.cerulean.innotel.us/application/o/omniroute/` |
@@ -153,7 +153,9 @@ sorts callers by what they are:
 
 | Path | Who gets in | Why |
 | --- | --- | --- |
-| `/v1/*` | anyone who can reach `192.168.1.46:20129` — and then the gateway's own key check, which on this build does reject a missing or bogus key (see below) | inference clients send `Authorization: Bearer …`, not a session cookie, so an interactive OIDC login here would break every one of them rather than add a check. The door is the LAN address, and **the public name refuses this path at the edge** |
+| `/v1` and `/v1/*` | anyone who can reach `192.168.1.46:20129` — and then the gateway's own key check, which on this build does reject a missing or bogus key (see below) | inference clients send `Authorization: Bearer …`, not a session cookie, so an interactive OIDC login here would break every one of them rather than add a check. The door is the LAN address, and **the public name refuses this path at the edge** |
+
+The bare `/v1` is on the list separately from `/v1/*` because oauth2-proxy matches the path it was handed, and `^/v1/` does not match `/v1` — the prefix alone was being sent to Authentik. That is invisible to a client that only POSTs a subpath and fatal to one that validates its base URL first: `OMNIROUTE_BASE_URL` is documented below as `http://192.168.1.46:20129/v1`, and the Asterisk AI voice engine probes exactly that URL before accepting a configuration. It read the login page's 400 as an API error and reported its pipeline unhealthy while every real call worked. Nothing new is exposed — `GET /v1` returns the same model list as `/v1/models`, and the edge refuses both — so this only makes the exemption cover the prefix it was always documented to cover.
 | `/healthz` | anyone | liveness, 200 with no body and no secrets |
 | everything else, including `/dashboard` and `/api/providers` | an Authentik session in `cerulean-platform` | this is the surface that reads and writes provider credentials |
 
