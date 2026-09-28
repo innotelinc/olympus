@@ -323,6 +323,14 @@ def default_redirect_uris(setting) -> list[str]:
     return uris
 
 
+def _page_number(value: object) -> int:
+    """Authentik's `pagination.next` as an int; 0 (or junk) means stop."""
+    try:
+        return int(value or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
 class Api:
     def __init__(self, base: str, token: str, insecure: bool) -> None:
         self.base = base.rstrip("/")
@@ -359,9 +367,29 @@ class Api:
     def results(self, path: str, optional: bool = False, **params: str) -> list[dict]:
         query = f"?{urlencode(params)}" if params else ""
         payload = self.request("GET", f"{path}{query}", optional=optional)
-        if isinstance(payload, dict) and isinstance(payload.get("results"), list):
-            return payload["results"]
-        return payload if isinstance(payload, list) else []
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            return payload if isinstance(payload, list) else []
+
+        rows: list[dict] = list(payload["results"])
+        # Authentik pages every list endpoint (20 rows by default) and this used
+        # to return the first page only. A collection that passes one page then
+        # hides its later rows — and `/providers/oauth2/` does on a live
+        # instance, where 40 providers sort the Studio one onto page 2. That is
+        # how a repair turned into a create: the lookup saw nothing, POSTed a
+        # duplicate, and Authentik answered "provider with this name already
+        # exists". `pagination.next` is the page number to ask for next, 0 once
+        # there is none, so keep asking until it says 0.
+        seen: set[int] = set()
+        next_page = _page_number((payload.get("pagination") or {}).get("next"))
+        while next_page and next_page not in seen:
+            seen.add(next_page)
+            page_params = dict(params, page=str(next_page))
+            payload = self.request("GET", f"{path}?{urlencode(page_params)}", optional=optional)
+            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+                break
+            rows.extend(payload["results"])
+            next_page = _page_number((payload.get("pagination") or {}).get("next"))
+        return rows
 
 
 def pick_flow(api: Api, slugs: list[str], label: str) -> dict:

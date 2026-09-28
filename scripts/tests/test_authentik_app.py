@@ -224,5 +224,72 @@ class RotateSecret(unittest.TestCase):
         self.assertNotIn("client_secret: ", out.replace("client_secret: <new", "<new"))
 
 
+class ResultsFollowPagination(unittest.TestCase):
+    """`results()` must not stop at the first page.
+
+    On the live instance `/providers/oauth2/` passes 20 rows, which sorts the
+    Studio provider onto page 2. Seeing page 1 only made the lookup miss it, so
+    the idempotent repair POSTed a duplicate and Authentik answered "provider
+    with this name already exists" — the failure this pins down.
+    """
+
+    def _api(self, pages: list[dict]):
+        api = app.Api("https://auth.example.test", "t0ken", insecure=False)
+        calls: list[str] = []
+        remaining = list(pages)
+
+        def fake_request(method, path, body=None, optional=False):
+            calls.append(path)
+            return remaining.pop(0)
+
+        api.request = fake_request
+        return api, calls
+
+    def test_a_row_on_the_second_page_is_returned(self) -> None:
+        page1 = {
+            "results": [{"name": f"Application {i}"} for i in range(20)],
+            "pagination": {"next": 2, "count": 21, "current": 1, "total_pages": 2},
+        }
+        page2 = {
+            "results": [{"name": "Studio"}],
+            "pagination": {"next": 0, "count": 21, "current": 2, "total_pages": 2},
+        }
+        api, calls = self._api([page1, page2])
+
+        names = [row["name"] for row in api.results("/providers/oauth2/")]
+
+        self.assertIn("Studio", names)
+        self.assertEqual(len(names), 21)
+        # `next` is a page number, so the follow-up is the same path + ?page=N.
+        self.assertEqual(calls, ["/providers/oauth2/", "/providers/oauth2/?page=2"])
+
+    def test_one_page_still_costs_one_request(self) -> None:
+        page = {"results": [{"name": "Studio"}], "pagination": {"next": 0, "previous": 0, "count": 1}}
+        api, calls = self._api([page])
+
+        self.assertEqual([row["name"] for row in api.results("/providers/oauth2/")], ["Studio"])
+        self.assertEqual(calls, ["/providers/oauth2/"])
+
+    def test_a_repeating_next_page_does_not_loop(self) -> None:
+        page = {"results": [{"name": "Studio"}], "pagination": {"next": 2, "count": 99}}
+        api, calls = self._api([dict(page), dict(page), dict(page)])
+
+        self.assertEqual([row["name"] for row in api.results("/providers/oauth2/")], ["Studio", "Studio"])
+        self.assertEqual(len(calls), 2)
+
+    def test_a_query_filter_is_preserved_across_pages(self) -> None:
+        page1 = {"results": [{"slug": "other"}], "pagination": {"next": 2}}
+        page2 = {"results": [{"slug": "studio"}], "pagination": {"next": 0}}
+        api, calls = self._api([page1, page2])
+
+        rows = api.results("/core/applications/", slug="studio")
+
+        self.assertEqual([row["slug"] for row in rows], ["other", "studio"])
+        self.assertEqual(
+            calls,
+            ["/core/applications/?slug=studio", "/core/applications/?slug=studio&page=2"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
