@@ -51,7 +51,7 @@ services:
     # shell in the image is the price of a liveness signal; the container is the
     # only thing listening on the door and it never runs the shell itself.
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine
-    container_name: olympus-gateway-sso
+    container_name: gateway-sso
     restart: unless-stopped
     network_mode: host
     ports: !override []
@@ -313,7 +313,7 @@ services:
   # on the LAN can, which is the same posture as the gateway itself.
   gateway-sso-sessions:
     image: redis:7-alpine
-    container_name: olympus-gateway-sso-sessions
+    container_name: gateway-sso-sessions
     restart: unless-stopped
     labels:
       # Unlike the proxy, this one CAN be restarted usefully: it holds no state a

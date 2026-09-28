@@ -31,8 +31,8 @@ the next section — that is not a preference, it is the one path that cannot wo
 | Names served | every host in `GATEWAY_SSO_WHITELIST_DOMAIN` (`.innotel.us`) — the proxy runs without `--redirect-url`, so it derives `redirect_uri` from the request's Host |
 | Certificate | Let's Encrypt, `CN=gateway.studio.innotel.us`, issued by NPM's own certbot (HTTP-01) as certificate #49 |
 | Edge | NPM proxy host **#178** → `http://192.168.1.71:20128`, TLS enforced, websockets on, `/v1` refused (`location ^~ /v1/` + `location = /v1` → `403`) |
-| Proxy | `olympus-gateway-sso` (`quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine`), host networking, listens on **that host's LAN address** (`192.168.1.71:20128`, from `GATEWAY_SSO_BIND`) — it must share the host with the gateway, because the gateway is loopback-published |
-| Session store | `olympus-gateway-sso-sessions` (`redis:7-alpine`), loopback only on `127.0.0.1:16379`, password from `GATEWAY_SSO_REDIS_PASSWORD` |
+| Proxy | `gateway-sso` (`quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine`), host networking, listens on **that host's LAN address** (`192.168.1.71:20128`, from `GATEWAY_SSO_BIND`) — it must share the host with the gateway, because the gateway is loopback-published |
+| Session store | `gateway-sso-sessions` (`redis:7-alpine`), loopback only on `127.0.0.1:16379`, password from `GATEWAY_SSO_REDIS_PASSWORD` |
 | Upstream | `http://127.0.0.1:20128` (the gateway's loopback binding) |
 | Gateway binding | `127.0.0.1:20128` + `172.17.0.1:20128` (this host's docker0). **No LAN binding** — see [the split](#where-this-now-runs) |
 | Gateway own login | **off** (`requireLogin=false`), live — `make gateway-auth-mode --verify` passes. The stored password is kept as the recovery path and grants nothing |
@@ -266,7 +266,7 @@ So the two halves were put back on one host, and the LAN binding removed:
 ```
                    192.168.1.46
   ┌─────────────────────────────────────────────────────────────┐
-  │  edge (NPM) ──▶ olympus-gateway-sso :20128 (0.0.0.0)        │
+  │  edge (NPM) ──▶ gateway-sso :20128 (0.0.0.0)        │
   │                       │  http://127.0.0.1:20128             │
   │                       ▼                                     │
   │                 omniroute :20128  ◀── 127.0.0.1, 172.17.0.1 │
@@ -459,7 +459,7 @@ upstream sent too big header while reading response header from upstream
 That is a `502`, and it lands on the callback, so it reads as "the gateway is
 down" — while the gateway was up and the URL worked perfectly.
 
-**Fix:** `--session-store-type=redis`, with `olympus-gateway-sso-sessions` holding
+**Fix:** `--session-store-type=redis`, with `gateway-sso-sessions` holding
 the sessions and the browser holding one opaque id. The ceiling is gone rather
 than raised: it no longer matters how many groups an identity accumulates. Measured
 on the same callback through the same edge, after the change: 2 cookies, 367 bytes

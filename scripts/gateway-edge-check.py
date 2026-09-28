@@ -74,7 +74,7 @@ from pathlib import Path
 DEFAULT_SSO_PORT = 20128
 DEFAULT_REDIS_PORT = 16379
 DEFAULT_HOST = "gateway.olympus.innotel.us"
-SSO_CONTAINER = "olympus-gateway-sso"
+SSO_CONTAINER = "gateway-sso"
 
 
 def load_env(path: Path) -> dict[str, str]:
