@@ -54,7 +54,7 @@ Confirmed here: `192.168.1.10`'s Studio held a credential Authentik rejected, an
 | --- | --- | --- |
 | `studio.olympus.innotel.us`, `olympus.innotel.us` | ~~`.10:3001`~~ → **`172.17.0.1:3050`** (done) | ✅ re-pointed, login verified |
 | `*.studio.olympus.innotel.us` (3 apps × name + preview) | ~~`.10:20130`~~ → **`172.17.0.1:20130`** | ✅ apps + data moved, API verified through every name |
-| `gateway.olympus.innotel.us` | ~~`.10:20129`~~ → **`172.17.0.1:20129`** | ✅ re-pointed, SSO gate verified |
+| `gateway.olympus.innotel.us` | ~~`.10:20128`~~ → **`172.17.0.1:20128`** | ✅ re-pointed, SSO gate verified |
 | `secure.innotel.us` | `.10:8088` — dead before the move | ⛔ retired; see below |
 | Studio's data volume + packaged builds | ~~`olympus_studio-data` on `.10`~~ | ✅ imported here, SHA-256-verified file for file |
 

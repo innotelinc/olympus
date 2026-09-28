@@ -180,7 +180,7 @@ def main() -> int:
     zone = cerulean["CERULEAN_ZONE"]
     fqdn = (args.fqdn or read("GATEWAY_PUBLIC_HOST")).rstrip(".").lower()
     forward_host = args.forward_host or read("GATEWAY_SSO_EDGE_FORWARD_HOST")
-    forward_port = args.forward_port or int(read("GATEWAY_SSO_PORT", "20129") or 20129)
+    forward_port = args.forward_port or int(read("GATEWAY_SSO_PORT", "20128") or 20128)
 
     require_cerulean(
         env_path,

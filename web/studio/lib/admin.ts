@@ -21,7 +21,7 @@
  * (`classifyGatewayUrl`), because the whole estate documents them once and a
  * deployment drifts by copying an address: the gateway's own port `20128` answers
  * on its host's loopback and bridge alone, and the routable door is the SSO proxy
- * on `20129`.
+ * on that host's LAN address, `192.168.1.46:20128`.
  */
 
 import { existsSync, readdirSync, statSync } from "node:fs";
@@ -131,18 +131,22 @@ export type AdminStatus = {
 
 /* ---- policy: which gateway address is the door -------------------------- */
 
+/** The door: the SSO proxy, on the gateway host's LAN address. */
+export const GATEWAY_DOOR_HOST = "192.168.1.46";
+export const GATEWAY_DOOR_PORT = "20128";
+/** Where the door used to listen, kept so a stale value says so by name. */
+export const RETIRED_GATEWAY_DOOR_PORT = "20129";
+
 /**
  * The estate's rule, applied to whatever `OMNIROUTE_BASE_URL` says.
  *
- * `20129` is the SSO proxy in front of the gateway, which exempts `/v1` for API
- * clients; `20128` is the gateway itself, published on its host's loopback and
- * bridge alone, so from anywhere else it resolves to nothing — and *inside a
- * container* to the caller itself, which is how a rebuild once turned every
- * generation into ECONNREFUSED with an empty gateway log.
- *
- * Loopback on `20129` is accepted as well as the LAN address: on the gateway's
- * own host that names the same door. What is never accepted is loopback on
- * `20128`, because that is the caller.
+ * The door is the SSO proxy in front of the gateway, which exempts `/v1` for API
+ * clients, and it listens on the gateway's own default port — `192.168.1.46:20128`.
+ * It used to be `20129`, which was the proxy's port alone; the two meanings of
+ * `20128` are told apart by *address*: the gateway itself is published on its
+ * host's loopback and bridge alone, so from anywhere else it resolves to nothing —
+ * and *inside a container* to the caller itself, which is how a rebuild once turned
+ * every generation into ECONNREFUSED with an empty gateway log.
  */
 export function classifyGatewayUrl(baseUrl: string): { door: boolean; detail: string } {
   let url: URL;
@@ -157,27 +161,33 @@ export function classifyGatewayUrl(baseUrl: string): { door: boolean; detail: st
 
   const host = url.hostname.toLowerCase();
   const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
 
-  if (port === "20129") {
-    return {
-      door: true,
-      detail: `${host}:${port} is the SSO proxy in front of the gateway — the routable door, and the one that exempts /v1.`,
-    };
-  }
-
-  if (port === "20128") {
-    const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
+  if (port === GATEWAY_DOOR_PORT) {
+    if (host === GATEWAY_DOOR_HOST) {
+      return {
+        door: true,
+        detail: `${host}:${port} is the SSO proxy in front of the gateway — the routable door, and the one that exempts /v1.`,
+      };
+    }
     return {
       door: false,
       detail: loopback
         ? `${host}:${port} is this container's own loopback: the gateway's own port is not published here, so every call would reach Studio itself.`
-        : `${host}:${port} is the gateway's own port, published on the gateway host's loopback and bridge alone. Nothing off that host can dial it.`,
+        : `${host}:${port} is the gateway's own port, published on the gateway host's loopback and bridge alone. The door is ${GATEWAY_DOOR_HOST}:${GATEWAY_DOOR_PORT}.`,
+    };
+  }
+
+  if (port === RETIRED_GATEWAY_DOOR_PORT) {
+    return {
+      door: false,
+      detail: `${host}:${port} answers nothing any more: the door moved to ${GATEWAY_DOOR_HOST}:${GATEWAY_DOOR_PORT}, the gateway's own default port on that host's LAN address.`,
     };
   }
 
   return {
     door: false,
-    detail: `${host}:${port} is neither the gateway's own port (20128) nor the SSO proxy in front of it (20129).`,
+    detail: `${host}:${port} is not the gateway's door — that is ${GATEWAY_DOOR_HOST}:${GATEWAY_DOOR_PORT}.`,
   };
 }
 
@@ -355,7 +365,7 @@ function gatewayCheck(baseUrl: string): AdminCheck {
     detail,
     hint: door
       ? undefined
-      : "Point it at the SSO proxy in front of the gateway — on another host http://192.168.1.46:20129/v1, on the gateway's host http://host.docker.internal:20129/v1. See .env.example and docs/gateway-sso.md.",
+      : `Point it at the SSO proxy in front of the gateway: http://${GATEWAY_DOOR_HOST}:${GATEWAY_DOOR_PORT}/v1. See .env.example and docs/gateway-sso.md.`,
   };
 }
 

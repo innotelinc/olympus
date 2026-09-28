@@ -48,7 +48,7 @@ for the target architecture across ONYX, Olympus, Distro and Atlas.
       project on `<slug>-preview.<suffix>` — a real runtime under a name of its own,
       without registering the project's name.
 - [x] **One gateway door** — `OMNIROUTE_BASE_URL` points at the Authentik SSO proxy
-      on `:20129` everywhere; the gateway's own `:20128` stays on its host's loopback
+      on `:20128` everywhere; the gateway's own `:20128` stays on its host's loopback
       and bridge, `/v1` is refused on the public name, and `make gateway-auth-mode`
       makes Authentik the only gate. The panel checks the address the way the estate
       documents it.

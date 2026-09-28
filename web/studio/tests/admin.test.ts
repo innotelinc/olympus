@@ -58,7 +58,7 @@ beforeEach(() => {
   mkdirSync(BUILDS, { recursive: true });
 
   process.env.OMNIROUTE_API_KEY = "sk-valid-looking-key";
-  process.env.OMNIROUTE_BASE_URL = "http://192.168.1.46:20129/v1";
+  process.env.OMNIROUTE_BASE_URL = "http://192.168.1.46:20128/v1";
   process.env.STUDIO_BUILD_QUEUE_DIR = QUEUE;
   process.env.STUDIO_BUILDS_DIR = BUILDS;
 
@@ -118,18 +118,14 @@ function check(checks: AdminCheck[], id: string): AdminCheck {
 }
 
 describe("which gateway address is the door", () => {
-  it("accepts the SSO proxy in front of the gateway", () => {
-    const { door, detail } = classifyGatewayUrl("http://192.168.1.46:20129/v1");
-    expect(door).toBe(true);
-    expect(detail).toContain("20129");
-  });
-
-  it("accepts the same proxy reached over loopback on the gateway's own host", () => {
-    expect(classifyGatewayUrl("http://127.0.0.1:20129/v1").door).toBe(true);
-  });
-
-  it("refuses the gateway's own port, because nothing off that host can dial it", () => {
+  it("accepts the SSO proxy — the gateway's own port, on the host's LAN address", () => {
     const { door, detail } = classifyGatewayUrl("http://192.168.1.46:20128/v1");
+    expect(door).toBe(true);
+    expect(detail).toContain("20128");
+  });
+
+  it("refuses the gateway's own port anywhere else, because nothing off that host can dial it", () => {
+    const { door, detail } = classifyGatewayUrl("http://host.docker.internal:20128/v1");
     expect(door).toBe(false);
     expect(detail).toMatch(/loopback and bridge alone/i);
   });
@@ -142,7 +138,13 @@ describe("which gateway address is the door", () => {
     expect(detail).toMatch(/this container's own loopback/i);
   });
 
-  it("refuses anything that is neither port", () => {
+  it("names the door that replaced the retired 20129", () => {
+    const { door, detail } = classifyGatewayUrl("http://192.168.1.46:20129/v1");
+    expect(door).toBe(false);
+    expect(detail).toMatch(/moved to 192\.168\.1\.46:20128/);
+  });
+
+  it("refuses anything that is not the door", () => {
     expect(classifyGatewayUrl("http://192.168.1.46:8080/v1").door).toBe(false);
     expect(classifyGatewayUrl("https://gateway.example.com/v1").door).toBe(false);
   });
@@ -230,7 +232,7 @@ describe("the collected panel", () => {
 
     expect(state.gateway.door).toBe(false);
     expect(check(state.checks, "gateway-door").state).toBe("fail");
-    expect(check(state.checks, "gateway-door").hint).toMatch(/20129/);
+    expect(check(state.checks, "gateway-door").hint).toMatch(/192\.168\.1\.46:20128/);
     expect(worstState(state.checks)).toBe("fail");
   });
 
@@ -238,7 +240,7 @@ describe("the collected panel", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
-        throw new Error("connect ECONNREFUSED 192.168.1.46:20129");
+        throw new Error("connect ECONNREFUSED 192.168.1.46:20128");
       }),
     );
     beat();

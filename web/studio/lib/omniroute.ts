@@ -38,15 +38,15 @@ export type TokenUsage = {
  * that is Studio talking to itself: the gateway is a group-2 service on its own
  * host, published on that host's loopback and bridge alone because
  * `requireLogin=false` makes reaching `20128` the whole control. The routable
- * address is the identity-aware proxy in front of it (`20129`), which exempts
+ * address is the identity-aware proxy in front of it (`20128`), which exempts
  * `/v1` for API clients — they send a key, not a session cookie.
  *
  * A deployment sets `OMNIROUTE_BASE_URL` either way; the default is what an
  * unset one gets, and a fallback that resolves to nothing is worse than a
  * fallback that names the one address every host can reach. On the gateway's own
- * host, `http://host.docker.internal:20129/v1` is the same door.
+ * host, `http://host.docker.internal:20128/v1` is the same door.
  */
-const DEFAULT_BASE_URL = "http://192.168.1.46:20129/v1";
+const DEFAULT_BASE_URL = "http://192.168.1.46:20128/v1";
 const DEFAULT_CHAT_PATH = "/chat/completions";
 /**
  * What an unset `OMNIROUTE_MODEL` means, and therefore what every build uses

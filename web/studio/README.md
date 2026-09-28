@@ -134,7 +134,7 @@ failing obscurely.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OMNIROUTE_BASE_URL` | `http://192.168.1.46:20129/v1` | Gateway root — the Authentik SSO proxy in front of the platform's one OmniRoute, which exempts `/v1` for API clients. The gateway's own `:20128` answers on its host's loopback and bridge alone. The topology table below has the per-host rows. |
+| `OMNIROUTE_BASE_URL` | `http://192.168.1.46:20128/v1` | Gateway root — the Authentik SSO proxy in front of the platform's one OmniRoute, which exempts `/v1` for API clients. The gateway's own `:20128` answers on its host's loopback and bridge alone. The topology table below has the per-host rows. |
 | `OMNIROUTE_API_KEY` | — | Bearer key for the gateway. Required. |
 | `OMNIROUTE_MODEL` | `auto/coding` | Model routed through the gateway. `.env.example` pins a concrete, tool-calling model instead — `auto/coding` is a combo that walks the whole catalogue, so which brain answers is luck (see the root README). |
 | `OMNIROUTE_CHAT_PATH` | `/chat/completions` | Override only if the gateway exposes the route elsewhere. |
@@ -636,7 +636,7 @@ variable, restarts a container or spends a turn.
 gateway's own `:20128` on loopback compiles, resolves, and fails with an empty
 gateway log — inside the container that address is Studio itself. The panel says
 that sentence out loud, and points at the SSO proxy in front of the gateway
-(`:20129`) instead.
+(`:20128`) instead.
 
 Two details worth knowing before reading the page:
 
@@ -704,9 +704,9 @@ looked fine because Studio's healthcheck only asks whether Studio answers.
 
 | Topology | `OMNIROUTE_BASE_URL` |
 | --- | --- |
-| Shared gateway, another host (the platform default) | `http://192.168.1.46:20129/v1` — the SSO proxy in front of the gateway, whose port is `GATEWAY_SSO_PORT` below |
-| Gateway on the same host as this stack | `http://host.docker.internal:20129/v1` — the docker0 alias reaches the proxy's listener |
-| Host-mode caller on the gateway's host | `http://127.0.0.1:20129/v1` — run it with host networking, `make docker-studio-up` |
+| Shared gateway, another host (the platform default) | `http://192.168.1.46:20128/v1` — the SSO proxy in front of the gateway, whose port is `GATEWAY_SSO_PORT` below |
+| Gateway on the same host as this stack | `http://host.docker.internal:20128/v1` — the docker0 alias reaches the proxy's listener |
+| Host-mode caller on the gateway's host | `http://127.0.0.1:20128/v1` — run it with host networking, `make docker-studio-up` |
 | The gateway's own port, deliberately | `http://127.0.0.1:20128/v1` — for a host-mode process *on the gateway's host* only; a bridge container resolves it to itself |
 
 Two rows are gone. `http://omniroute:20128/v1` went with the `omniroute` service —
@@ -754,7 +754,7 @@ make studio-test      # or: cd web/studio && npm test
 | `tests/factory-spec.test.ts` | The spec: slug safety from hostile titles, the template's headings, stack and verification inference, the bounded appendix, determinism, and the writer's refusal to clobber, its traversal containment, and its `503` message |
 | `tests/export-route.test.ts` | The export route: attachment headers, gating and `404`s, the write into `build-requests/`, `409` then overwrite, a hostile title staying inside the directory, `503` when unwritable, and the download path surviving that |
 | `tests/page.test.ts` | The host split: the root host shows the landing screen, the studio host redirects to the provider, a session gets the builder on either host, and an unconfigured deployment gates nothing |
-| `tests/admin.test.ts` | The panel's own rules: `:20129` is the door and `:20128` on loopback is the caller, which artefacts count as packaged, the collected state on a healthy deployment (and on a gateway that is down, refusing the key, or absent), a stale or never-seen runner, a de-linked model, and that no secret reaches the payload |
+| `tests/admin.test.ts` | The panel's own rules: `:20128` is the door and `:20128` on loopback is the caller, which artefacts count as packaged, the collected state on a healthy deployment (and on a gateway that is down, refusing the key, or absent), a stale or never-seen runner, a de-linked model, and that no secret reaches the payload |
 | `tests/admin-route.test.ts` | The panel's gates: `401` without a session, `403` outside `OLYMPUS_ADMIN_GROUPS` (including a token with no `groups` claim at all), the build allow-list staying separate from the admin list, the shared access token, `no-store`, and the page's three outcomes — provider redirect, refusal screen, panel |
 
 The mock provider (`tests/helpers/mock-oidc.ts`) serves a real discovery

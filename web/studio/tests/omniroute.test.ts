@@ -76,10 +76,10 @@ describe("isPlaceholderSecret", () => {
 describe("readConfig", () => {
   it("falls back to the gateway door and the default model", () => {
     const config = readConfig();
-    // The door (:20129), never the gateway's own port: inside this container
+    // The door (:20128), never the gateway's own port: inside this container
     // `127.0.0.1:20128` is Studio itself, which is how a rebuild once turned
     // every generation into ECONNREFUSED with nothing in the gateway's log.
-    expect(config.baseUrl).toBe("http://192.168.1.46:20129/v1");
+    expect(config.baseUrl).toBe("http://192.168.1.46:20128/v1");
     expect(config.model).toBe(DEFAULT_MODEL);
     expect(config.chatPath).toBe("/chat/completions");
   });
@@ -93,8 +93,8 @@ describe("readConfig", () => {
     // Measured on this host: `/etc/profile.d/omniroute.sh` and `~/.bashrc` export
     // the door without `/v1`, and compose interpolation lets the shell win over
     // `.env`. Without this, every model list and completion 302s to Authentik.
-    process.env.OMNIROUTE_BASE_URL = "http://192.168.1.46:20129";
-    expect(readConfig().baseUrl).toBe("http://192.168.1.46:20129/v1");
+    process.env.OMNIROUTE_BASE_URL = "http://192.168.1.46:20128";
+    expect(readConfig().baseUrl).toBe("http://192.168.1.46:20128/v1");
   });
 
   it("honours overrides", () => {
@@ -102,7 +102,7 @@ describe("readConfig", () => {
     process.env.OMNIROUTE_CHAT_PATH = "responses";
     const config = readConfig();
     expect(config.model).toBe("auto/fast");
-    expect(chatCompletionsUrl(config)).toBe("http://192.168.1.46:20129/v1/responses");
+    expect(chatCompletionsUrl(config)).toBe("http://192.168.1.46:20128/v1/responses");
   });
 });
 
@@ -121,13 +121,13 @@ describe("chatCompletionsUrl", () => {
 
 describe("normalizeBaseUrl", () => {
   it("adds a missing /v1", () => {
-    expect(normalizeBaseUrl("http://gw:20129")).toBe("http://gw:20129/v1");
-    expect(normalizeBaseUrl("http://gw:20129/")).toBe("http://gw:20129/v1");
+    expect(normalizeBaseUrl("http://gw:20128")).toBe("http://gw:20128/v1");
+    expect(normalizeBaseUrl("http://gw:20128/")).toBe("http://gw:20128/v1");
   });
 
   it("leaves an existing /v1 alone", () => {
-    expect(normalizeBaseUrl("http://gw:20129/v1")).toBe("http://gw:20129/v1");
-    expect(normalizeBaseUrl("http://gw:20129/v1///")).toBe("http://gw:20129/v1");
+    expect(normalizeBaseUrl("http://gw:20128/v1")).toBe("http://gw:20128/v1");
+    expect(normalizeBaseUrl("http://gw:20128/v1///")).toBe("http://gw:20128/v1");
   });
 
   it("keeps a path prefix", () => {
@@ -142,12 +142,12 @@ describe("managementBaseUrl", () => {
   }
 
   it("drops the /v1 prefix the inference surface uses", () => {
-    expect(managementBaseUrl(config("http://gw:20129/v1"))).toBe("http://gw:20129");
+    expect(managementBaseUrl(config("http://gw:20128/v1"))).toBe("http://gw:20128");
   });
 
   it("leaves a bare door and a trailing slash consistent", () => {
-    expect(managementBaseUrl(config("http://gw:20129/"))).toBe("http://gw:20129");
-    expect(managementBaseUrl(config("http://gw:20129"))).toBe("http://gw:20129");
+    expect(managementBaseUrl(config("http://gw:20128/"))).toBe("http://gw:20128");
+    expect(managementBaseUrl(config("http://gw:20128"))).toBe("http://gw:20128");
   });
 });
 
@@ -214,7 +214,7 @@ describe("parseConnections", () => {
 });
 
 describe("listModels, filtered to the connected providers", () => {
-  const config = { baseUrl: "http://gw:20129/v1", chatPath: "/chat/completions", apiKey: "k", model: "auto/coding" };
+  const config = { baseUrl: "http://gw:20128/v1", chatPath: "/chat/completions", apiKey: "k", model: "auto/coding" };
 
   const CATALOGUE = {
     data: [
@@ -246,7 +246,7 @@ describe("listModels, filtered to the connected providers", () => {
 
     await listModels(config, { fresh: true });
     const urls = mock.mock.calls.map(([url]) => String(url));
-    expect(urls).toContain("http://gw:20129/api/providers?limit=5000");
+    expect(urls).toContain("http://gw:20128/api/providers?limit=5000");
   });
 
   it("leaves the catalogue alone when the connections cannot be read", async () => {
@@ -338,7 +338,7 @@ describe("firstAvailableFreeModel", () => {
 });
 
 describe("listConnectedProviders", () => {
-  const config = { baseUrl: "http://gw:20129/v1", chatPath: "/chat/completions", apiKey: "k", model: "m" };
+  const config = { baseUrl: "http://gw:20128/v1", chatPath: "/chat/completions", apiKey: "k", model: "m" };
 
   it("returns null rather than throwing when the route refuses", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("no", { status: 403 })));

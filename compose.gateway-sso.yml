@@ -13,7 +13,7 @@
 #   browser ──https──▶ edge (NPM, this host)
 #                          │  gateway.studio.innotel.us      (and the older
 #                          │  gateway.olympus.innotel.us, same door, same proxy)
-#                          ▼  http://192.168.1.46:20129
+#                          ▼  http://192.168.1.46:20128
 #                    gateway-sso (oauth2-proxy) ──▶ Authentik OIDC + group check
 #                          │  http://127.0.0.1:20128
 #                          ▼
@@ -49,7 +49,7 @@ services:
     # shell, which makes the healthcheck below impossible to express (a `wget`
     # healthcheck on it reports the container unhealthy forever — measured). A
     # shell in the image is the price of a liveness signal; the container is the
-    # only thing on 20129 and it never runs the shell itself.
+    # only thing listening on the door and it never runs the shell itself.
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine
     container_name: olympus-gateway-sso
     restart: unless-stopped
@@ -88,8 +88,15 @@ services:
       # it says so on every start. A public-Redirect-URI code flow should use it.
       - --code-challenge-method=S256
       - --upstream=${GATEWAY_SSO_UPSTREAM:-http://127.0.0.1:20128}
-      # 0.0.0.0 because the edge is on another host and reaches this over the LAN.
-      - --http-address=0.0.0.0:${GATEWAY_SSO_PORT:-20129}
+      # THE LAN ADDRESS, NOT 0.0.0.0, and since the door moved onto the gateway's
+      # own default port (20128) that is load-bearing rather than tidiness: on
+      # this host `omniroute` already holds 127.0.0.1:20128 (host-mode callers)
+      # and 172.17.0.1:20128 (containers on this host, via `host.docker.internal`).
+      # A wildcard bind overlaps both and fails with EADDRINUSE, so the proxy
+      # would not start at all. Binding this host's LAN address leaves those two
+      # answers untouched and makes the LAN address the door — one listener, two
+      # roles, told apart by address rather than by port number.
+      - --http-address=${GATEWAY_SSO_BIND:-0.0.0.0}:${GATEWAY_SSO_PORT:-20128}
       # THE LAN PATH FOR API CLIENTS, and the reason this listener is on 0.0.0.0
       # rather than loopback. The gateway itself stays on 127.0.0.1, so the only
       # way in from another machine is through here — which means one door, and it
@@ -141,7 +148,7 @@ services:
       # and `/v1/models` but sends `/v1` itself to Authentik. That asymmetry is
       # invisible to a client that only ever POSTs a subpath, and breaks the one
       # that validates its base URL first: `OMNIROUTE_BASE_URL` is documented one
-      # section up as `http://192.168.1.46:20129/v1` — the bare prefix — and the
+      # section up as `http://192.168.1.46:20128/v1` — the bare prefix — and the
       # Asterisk AI voice engine probes exactly that before accepting a config.
       # It got a login page back, read the 400 as an API error, and reported its
       # whole pipeline unhealthy while every runtime call to the same gateway
@@ -223,7 +230,7 @@ services:
       # `--trusted-ip` was tried here and REMOVED: oauth2-proxy warns on every
       # request that mixing it with `--reverse-proxy` is unsafe, and it is right —
       # with reverse-proxy on, the client IP is read from X-Forwarded-For, so a
-      # caller who can reach 20129 spoofs the trusted address and is believed.
+      # caller who can reach 20128 spoofs the trusted address and is believed.
       # It hardens nothing. The real control is who can reach the port: the
       # listener is on 0.0.0.0 so the edge can, which means the port should be
       # firewalled to the edge's address — see docs/gateway-sso.md.
@@ -283,7 +290,10 @@ services:
       # dashboard instead would make this container's health depend on the
       # gateway being up, which is how a healthy proxy gets restarted for
       # somebody else's outage.
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${GATEWAY_SSO_PORT:-20129}/ping"]
+      # Probes the BIND, not loopback: on this host 127.0.0.1:20128 answers
+      # `omniroute`, so a loopback probe would silently test the gateway's
+      # dashboard (and report unhealthy) instead of this proxy's liveness.
+      test: ["CMD", "wget", "-qO-", "http://${GATEWAY_SSO_BIND:-127.0.0.1}:${GATEWAY_SSO_PORT:-20128}/ping"]
       interval: 30s
       timeout: 5s
       retries: 3

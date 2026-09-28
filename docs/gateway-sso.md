@@ -9,7 +9,7 @@ proxy that authenticates against Cerulean Authentik and admits only members of
 ```
 browser ──https──▶ NPM edge (192.168.1.46)
                        │  gateway.olympus.innotel.us  (CNAME → innotel.us → 73.68.203.71)
-                       ▼  http://172.17.0.1:20129
+                       ▼  http://172.17.0.1:20128
                  gateway-sso (oauth2-proxy) ──▶ Authentik OIDC + group check
                        │  └──▶ redis at 127.0.0.1:16379   (the session lives here)
                        │  http://127.0.0.1:20128
@@ -30,8 +30,8 @@ the next section — that is not a preference, it is the one path that cannot wo
 | Second name | `gateway.olympus.innotel.us` — NPM proxy host **#179**, the *same* proxy, cert #5, `/v1` refused. Not a redirect: each name logs in on itself (see [one proxy, two names](#one-proxy-two-names)) |
 | Names served | every host in `GATEWAY_SSO_WHITELIST_DOMAIN` (`.innotel.us`) — the proxy runs without `--redirect-url`, so it derives `redirect_uri` from the request's Host |
 | Certificate | Let's Encrypt, `CN=gateway.studio.innotel.us`, issued by NPM's own certbot (HTTP-01) as certificate #49 |
-| Edge | NPM proxy host **#178** → `http://192.168.1.46:20129`, TLS enforced, websockets on, `/v1` refused (`location ^~ /v1/` + `location = /v1` → `403`) |
-| Proxy | `olympus-gateway-sso` (`quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine`), host networking, listens `0.0.0.0:20129` — on the host running the gateway |
+| Edge | NPM proxy host **#178** → `http://192.168.1.46:20128`, TLS enforced, websockets on, `/v1` refused (`location ^~ /v1/` + `location = /v1` → `403`) |
+| Proxy | `olympus-gateway-sso` (`quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine`), host networking, listens on **that host's LAN address** (`192.168.1.46:20128`, from `GATEWAY_SSO_BIND`) — it must share the host with the gateway, because the gateway is loopback-published |
 | Session store | `olympus-gateway-sso-sessions` (`redis:7-alpine`), loopback only on `127.0.0.1:16379`, password from `GATEWAY_SSO_REDIS_PASSWORD` |
 | Upstream | `http://127.0.0.1:20128` (the gateway's loopback binding) |
 | Gateway binding | `127.0.0.1:20128` + `172.17.0.1:20128` (this host's docker0). **No LAN binding** — see [the split](#where-this-now-runs) |
@@ -42,6 +42,25 @@ the next section — that is not a preference, it is the one path that cannot wo
 | Issuer | `https://auth.cerulean.innotel.us/application/o/omniroute/` |
 | Callbacks registered | `https://gateway.studio.innotel.us/oauth2/callback`, `…/api/auth/oidc/callback`, and the same two under `gateway.olympus.innotel.us` |
 | Access rule | any verified email clears OIDC; only group `cerulean-platform` gets in |
+
+## The door moved onto the gateway's own port
+
+The proxy used to listen on `20129` — a number only it used — while the gateway
+answered on `20128`. Both are `20128` now and they are told apart by **address**:
+`127.0.0.1:20128` and `172.17.0.1:20128` are the gateway (this host only),
+`192.168.1.46:20128` is the door. The reason is that `20129` was the one port in this
+document a consumer had to know for no reason it could see; `20128` is the number the
+gateway has always published as *its* own, so there is one number to remember
+instead of two, and the SSO proxy is what that number means from off-host.
+
+`0.0.0.0` is no longer an option for the proxy, and that is a constraint rather than
+a preference: this host holds `127.0.0.1:20128` and `172.17.0.1:20128` for the
+gateway, a wildcard bind overlaps both, and the proxy would fail to start with
+`EADDRINUSE`. The bind therefore comes from `GATEWAY_SSO_BIND` in `.env`, and the
+healthcheck probes that address rather than loopback — on this host loopback `20128`
+is the gateway, so a loopback probe would test the wrong container. A target still
+naming `20129` is a failure, not a warning: `ips/scripts/check-gateway-targets.py`
+rule 5, added with this change.
 
 ## Why not OmniRoute's own OIDC
 
@@ -148,14 +167,14 @@ the proxy and restore the unauthenticated dashboard.
 
 The gateway itself listens on `127.0.0.1:20128` and stays that way: it is the
 process that holds every provider credential, and widening its binding puts the
-dashboard on the network. The **proxy** is the LAN door — `0.0.0.0:20129` — and it
+dashboard on the network. The **proxy** is the LAN door — `192.168.1.46:20128` — and it
 sorts callers by what they are:
 
 | Path | Who gets in | Why |
 | --- | --- | --- |
-| `/v1` and `/v1/*` | anyone who can reach `192.168.1.46:20129` — and then the gateway's own key check, which on this build does reject a missing or bogus key (see below) | inference clients send `Authorization: Bearer …`, not a session cookie, so an interactive OIDC login here would break every one of them rather than add a check. The door is the LAN address, and **the public name refuses this path at the edge** |
+| `/v1` and `/v1/*` | anyone who can reach `192.168.1.46:20128` — and then the gateway's own key check, which on this build does reject a missing or bogus key (see below) | inference clients send `Authorization: Bearer …`, not a session cookie, so an interactive OIDC login here would break every one of them rather than add a check. The door is the LAN address, and **the public name refuses this path at the edge** |
 
-The bare `/v1` is on the list separately from `/v1/*` because oauth2-proxy matches the path it was handed, and `^/v1/` does not match `/v1` — the prefix alone was being sent to Authentik. That is invisible to a client that only POSTs a subpath and fatal to one that validates its base URL first: `OMNIROUTE_BASE_URL` is documented below as `http://192.168.1.46:20129/v1`, and the Asterisk AI voice engine probes exactly that URL before accepting a configuration. It read the login page's 400 as an API error and reported its pipeline unhealthy while every real call worked. Nothing new is exposed — `GET /v1` returns the same model list as `/v1/models`, and the edge refuses both — so this only makes the exemption cover the prefix it was always documented to cover.
+The bare `/v1` is on the list separately from `/v1/*` because oauth2-proxy matches the path it was handed, and `^/v1/` does not match `/v1` — the prefix alone was being sent to Authentik. That is invisible to a client that only POSTs a subpath and fatal to one that validates its base URL first: `OMNIROUTE_BASE_URL` is documented below as `http://192.168.1.46:20128/v1`, and the Asterisk AI voice engine probes exactly that URL before accepting a configuration. It read the login page's 400 as an API error and reported its pipeline unhealthy while every real call worked. Nothing new is exposed — `GET /v1` returns the same model list as `/v1/models`, and the edge refuses both — so this only makes the exemption cover the prefix it was always documented to cover.
 | `/healthz` | anyone | liveness, 200 with no body and no secrets |
 | everything else, including `/dashboard` and `/api/providers` | an Authentik session in `cerulean-platform` | this is the surface that reads and writes provider credentials |
 
@@ -186,8 +205,8 @@ neither is achieved by changing the gateway's binding:
 
 ```bash
 # from any machine on the LAN — the address, not the name
-curl -H "Authorization: Bearer $OMNIROUTE_API_KEY" http://192.168.1.46:20129/v1/models
-OMNIROUTE_BASE_URL=http://192.168.1.46:20129/v1
+curl -H "Authorization: Bearer $OMNIROUTE_API_KEY" http://192.168.1.46:20128/v1/models
+OMNIROUTE_BASE_URL=http://192.168.1.46:20128/v1
 ```
 
 **Not the published name.** `https://gateway.olympus.innotel.us/v1/*` answers `403` by
@@ -205,8 +224,8 @@ was re-pointed at the new host:
 
 | | On `.10` | On `.46` (live) |
 | --- | --- | --- |
-| Edge | NPM host #198 → `.10:20129` | NPM host **#81** → `172.17.0.1:20129`, cert `#5`, websockets on |
-| Proxy | `0.0.0.0:20129` | `*:20129` |
+| Edge | NPM host #198 → `.10:20128` | NPM host **#81** → `172.17.0.1:20128`, cert `#5`, websockets on |
+| Proxy | `0.0.0.0:20128` | `192.168.1.46:20128` (the LAN address, because the port is the gateway's) |
 | Upstream | `127.0.0.1:20128` | `127.0.0.1:20128` (`GATEWAY_SSO_UPSTREAM`, unchanged) |
 | Public `/` | `302` → Authentik | unchanged — `302` |
 | Public `/v1`, `/v1/models` | `403`, refused at the edge | unchanged — `403` |
@@ -247,7 +266,7 @@ So the two halves were put back on one host, and the LAN binding removed:
 ```
                    192.168.1.46
   ┌─────────────────────────────────────────────────────────────┐
-  │  edge (NPM) ──▶ olympus-gateway-sso :20129 (0.0.0.0)        │
+  │  edge (NPM) ──▶ olympus-gateway-sso :20128 (0.0.0.0)        │
   │                       │  http://127.0.0.1:20128             │
   │                       ▼                                     │
   │                 omniroute :20128  ◀── 127.0.0.1, 172.17.0.1 │
@@ -259,15 +278,15 @@ So the two halves were put back on one host, and the LAN binding removed:
 | Proxy host | `5-dev/olympus` on `.50` | `5-dev/olympus` on `.46`, upstream `http://127.0.0.1:20128` |
 | Gateway bindings | `127.0.0.1`, `172.17.0.1`, **`192.168.1.46`** | `127.0.0.1`, `172.17.0.1` — no LAN binding |
 | Gateway own login | on (`requireLogin=true`), protecting the LAN address | **off** (`requireLogin=false`) — Authentik is the only gate |
-| Public names | `gateway.olympus.innotel.us` → `.50:20129` | `gateway.studio.innotel.us` **and** `gateway.olympus.innotel.us` → `.46:20129`, one proxy, each name its own callback |
-| Edge hosts | #81 → `.50:20129`, cert #5 | #178 (studio, cert #49) and #179 (olympus, cert #5); #81 deleted |
+| Public names | `gateway.olympus.innotel.us` → `.50:20128` | `gateway.studio.innotel.us` **and** `gateway.olympus.innotel.us` → `.46:20128`, one proxy, each name its own callback |
+| Edge hosts | #81 → `.50:20128`, cert #5 | #178 (studio, cert #49) and #179 (olympus, cert #5); #81 deleted |
 
 `/v1` is the one path the proxy exempts, so it is how every other host reaches
 inference. There is no LAN address on `20128` any more, so a client on another machine
 dials the proxy:
 
 ```bash
-OMNIROUTE_BASE_URL=http://192.168.1.46:20129/v1    # from any other host
+OMNIROUTE_BASE_URL=http://192.168.1.46:20128/v1    # from any other host
 ```
 
 Consumers updated with the change: `2-voice/capstone` (n8n's
@@ -343,13 +362,13 @@ Verified against the live deployment:
 | HTTP → HTTPS | `301 Moved Permanently` to `https://gateway.olympus.innotel.us/` |
 | Public `/` | `302` to `https://auth.cerulean.innotel.us/application/o/authorize/` with `client_id=omniroute`, PKCE `S256`, and the registered `redirect_uri` |
 | Authentik accepts the client | `/authorize` answers `302` to the login flow — not `invalid_client` / unregistered `redirect_uri` |
-| `make gateway-sso-check` | ok — live on `127.0.0.1:20129`, `/` redirects to Authentik as client `omniroute` |
-| Proxy on the LAN | `/ping` → `200` from `192.168.1.10:20129` as well as loopback |
-| LAN inference | `http://192.168.1.10:20129/v1/models` → `200`, with or without the API key — the key is not validated (below) |
+| `make gateway-sso-check` | ok — live on `127.0.0.1:20128`, `/` redirects to Authentik as client `omniroute` |
+| Proxy on the LAN | `/ping` → `200` from `192.168.1.10:20128` as well as loopback |
+| LAN inference | `http://192.168.1.10:20128/v1/models` → `200`, with or without the API key — the key is not validated (below) |
 | Public inference | `https://gateway.olympus.innotel.us/v1/models` and `/v1/chat/completions` → `403`, refused at the edge; `/v1` (bare) → `403` too |
 | The edge rule was actually written | NPM host #198 `advanced_config` reads back the two `location` lines — read back, because Cerulean's NPM passthrough accepts `advanced_config` and drops it (200, `modified_on` updated, field still empty) |
 | The key is not a gate | `POST /v1/chat/completions` with no `Authorization` at all → `200` and a completion, on the LAN path |
-| LAN dashboard | `/dashboard`, `/login`, `/api/providers`, `/` all → `302` to Authentik from `192.168.1.10:20129` |
+| LAN dashboard | `/dashboard`, `/login`, `/api/providers`, `/` all → `302` to Authentik from `192.168.1.10:20128` |
 | Gateway stays private | `http://192.168.1.10:20128/healthz` → no connection |
 | One OmniRoute only | one container, one listener on `20128`; the `olympus` container no longer publishes that port and no longer starts a bundled gateway |
 | `make gateway-edge` re-run | reports all three steps already done; writes nothing |
@@ -434,7 +453,7 @@ NPM's log for proxy host #198:
 ```
 upstream sent too big header while reading response header from upstream
   request: "GET /oauth2/callback?code=7e7eaf2ac62e496c894e3669eee0b5e6&state=…"
-  upstream: "http://192.168.1.10:20129/oauth2/callback?code=…"
+  upstream: "http://192.168.1.10:20128/oauth2/callback?code=…"
 ```
 
 That is a `502`, and it lands on the callback, so it reads as "the gateway is
@@ -462,7 +481,7 @@ sentence in a browser:
 
 ```
 DNS        gateway.olympus.innotel.us  CNAME  innotel.us  → A  73.68.203.71
-edge       NPM (192.168.1.46) :443     →  http://172.17.0.1:20129
+edge       NPM (192.168.1.46) :443     →  http://172.17.0.1:20128
 proxy      oauth2-proxy                →  Authentik, for everything but /ping
 session    oauth2-proxy                →  redis at 127.0.0.1:16379
 gateway    omniroute                   →  127.0.0.1:20128
@@ -525,11 +544,11 @@ occurrence say so in one line instead of costing an afternoon.
 
 ## The one thing left worth doing by hand
 
-**Close port 20129 to everything but the edge.** The proxy listens on `0.0.0.0`
+**Close port 20128 to everything but the edge.** The proxy listens on the LAN address
 so the edge (a different host) can reach it, which also means anything else on
 the LAN can. That is not an authentication problem — every path still needs an
 Authentik session in the allowed group — but it is unnecessary surface, and it
-matters more than it used to: the proxy is now the *only* gate, so an open 20129
+matters more than it used to: the proxy is now the *only* gate, so an open 20128
 is an open door to a gateway that no longer authenticates anything itself.
 
 `--trusted-ip` was tried and **removed**: oauth2-proxy warns on every request that
@@ -540,7 +559,7 @@ network layer:
 
 ```bash
 # on the host running the proxy, allowing only the edge
-iptables -I INPUT -p tcp --dport 20129 ! -s 192.168.1.46 -j DROP
+iptables -I INPUT -p tcp --dport 20128 ! -s 192.168.1.46 -j DROP
 ```
 
 That is deliberately not applied here: this host has no firewall in force

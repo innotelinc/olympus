@@ -50,7 +50,7 @@ Reads (env):
     INPUTS_TITLE                the app's title
     OMNIROUTE_MODEL             primary model (default "auto/coding")
     OMNIROUTE_MODEL_FALLBACK    second attempt (default "oc/big-pickle")
-    OMNIROUTE_BASE_URL          the gateway (default "http://192.168.1.46:20129/v1",
+    OMNIROUTE_BASE_URL          the gateway (default "http://192.168.1.46:20128/v1",
                                 the SSO proxy in front of it — `:20128` is the
                                 gateway's own port, published on its host's
                                 loopback and bridge alone)
@@ -153,7 +153,7 @@ def prompt_template() -> str:
 
 # The door, not the gateway's own port: this node runs inside a container, where
 # `127.0.0.1:20128` is the container itself. See `.env.example`.
-DEFAULT_GATEWAY = "http://192.168.1.46:20129/v1"
+DEFAULT_GATEWAY = "http://192.168.1.46:20128/v1"
 
 # What the agent is allowed to inherit. Deliberately NOT the whole environment:
 # a workflow node runs inside whatever the caller had, and the caller's variables

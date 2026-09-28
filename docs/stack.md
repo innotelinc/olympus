@@ -110,12 +110,12 @@ Olympus is a repository-local AI software factory. It turns accepted GitHub issu
 > * **Whoever talks to the gateway inherits the topology problem.** `OMNIROUTE_BASE_URL`
 >   is one value in one `.env`, and host-side scripts read that same value, so a
 >   container cannot be handed a different one. From any other host it is
->   `http://192.168.1.46:20129/v1` — the gateway host's LAN address, and the
+>   `http://192.168.1.46:20128/v1` — the gateway host's LAN address, and the
 >   Authentik SSO proxy in front of the gateway, which exempts `/v1` for API
 >   clients. The gateway's own `:20128` is published on that host's loopback and
 >   bridge alone, so it is not a target at all. On the gateway's own host a
->   container uses `http://host.docker.internal:20129/v1`, and a host-mode caller
->   `http://127.0.0.1:20129/v1` — every service that talks to it then runs with
+>   container uses `http://host.docker.internal:20128/v1`, and a host-mode caller
+>   `http://127.0.0.1:20128/v1` — every service that talks to it then runs with
 >   `compose.host-gateway.yml` — Studio included
 >   (`make docker-studio-up`). A Studio
 >   rebuilt without that override resolves `127.0.0.1:20128` to *itself*, answers

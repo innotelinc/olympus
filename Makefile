@@ -291,11 +291,12 @@ gateway-edge: ## Publish the gateway's public name through Cerulean + the NPM ed
 # OUR client id. A dashboard served directly would pass the first and fail the
 # second — which is exactly the misconfiguration worth catching.
 gateway-sso-check: ## Confirm the proxy redirects to Authentik instead of serving the dashboard
-	@port=$$(sed -n 's/^GATEWAY_SSO_PORT=//p' .env 2>/dev/null | tail -1 | tr -d "'\" " ) ; port=$${port:-20129}; \
-	code=$$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:$$port/ping" || true); \
-	if [[ "$$code" != "200" ]]; then echo "proxy: not answering — HTTP $$code from http://127.0.0.1:$$port/ping" >&2; exit 1; fi; \
-	echo "proxy: ok — live on 127.0.0.1:$$port"; \
-	loc=$$(curl -s -o /dev/null -w '%{redirect_url}' -m 10 "http://127.0.0.1:$$port/" || true); \
+	@port=$$(sed -n 's/^GATEWAY_SSO_PORT=//p' .env 2>/dev/null | tail -1 | tr -d "'\" " ) ; port=$${port:-20128}; \
+	host=$$(sed -n 's/^GATEWAY_SSO_BIND=//p' .env 2>/dev/null | tail -1 | tr -d "'\" " ) ; host=$${host:-127.0.0.1}; \
+	code=$$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://$$host:$$port/ping" || true); \
+	if [[ "$$code" != "200" ]]; then echo "proxy: not answering — HTTP $$code from http://$$host:$$port/ping" >&2; exit 1; fi; \
+	echo "proxy: ok — live on $$host:$$port"; \
+	loc=$$(curl -s -o /dev/null -w '%{redirect_url}' -m 10 "http://$$host:$$port/" || true); \
 	issuer=$$(sed -n 's/^GATEWAY_OIDC_ISSUER_URL=//p' .env 2>/dev/null | tail -1 | tr -d "'\" "); \
 	client=$$(sed -n 's/^GATEWAY_OIDC_CLIENT_ID=//p' .env 2>/dev/null | tail -1 | tr -d "'\" "); \
 	base=$${issuer%/}; base=$${base%/application/o/*}; \
