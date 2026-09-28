@@ -36,7 +36,7 @@ PLACEHOLDER_PREFIXES = ("change-me", "changeme", "your-", "xxx", "todo", "paste_
 # bridge alone, so a doctor run from anywhere else — this repo's own host
 # included — would probe an address that only ever answers for containers on the
 # gateway's machine. `OMNIROUTE_BASE_URL` overrides it; see .env.example.
-DEFAULT_BASE_URL = "http://192.168.1.46:20128/v1"
+DEFAULT_BASE_URL = "http://192.168.1.71:20128/v1"
 
 
 def is_placeholder(value: str) -> bool:

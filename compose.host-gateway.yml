@@ -10,7 +10,7 @@
 #
 #   http://host.docker.internal:20128/v1   -> no connection
 #   http://172.17.0.1:20128/v1             -> no connection
-#   http://192.168.1.46:20128/v1           -> no connection
+#   http://192.168.1.71:20128/v1           -> no connection
 #
 # Everything that is not a host-mode process on the gateway host goes through the
 # SSO proxy in front of the gateway instead, `:20128`, which exempts `/v1` for API
@@ -28,7 +28,7 @@
 # (`http://127.0.0.1:20128/v1`) to itself:
 #
 #   http://127.0.0.1:20128/healthz    -> FAIL ECONNREFUSED   (from inside Studio)
-#   http://192.168.1.46:20128/healthz -> 200                 (the door, from the bridge network)
+#   http://192.168.1.71:20128/healthz -> 200                 (the door, from the bridge network)
 #
 # That second probe is what identifies this case rather than a gateway that is
 # simply down: the address that works is NOT the one in `OMNIROUTE_BASE_URL`.
@@ -40,7 +40,7 @@
 #
 # WHEN NOT TO USE IT
 # ------------------
-# Leave it out when the door in `.env` is a routable address — `192.168.1.46:20128`
+# Leave it out when the door in `.env` is a routable address — `192.168.1.71:20128`
 # for any other host, which is what `.50` uses, or `host.docker.internal:20128` on
 # the gateway's own host — because a bridge container reaches both directly. Read
 # the caveat at the top of docker-compose.yml before changing anything here.

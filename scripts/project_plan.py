@@ -680,7 +680,7 @@ def plan_for_spec(
     settings = gateway_settings(root)
     # The door (:20128), never the gateway's own port — this runs in a container,
     # where `127.0.0.1:20128` is the caller itself (see .env.example).
-    base_url = settings.get("OMNIROUTE_BASE_URL") or "http://192.168.1.46:20128/v1"
+    base_url = settings.get("OMNIROUTE_BASE_URL") or "http://192.168.1.71:20128/v1"
     api_key = settings.get("OMNIROUTE_API_KEY") or ""
     messages = plan_messages(spec_text, title or path.stem, kind)
 

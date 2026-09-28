@@ -134,7 +134,7 @@ failing obscurely.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OMNIROUTE_BASE_URL` | `http://192.168.1.46:20128/v1` | Gateway root — the Authentik SSO proxy in front of the platform's one OmniRoute, which exempts `/v1` for API clients. The gateway's own `:20128` answers on its host's loopback and bridge alone. The topology table below has the per-host rows. |
+| `OMNIROUTE_BASE_URL` | `http://192.168.1.71:20128/v1` | Gateway root — the Authentik SSO proxy in front of the platform's one OmniRoute, which exempts `/v1` for API clients. The gateway's own `:20128` answers on its host's loopback and bridge alone. The topology table below has the per-host rows. |
 | `OMNIROUTE_API_KEY` | — | Bearer key for the gateway. Required. |
 | `OMNIROUTE_MODEL` | `auto/coding` | Model routed through the gateway. `.env.example` pins a concrete, tool-calling model instead — `auto/coding` is a combo that walks the whole catalogue, so which brain answers is luck (see the root README). |
 | `OMNIROUTE_CHAT_PATH` | `/chat/completions` | Override only if the gateway exposes the route elsewhere. |
@@ -704,7 +704,7 @@ looked fine because Studio's healthcheck only asks whether Studio answers.
 
 | Topology | `OMNIROUTE_BASE_URL` |
 | --- | --- |
-| Shared gateway, another host (the platform default) | `http://192.168.1.46:20128/v1` — the SSO proxy in front of the gateway, whose port is `GATEWAY_SSO_PORT` below |
+| Shared gateway, another host (the platform default) | `http://192.168.1.71:20128/v1` — the SSO proxy in front of the gateway, whose port is `GATEWAY_SSO_PORT` below |
 | Gateway on the same host as this stack | `http://host.docker.internal:20128/v1` — the docker0 alias reaches the proxy's listener |
 | Host-mode caller on the gateway's host | `http://127.0.0.1:20128/v1` — run it with host networking, `make docker-studio-up` |
 | The gateway's own port, deliberately | `http://127.0.0.1:20128/v1` — for a host-mode process *on the gateway's host* only; a bridge container resolves it to itself |

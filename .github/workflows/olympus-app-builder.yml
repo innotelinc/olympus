@@ -181,7 +181,7 @@ jobs:
         if: steps.spec.outputs.found == 'true'
         continue-on-error: true
         env:
-          OMNIROUTE_BASE_URL: ${{ vars.OMNIROUTE_BASE_URL || 'http://192.168.1.46:20128/v1' }}
+          OMNIROUTE_BASE_URL: ${{ vars.OMNIROUTE_BASE_URL || 'http://192.168.1.71:20128/v1' }}
           OMNIROUTE_MODEL: auto/coding
           OMNIROUTE_MODEL_FALLBACK: oc/big-pickle
           OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
@@ -200,7 +200,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SPECS: ${{ steps.spec.outputs.specs }}
-          OMNIROUTE_BASE_URL: ${{ vars.OMNIROUTE_BASE_URL || 'http://192.168.1.46:20128/v1' }}
+          OMNIROUTE_BASE_URL: ${{ vars.OMNIROUTE_BASE_URL || 'http://192.168.1.71:20128/v1' }}
           # `auto/coding` is OmniRoute's own router: it survives a provider being
           # unlinked, and what it resolves to is the gateway's business, not this
           # job's. Treat this job's output as unverified until a gateway is reachable
@@ -233,7 +233,7 @@ jobs:
               echo "NPM refuses /v1 on every public name — gateway.olympus.innotel.us included,"
               echo "which answers 403 with or without a key (docs/gateway-sso.md) — so no"
               echo "GitHub-hosted runner can reach it at any URL. A runner on that host keeps"
-              echo "the default http://192.168.1.46:20128/v1 and needs the OMNIROUTE_API_KEY"
+              echo "the default http://192.168.1.71:20128/v1 and needs the OMNIROUTE_API_KEY"
               echo "secret, which is set. Until then \`make app\` is the working path."
               echo
               echo "the spec that would have been built: ${SPECS}"

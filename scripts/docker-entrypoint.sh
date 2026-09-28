@@ -33,7 +33,7 @@ mkdir -p builds build-requests .archon/cache factory 2>/dev/null || true
 # construction: exactly one OmniRoute exists, and this container is not it. The
 # door is the SSO proxy in front of it (:20128); the gateway's own port answers
 # on the gateway host's loopback and bridge alone.
-OMNIROUTE_BASE_URL="${OMNIROUTE_BASE_URL:-http://192.168.1.46:20128/v1}"
+OMNIROUTE_BASE_URL="${OMNIROUTE_BASE_URL:-http://192.168.1.71:20128/v1}"
 if curl -fsS -m 5 "${OMNIROUTE_BASE_URL%/v1}/healthz" >/dev/null 2>&1; then
   say "OmniRoute reachable at ${OMNIROUTE_BASE_URL}"
 else

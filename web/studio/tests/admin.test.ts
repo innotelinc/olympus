@@ -58,7 +58,7 @@ beforeEach(() => {
   mkdirSync(BUILDS, { recursive: true });
 
   process.env.OMNIROUTE_API_KEY = "sk-valid-looking-key";
-  process.env.OMNIROUTE_BASE_URL = "http://192.168.1.46:20128/v1";
+  process.env.OMNIROUTE_BASE_URL = "http://192.168.1.71:20128/v1";
   process.env.STUDIO_BUILD_QUEUE_DIR = QUEUE;
   process.env.STUDIO_BUILDS_DIR = BUILDS;
 
@@ -119,7 +119,7 @@ function check(checks: AdminCheck[], id: string): AdminCheck {
 
 describe("which gateway address is the door", () => {
   it("accepts the SSO proxy — the gateway's own port, on the host's LAN address", () => {
-    const { door, detail } = classifyGatewayUrl("http://192.168.1.46:20128/v1");
+    const { door, detail } = classifyGatewayUrl("http://192.168.1.71:20128/v1");
     expect(door).toBe(true);
     expect(detail).toContain("20128");
   });
@@ -139,13 +139,13 @@ describe("which gateway address is the door", () => {
   });
 
   it("names the door that replaced the retired 20129", () => {
-    const { door, detail } = classifyGatewayUrl("http://192.168.1.46:20129/v1");
+    const { door, detail } = classifyGatewayUrl("http://192.168.1.71:20129/v1");
     expect(door).toBe(false);
-    expect(detail).toMatch(/moved to 192\.168\.1\.46:20128/);
+    expect(detail).toMatch(/moved to 192\.168\.1\.71:20128/);
   });
 
   it("refuses anything that is not the door", () => {
-    expect(classifyGatewayUrl("http://192.168.1.46:8080/v1").door).toBe(false);
+    expect(classifyGatewayUrl("http://192.168.1.71:8080/v1").door).toBe(false);
     expect(classifyGatewayUrl("https://gateway.example.com/v1").door).toBe(false);
   });
 
@@ -232,7 +232,7 @@ describe("the collected panel", () => {
 
     expect(state.gateway.door).toBe(false);
     expect(check(state.checks, "gateway-door").state).toBe("fail");
-    expect(check(state.checks, "gateway-door").hint).toMatch(/192\.168\.1\.46:20128/);
+    expect(check(state.checks, "gateway-door").hint).toMatch(/192\.168\.1\.71:20128/);
     expect(worstState(state.checks)).toBe("fail");
   });
 
@@ -240,7 +240,7 @@ describe("the collected panel", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
-        throw new Error("connect ECONNREFUSED 192.168.1.46:20128");
+        throw new Error("connect ECONNREFUSED 192.168.1.71:20128");
       }),
     );
     beat();

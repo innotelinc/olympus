@@ -58,7 +58,7 @@ beforeEach(() => {
   mkdirSync(join(ROOT, "builds"), { recursive: true });
 
   process.env.OMNIROUTE_API_KEY = "sk-valid-looking-key";
-  process.env.OMNIROUTE_BASE_URL = "http://192.168.1.46:20129/v1";
+  process.env.OMNIROUTE_BASE_URL = "http://192.168.1.71:20128/v1";
   process.env.STUDIO_BUILD_QUEUE_DIR = join(ROOT, "build-queue");
   process.env.STUDIO_BUILDS_DIR = join(ROOT, "builds");
 

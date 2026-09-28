@@ -30,8 +30,8 @@ the next section — that is not a preference, it is the one path that cannot wo
 | Second name | `gateway.olympus.innotel.us` — NPM proxy host **#179**, the *same* proxy, cert #5, `/v1` refused. Not a redirect: each name logs in on itself (see [one proxy, two names](#one-proxy-two-names)) |
 | Names served | every host in `GATEWAY_SSO_WHITELIST_DOMAIN` (`.innotel.us`) — the proxy runs without `--redirect-url`, so it derives `redirect_uri` from the request's Host |
 | Certificate | Let's Encrypt, `CN=gateway.studio.innotel.us`, issued by NPM's own certbot (HTTP-01) as certificate #49 |
-| Edge | NPM proxy host **#178** → `http://192.168.1.46:20128`, TLS enforced, websockets on, `/v1` refused (`location ^~ /v1/` + `location = /v1` → `403`) |
-| Proxy | `olympus-gateway-sso` (`quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine`), host networking, listens on **that host's LAN address** (`192.168.1.46:20128`, from `GATEWAY_SSO_BIND`) — it must share the host with the gateway, because the gateway is loopback-published |
+| Edge | NPM proxy host **#178** → `http://192.168.1.71:20128`, TLS enforced, websockets on, `/v1` refused (`location ^~ /v1/` + `location = /v1` → `403`) |
+| Proxy | `olympus-gateway-sso` (`quay.io/oauth2-proxy/oauth2-proxy:v7.7.1-alpine`), host networking, listens on **that host's LAN address** (`192.168.1.71:20128`, from `GATEWAY_SSO_BIND`) — it must share the host with the gateway, because the gateway is loopback-published |
 | Session store | `olympus-gateway-sso-sessions` (`redis:7-alpine`), loopback only on `127.0.0.1:16379`, password from `GATEWAY_SSO_REDIS_PASSWORD` |
 | Upstream | `http://127.0.0.1:20128` (the gateway's loopback binding) |
 | Gateway binding | `127.0.0.1:20128` + `172.17.0.1:20128` (this host's docker0). **No LAN binding** — see [the split](#where-this-now-runs) |
@@ -48,7 +48,7 @@ the next section — that is not a preference, it is the one path that cannot wo
 The proxy used to listen on `20129` — a number only it used — while the gateway
 answered on `20128`. Both are `20128` now and they are told apart by **address**:
 `127.0.0.1:20128` and `172.17.0.1:20128` are the gateway (this host only),
-`192.168.1.46:20128` is the door. The reason is that `20129` was the one port in this
+`192.168.1.71:20128` is the door. The reason is that `20129` was the one port in this
 document a consumer had to know for no reason it could see; `20128` is the number the
 gateway has always published as *its* own, so there is one number to remember
 instead of two, and the SSO proxy is what that number means from off-host.
@@ -167,14 +167,14 @@ the proxy and restore the unauthenticated dashboard.
 
 The gateway itself listens on `127.0.0.1:20128` and stays that way: it is the
 process that holds every provider credential, and widening its binding puts the
-dashboard on the network. The **proxy** is the LAN door — `192.168.1.46:20128` — and it
+dashboard on the network. The **proxy** is the LAN door — `192.168.1.71:20128` — and it
 sorts callers by what they are:
 
 | Path | Who gets in | Why |
 | --- | --- | --- |
-| `/v1` and `/v1/*` | anyone who can reach `192.168.1.46:20128` — and then the gateway's own key check, which on this build does reject a missing or bogus key (see below) | inference clients send `Authorization: Bearer …`, not a session cookie, so an interactive OIDC login here would break every one of them rather than add a check. The door is the LAN address, and **the public name refuses this path at the edge** |
+| `/v1` and `/v1/*` | anyone who can reach `192.168.1.71:20128` — and then the gateway's own key check, which on this build does reject a missing or bogus key (see below) | inference clients send `Authorization: Bearer …`, not a session cookie, so an interactive OIDC login here would break every one of them rather than add a check. The door is the LAN address, and **the public name refuses this path at the edge** |
 
-The bare `/v1` is on the list separately from `/v1/*` because oauth2-proxy matches the path it was handed, and `^/v1/` does not match `/v1` — the prefix alone was being sent to Authentik. That is invisible to a client that only POSTs a subpath and fatal to one that validates its base URL first: `OMNIROUTE_BASE_URL` is documented below as `http://192.168.1.46:20128/v1`, and the Asterisk AI voice engine probes exactly that URL before accepting a configuration. It read the login page's 400 as an API error and reported its pipeline unhealthy while every real call worked. Nothing new is exposed — `GET /v1` returns the same model list as `/v1/models`, and the edge refuses both — so this only makes the exemption cover the prefix it was always documented to cover.
+The bare `/v1` is on the list separately from `/v1/*` because oauth2-proxy matches the path it was handed, and `^/v1/` does not match `/v1` — the prefix alone was being sent to Authentik. That is invisible to a client that only POSTs a subpath and fatal to one that validates its base URL first: `OMNIROUTE_BASE_URL` is documented below as `http://192.168.1.71:20128/v1`, and the Asterisk AI voice engine probes exactly that URL before accepting a configuration. It read the login page's 400 as an API error and reported its pipeline unhealthy while every real call worked. Nothing new is exposed — `GET /v1` returns the same model list as `/v1/models`, and the edge refuses both — so this only makes the exemption cover the prefix it was always documented to cover.
 | `/healthz` | anyone | liveness, 200 with no body and no secrets |
 | everything else, including `/dashboard` and `/api/providers` | an Authentik session in `cerulean-platform` | this is the surface that reads and writes provider credentials |
 
@@ -205,8 +205,8 @@ neither is achieved by changing the gateway's binding:
 
 ```bash
 # from any machine on the LAN — the address, not the name
-curl -H "Authorization: Bearer $OMNIROUTE_API_KEY" http://192.168.1.46:20128/v1/models
-OMNIROUTE_BASE_URL=http://192.168.1.46:20128/v1
+curl -H "Authorization: Bearer $OMNIROUTE_API_KEY" http://192.168.1.71:20128/v1/models
+OMNIROUTE_BASE_URL=http://192.168.1.71:20128/v1
 ```
 
 **Not the published name.** `https://gateway.olympus.innotel.us/v1/*` answers `403` by
@@ -225,7 +225,7 @@ was re-pointed at the new host:
 | | On `.10` | On `.46` (live) |
 | --- | --- | --- |
 | Edge | NPM host #198 → `.10:20128` | NPM host **#81** → `172.17.0.1:20128`, cert `#5`, websockets on |
-| Proxy | `0.0.0.0:20128` | `192.168.1.46:20128` (the LAN address, because the port is the gateway's) |
+| Proxy | `0.0.0.0:20128` | `192.168.1.71:20128` (the LAN address, because the port is the gateway's) |
 | Upstream | `127.0.0.1:20128` | `127.0.0.1:20128` (`GATEWAY_SSO_UPSTREAM`, unchanged) |
 | Public `/` | `302` → Authentik | unchanged — `302` |
 | Public `/v1`, `/v1/models` | `403`, refused at the edge | unchanged — `403` |
@@ -286,7 +286,7 @@ inference. There is no LAN address on `20128` any more, so a client on another m
 dials the proxy:
 
 ```bash
-OMNIROUTE_BASE_URL=http://192.168.1.46:20128/v1    # from any other host
+OMNIROUTE_BASE_URL=http://192.168.1.71:20128/v1    # from any other host
 ```
 
 Consumers updated with the change: `2-voice/capstone` (n8n's

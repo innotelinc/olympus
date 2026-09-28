@@ -79,7 +79,7 @@ describe("readConfig", () => {
     // The door (:20128), never the gateway's own port: inside this container
     // `127.0.0.1:20128` is Studio itself, which is how a rebuild once turned
     // every generation into ECONNREFUSED with nothing in the gateway's log.
-    expect(config.baseUrl).toBe("http://192.168.1.46:20128/v1");
+    expect(config.baseUrl).toBe("http://192.168.1.71:20128/v1");
     expect(config.model).toBe(DEFAULT_MODEL);
     expect(config.chatPath).toBe("/chat/completions");
   });
@@ -93,8 +93,8 @@ describe("readConfig", () => {
     // Measured on this host: `/etc/profile.d/omniroute.sh` and `~/.bashrc` export
     // the door without `/v1`, and compose interpolation lets the shell win over
     // `.env`. Without this, every model list and completion 302s to Authentik.
-    process.env.OMNIROUTE_BASE_URL = "http://192.168.1.46:20128";
-    expect(readConfig().baseUrl).toBe("http://192.168.1.46:20128/v1");
+    process.env.OMNIROUTE_BASE_URL = "http://192.168.1.71:20128";
+    expect(readConfig().baseUrl).toBe("http://192.168.1.71:20128/v1");
   });
 
   it("honours overrides", () => {
@@ -102,7 +102,7 @@ describe("readConfig", () => {
     process.env.OMNIROUTE_CHAT_PATH = "responses";
     const config = readConfig();
     expect(config.model).toBe("auto/fast");
-    expect(chatCompletionsUrl(config)).toBe("http://192.168.1.46:20128/v1/responses");
+    expect(chatCompletionsUrl(config)).toBe("http://192.168.1.71:20128/v1/responses");
   });
 });
 

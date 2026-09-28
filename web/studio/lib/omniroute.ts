@@ -46,7 +46,7 @@ export type TokenUsage = {
  * fallback that names the one address every host can reach. On the gateway's own
  * host, `http://host.docker.internal:20128/v1` is the same door.
  */
-const DEFAULT_BASE_URL = "http://192.168.1.46:20128/v1";
+const DEFAULT_BASE_URL = "http://192.168.1.71:20128/v1";
 const DEFAULT_CHAT_PATH = "/chat/completions";
 /**
  * What an unset `OMNIROUTE_MODEL` means, and therefore what every build uses

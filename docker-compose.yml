@@ -23,10 +23,10 @@
 # 20128 is the whole control and it is published on loopback + docker0 only. The
 # routable door is the SSO proxy in front of it, `:20128`, which exempts `/v1` for
 # API clients. Pick the row that matches where the gateway runs:
-#   on the gateway's host        OMNIROUTE_BASE_URL=http://host.docker.internal:20128/v1
+#   on the gateway's host        OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1
 #   on any OTHER host            OMNIROUTE_BASE_URL=http://<gateway host>:20128/v1
 #                                (that host's LAN address — this is what `.50` uses:
-#                                 http://192.168.1.46:20128/v1)
+#                                 http://192.168.1.71:20128/v1)
 #   host-networked caller        OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1
 #
 # The old `10.10.2.1:20128` mesh form and `host.docker.internal:20128` are both
@@ -67,7 +67,7 @@ services:
       - path: .env
         required: false
     environment:
-      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://192.168.1.46:20128/v1}
+      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://192.168.1.71:20128/v1}
       OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       SPEC: ${SPEC:-}
@@ -118,7 +118,7 @@ services:
         required: false
     # See the OmniRoute caveat at the top of this file before changing the base URL.
     environment:
-      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://192.168.1.46:20128/v1}
+      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-http://192.168.1.71:20128/v1}
       OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
       OMNIROUTE_MODEL: ${OMNIROUTE_MODEL:-auto/coding}
       STUDIO_ACCESS_TOKEN: ${STUDIO_ACCESS_TOKEN:-}

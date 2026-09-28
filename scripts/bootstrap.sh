@@ -8,7 +8,7 @@
 #   3. Installs, when missing: the omniroute CLI, the codex CLI, the Claude
 #      Code CLI, and the archon CLI (the factory's workflow engine).
 #   4. Makes sure an OmniRoute server is reachable at OMNIROUTE_BASE_URL
-#      (default: the platform gateway's DOOR, http://192.168.1.46:20128 — the
+#      (default: the platform gateway's DOOR, http://192.168.1.71:20128 — the
 #      SSO proxy that exempts /v1; the gateway's own :20128 answers on its
 #      host's loopback and bridge alone). A standalone box with its own gateway
 #      sets OMNIROUTE_BASE_URL=http://localhost:20128 and this script wires to
@@ -25,8 +25,8 @@
 # Idempotent: safe to re-run; steps already done are skipped.
 #
 # Environment overrides:
-#   OMNIROUTE_BASE_URL        the gateway door, e.g. http://192.168.1.46:20128
-#                             (default http://192.168.1.46:20128; on the gateway's
+#   OMNIROUTE_BASE_URL        the gateway door, e.g. http://192.168.1.71:20128
+#                             (default http://192.168.1.71:20128; on the gateway's
 #                             own host, http://127.0.0.1:20128 is the same door)
 #   OMNIROUTE_API_KEY         reuse an existing key instead of creating one
 #   OMNIROUTE_ADMIN_PASSWORD  dashboard/admin password used to mint a key
@@ -47,7 +47,7 @@ if [ -f .env ]; then
   set +a
 fi
 
-OMNIROUTE_BASE_URL="${OMNIROUTE_BASE_URL:-http://192.168.1.46:20128}"
+OMNIROUTE_BASE_URL="${OMNIROUTE_BASE_URL:-http://192.168.1.71:20128}"
 say()  { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\n\033[1;33m==>\033[0m %s\n' "$*"; }
 
@@ -287,7 +287,7 @@ if os.path.exists(path):
     except Exception:
         data = {}
 env = data.setdefault("env", {})
-env["ANTHROPIC_BASE_URL"] = os.environ.get("OMNIROUTE_BASE_URL", "http://192.168.1.46:20128") + "/v1"
+env["ANTHROPIC_BASE_URL"] = os.environ.get("OMNIROUTE_BASE_URL", "http://192.168.1.71:20128") + "/v1"
 if key:
     env["ANTHROPIC_AUTH_TOKEN"] = key
 env["CLAUDE_USE_GLOBAL_AUTH"] = "false"

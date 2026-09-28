@@ -252,7 +252,7 @@ def status():
     return {
         "state": "NOT_INSTALLED",
         "reason": "no factory consumer in this checkout - it lives in the source repo",
-        "gateway": os.environ.get("OMNIROUTE_BASE_URL", "http://192.168.1.46:20128/v1"),
+        "gateway": os.environ.get("OMNIROUTE_BASE_URL", "http://192.168.1.71:20128/v1"),
         "model": os.environ.get("OMNIROUTE_MODEL", "auto/coding"),
     }
 
@@ -352,7 +352,7 @@ configure_telegram_token() {
     # The platform's single gateway runs in Group 2, on its own host; callers
     # dial the SSO proxy in front of it (:20128), which exempts /v1. A caller on
     # the gateway's own host writes http://host.docker.internal:20128/v1 instead.
-    echo "OMNIROUTE_BASE_URL=${OMNIROUTE_BASE_URL:-http://192.168.1.46:20128/v1}"
+    echo "OMNIROUTE_BASE_URL=${OMNIROUTE_BASE_URL:-http://192.168.1.71:20128/v1}"
     # OMNIROUTE_MODEL is the key the factory and Studio actually read
     # (factory/doctor.py, web/studio/lib/omniroute.ts). QWEN_MODEL was written
     # here and consumed by nothing, so it is retired.
@@ -387,7 +387,7 @@ ${GREEN}✔ Archon config:${NC} $ARCHON_CONFIG
 ${GREEN}✔ Factory env:${NC}   $FACTORY_ENV  (chmod 600)
 
 ${BOLD}Quickstart:${NC}
-  1. Point at the platform gateway's door (http://192.168.1.46:20128/v1 —
+  1. Point at the platform gateway's door (http://192.168.1.71:20128/v1 —
      the SSO proxy in front of the gateway, which exempts /v1 for API clients;
      the gateway's own :20128 answers on that host's loopback and bridge alone,
      so it is not an address to copy into .env). That is what this script wrote

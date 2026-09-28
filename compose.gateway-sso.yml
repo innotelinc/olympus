@@ -13,7 +13,7 @@
 #   browser ──https──▶ edge (NPM, this host)
 #                          │  gateway.studio.innotel.us      (and the older
 #                          │  gateway.olympus.innotel.us, same door, same proxy)
-#                          ▼  http://192.168.1.46:20128
+#                          ▼  http://192.168.1.71:20128
 #                    gateway-sso (oauth2-proxy) ──▶ Authentik OIDC + group check
 #                          │  http://127.0.0.1:20128
 #                          ▼
@@ -148,7 +148,7 @@ services:
       # and `/v1/models` but sends `/v1` itself to Authentik. That asymmetry is
       # invisible to a client that only ever POSTs a subpath, and breaks the one
       # that validates its base URL first: `OMNIROUTE_BASE_URL` is documented one
-      # section up as `http://192.168.1.46:20128/v1` — the bare prefix — and the
+      # section up as `http://192.168.1.71:20128/v1` — the bare prefix — and the
       # Asterisk AI voice engine probes exactly that before accepting a config.
       # It got a login page back, read the 400 as an API error, and reported its
       # whole pipeline unhealthy while every runtime call to the same gateway

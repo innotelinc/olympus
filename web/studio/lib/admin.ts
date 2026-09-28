@@ -21,7 +21,7 @@
  * (`classifyGatewayUrl`), because the whole estate documents them once and a
  * deployment drifts by copying an address: the gateway's own port `20128` answers
  * on its host's loopback and bridge alone, and the routable door is the SSO proxy
- * on that host's LAN address, `192.168.1.46:20128`.
+ * on that host's LAN address, `192.168.1.71:20128`.
  */
 
 import { existsSync, readdirSync, statSync } from "node:fs";
@@ -132,7 +132,7 @@ export type AdminStatus = {
 /* ---- policy: which gateway address is the door -------------------------- */
 
 /** The door: the SSO proxy, on the gateway host's LAN address. */
-export const GATEWAY_DOOR_HOST = "192.168.1.46";
+export const GATEWAY_DOOR_HOST = "192.168.1.71";
 export const GATEWAY_DOOR_PORT = "20128";
 /** Where the door used to listen, kept so a stale value says so by name. */
 export const RETIRED_GATEWAY_DOOR_PORT = "20129";
@@ -141,7 +141,7 @@ export const RETIRED_GATEWAY_DOOR_PORT = "20129";
  * The estate's rule, applied to whatever `OMNIROUTE_BASE_URL` says.
  *
  * The door is the SSO proxy in front of the gateway, which exempts `/v1` for API
- * clients, and it listens on the gateway's own default port — `192.168.1.46:20128`.
+ * clients, and it listens on the gateway's own default port — `192.168.1.71:20128`.
  * It used to be `20129`, which was the proxy's port alone; the two meanings of
  * `20128` are told apart by *address*: the gateway itself is published on its
  * host's loopback and bridge alone, so from anywhere else it resolves to nothing —
