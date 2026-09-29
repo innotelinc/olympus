@@ -1,0 +1,610 @@
+/*
+ * ═══════════════════════════════════════════════════════════════════════════
+ * UNITY — the shared theme.  THE canonical copy.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * One theme for every Innotel project, not just the OnTrak ones. `theme/README.md`
+ * is the adoption guide for a new project; this file is the palette.
+ *
+ * Every product ships a byte-identical copy of this file (each app is built from its
+ * own directory, so a file outside the build context cannot be imported).
+ * `theme/tests/test_theme_copies.py` fails if any copy drifts, which is what stops
+ * "one palette" from becoming five opinions over six months.
+ *
+ * ── Two names worth keeping apart ──────────────────────────────────────────
+ *
+ *   **Unity** (this)   the theme: three schemes, two modes, one vocabulary.
+ *   **OnTrak Unity**  the portal that is one of the things wearing it. The theme
+ *                     came first and the product took its name, which is the
+ *                     direction that causes no trouble.
+ *
+ * ── What is here, and why it is shaped this way ────────────────────────────
+ *
+ * THREE SCHEMES, TWO MODES, ONE VOCABULARY.
+ *
+ *   scheme "desk"        the training range and the service desk — the violet
+ *                        family that Tix and OnTrak IT Support Training already
+ *                        use, so those two apps change least.
+ *   scheme "operations"  the operations consoles — the graphite-and-blue family
+ *                        that OnTrak Sync and the Unity portal already use.
+ *   scheme "soc"         the security-operations console — the navy-and-cyan
+ *                        family Sentinel wears, in the visual language of the
+ *                        open-source SIEM consoles.
+ *
+ *   mode "light" / "dark" applies to all three, and `system` follows the machine.
+ *
+ * A product picks its default scheme; the person can override either axis, and the
+ * choice is remembered per browser. That is the whole point of the exercise: the
+ * same page should be readable in a bright office and at 3am, and an operator who
+ * has learned one product's colours should not have to relearn them in the next.
+ *
+ * The vocabulary is deliberately semantic — `--surface`, `--ink-faint`,
+ * `--attention` — and never visual. A class that says what a thing *is* (a
+ * finding, an outage, an SLA breach) cannot quietly pick a new colour, and
+ * `--unknown` exists as its own token because a check that never ran must never be
+ * painted the same as a check that passed.
+ *
+ * Usage: set `data-scheme` and `data-mode` on <html> (see unity-theme.js), then use
+ * the tokens. No component should name a raw colour.
+ */
+
+/* ══ scheme: desk — light ═══════════════════════════════════════════════════ */
+:root {
+  color-scheme: light;
+
+  --canvas: #f7f6fb;
+  --surface: #ffffff;
+  --surface-muted: #f1effa;
+  --surface-sunken: #ebe7f6;
+  --line: #e4e0f0;
+  --line-strong: #cec8e3;
+
+  --ink: #191430;
+  --ink-soft: #4b4468;
+  --ink-faint: #6d6789;
+
+  --brand: #5f3fe6;
+  --brand-soft: #ece8ff;
+  --brand-ink: #ffffff;
+  --brand-ring: #b9a8f7;
+
+  --ok: #146c2e;
+  --ok-soft: #e4f6e8;
+  --info: #1360a8;
+  --info-soft: #e5f0fb;
+  --bad: #b3261e;
+  --bad-soft: #fdeceb;
+  --attention: #8a5a00;
+  --attention-soft: #fdf3dd;
+  --unknown: #6b6b76;
+  --unknown-soft: #efeff3;
+
+  /* The four products' identifying colours. A tone is a *label*, never the only
+     signal: every tile also carries the product's name in text. */
+  --tone-its: #4d6b00;
+  --tone-tix: #0a5c9e;
+  --tone-sentinel: #b0246a;
+  --tone-sync: #05685e;
+
+  --shadow-card: 0 1px 2px rgb(25 20 48 / 5%), 0 10px 30px -14px rgb(25 20 48 / 18%);
+  --shadow-pop: 0 8px 28px -8px rgb(25 20 48 / 26%);
+
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-display: var(--font-sans);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 22px;
+  --space-6: 32px;
+}
+
+/* ══ scheme: desk — dark ════════════════════════════════════════════════════ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-mode="light"]) {
+    color-scheme: dark;
+
+    --canvas: #100c22;
+    --surface: #1a1433;
+    --surface-muted: #221a40;
+    --surface-sunken: #151029;
+    --line: #332a55;
+    --line-strong: #453a6e;
+
+    --ink: #f5f3ff;
+    --ink-soft: #c3bce0;
+    --ink-faint: #9a92bd;
+
+    --brand: #9b83ff;
+    --brand-soft: #2a2154;
+    --brand-ink: #14102a;
+    --brand-ring: #5b46a8;
+
+    --ok: #5ed37a;
+    --ok-soft: #16301f;
+    --info: #6cc0ff;
+    --info-soft: #152a3f;
+    --bad: #ff8a80;
+    --bad-soft: #34191a;
+    --attention: #ffc157;
+    --attention-soft: #33260f;
+    --unknown: #8f87b3;
+    --unknown-soft: #241e42;
+
+    --tone-its: #b4e85c;
+    --tone-tix: #6cc0ff;
+    --tone-sentinel: #ff7cb4;
+    --tone-sync: #3fd3c1;
+
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 30%), 0 12px 32px -14px rgb(0 0 0 / 60%);
+    --shadow-pop: 0 10px 34px -8px rgb(0 0 0 / 66%);
+  }
+}
+
+/* The same thing, asked for explicitly. A person who picks "dark" gets dark on a
+   machine that prefers light, which is the entire reason the toggle exists. */
+:root[data-mode="dark"] {
+  color-scheme: dark;
+
+  --canvas: #100c22;
+  --surface: #1a1433;
+  --surface-muted: #221a40;
+  --surface-sunken: #151029;
+  --line: #332a55;
+  --line-strong: #453a6e;
+
+  --ink: #f5f3ff;
+  --ink-soft: #c3bce0;
+  --ink-faint: #9a92bd;
+
+  --brand: #9b83ff;
+  --brand-soft: #2a2154;
+  --brand-ink: #14102a;
+  --brand-ring: #5b46a8;
+
+  --ok: #5ed37a;
+  --ok-soft: #16301f;
+  --info: #6cc0ff;
+  --info-soft: #152a3f;
+  --bad: #ff8a80;
+  --bad-soft: #34191a;
+  --attention: #ffc157;
+  --attention-soft: #33260f;
+  --unknown: #8f87b3;
+  --unknown-soft: #241e42;
+
+  --tone-its: #b4e85c;
+  --tone-tix: #6cc0ff;
+  --tone-sentinel: #ff7cb4;
+  --tone-sync: #3fd3c1;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 30%), 0 12px 32px -14px rgb(0 0 0 / 60%);
+  --shadow-pop: 0 10px 34px -8px rgb(0 0 0 / 66%);
+}
+
+/* ══ scheme: operations — light (graphite neutrals, blue brand) ════════════ */
+:root[data-scheme="operations"] {
+  color-scheme: light;
+
+  --canvas: #f4f6f8;
+  --surface: #ffffff;
+  --surface-muted: #eef2f5;
+  --surface-sunken: #e6ebef;
+  --line: #dde4ea;
+  --line-strong: #c2ccd6;
+
+  --ink: #10171d;
+  --ink-soft: #46535f;
+  --ink-faint: #6b7885;
+
+  --brand: #1f6feb;
+  --brand-soft: #e6f0ff;
+  --brand-ink: #ffffff;
+  --brand-ring: #9dc2ff;
+
+  --tone-its: #3f6212;
+  --tone-tix: #1f6feb;
+  --tone-sentinel: #9d174d;
+  --tone-sync: #0f766e;
+
+  --shadow-card: 0 1px 2px rgb(16 23 29 / 5%), 0 10px 30px -14px rgb(16 23 29 / 18%);
+}
+
+/* ══ scheme: operations — dark ═════════════════════════════════════════════ */
+:root[data-scheme="operations"][data-mode="dark"] {
+  color-scheme: dark;
+
+  --canvas: #0b1015;
+  --surface: #121a22;
+  --surface-muted: #17212b;
+  --surface-sunken: #0e151c;
+  --line: #1e2a35;
+  --line-strong: #2b3a48;
+
+  --ink: #e6edf3;
+  --ink-soft: #a9b8c6;
+  --ink-faint: #78899a;
+
+  --brand: #2f81f7;
+  --brand-soft: #16243a;
+  --brand-ink: #ffffff;
+  --brand-ring: #1f4468;
+
+  --ok: #3fb950;
+  --ok-soft: #12261a;
+  --info: #58a6ff;
+  --info-soft: #14202e;
+  --bad: #f85149;
+  --bad-soft: #2d1615;
+  --attention: #d29922;
+  --attention-soft: #2a2110;
+  --unknown: #8b949e;
+  --unknown-soft: #1a222b;
+
+  --tone-its: #7ee787;
+  --tone-tix: #79c0ff;
+  --tone-sentinel: #ff7b72;
+  --tone-sync: #56d4dd;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 34%), 0 12px 32px -14px rgb(0 0 0 / 62%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-scheme="operations"]:not([data-mode="light"]) {
+    color-scheme: dark;
+
+    --canvas: #0b1015;
+    --surface: #121a22;
+    --surface-muted: #17212b;
+    --surface-sunken: #0e151c;
+    --line: #1e2a35;
+    --line-strong: #2b3a48;
+
+    --ink: #e6edf3;
+    --ink-soft: #a9b8c6;
+    --ink-faint: #78899a;
+
+    --brand: #2f81f7;
+    --brand-soft: #16243a;
+    --brand-ink: #ffffff;
+    --brand-ring: #1f4468;
+
+    --ok: #3fb950;
+    --ok-soft: #12261a;
+    --info: #58a6ff;
+    --info-soft: #14202e;
+    --bad: #f85149;
+    --bad-soft: #2d1615;
+    --attention: #d29922;
+    --attention-soft: #2a2110;
+    --unknown: #8b949e;
+    --unknown-soft: #1a222b;
+
+    --tone-its: #7ee787;
+    --tone-tix: #79c0ff;
+    --tone-sentinel: #ff7b72;
+    --tone-sync: #56d4dd;
+
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 34%), 0 12px 32px -14px rgb(0 0 0 / 62%);
+  }
+}
+
+/* ══ scheme: soc — light (cool neutrals, cyan brand) ══════════════════════
+ * The security-operations console's own scheme: Sentinel. Deep navy in the dark,
+ * a cool near-white in the light, and a cyan brand that means "this is the SOC"
+ * the way violet means the desk and blue means operations. Modelled on the
+ * open-source SIEM consoles (UTMStack and its neighbours), which is the visual
+ * language somebody who works a security queue already reads without being told.
+ */
+:root[data-scheme="soc"] {
+  color-scheme: light;
+
+  --canvas: #f2f5f9;
+  --surface: #ffffff;
+  --surface-muted: #e9eff6;
+  --surface-sunken: #dfe8f2;
+  --line: #d3dfeb;
+  --line-strong: #b3c4d6;
+
+  --ink: #071a2b;
+  --ink-soft: #37506a;
+  --ink-faint: #5d7691;
+
+  --brand: #0f6fd1;
+  --brand-soft: #e0edfb;
+  --brand-ink: #ffffff;
+  --brand-ring: #93c0ea;
+
+  --ok: #0d6b46;
+  --ok-soft: #e2f5eb;
+  --info: #0f6fd1;
+  --info-soft: #e0edfb;
+  --bad: #b3252b;
+  --bad-soft: #fdeaea;
+  --attention: #8a5a00;
+  --attention-soft: #fdf2da;
+  --unknown: #64748b;
+  --unknown-soft: #edf1f6;
+
+  --tone-its: #4d6b00;
+  --tone-tix: #0f6fd1;
+  --tone-sentinel: #0e7f9c;
+  --tone-sync: #0f766e;
+
+  --shadow-card: 0 1px 2px rgb(7 26 43 / 5%), 0 10px 30px -14px rgb(7 26 43 / 18%);
+}
+
+/* ══ scheme: soc — dark (near-black navy, cyan) ═══════════════════════════ */
+:root[data-scheme="soc"][data-mode="dark"] {
+  color-scheme: dark;
+
+  --canvas: #04080f;
+  --surface: #0a1420;
+  --surface-muted: #0f1c2b;
+  --surface-sunken: #060d17;
+  --line: #16273a;
+  --line-strong: #23405c;
+
+  --ink: #e6f2fb;
+  --ink-soft: #a6c1d8;
+  --ink-faint: #7590aa;
+
+  --brand: #22c7e0;
+  --brand-soft: #0a2c36;
+  --brand-ink: #04161d;
+  --brand-ring: #17788c;
+
+  --ok: #3ad77f;
+  --ok-soft: #0d2a1b;
+  --info: #4cc6ff;
+  --info-soft: #0c2437;
+  --bad: #ff5f6d;
+  --bad-soft: #33141a;
+  --attention: #ffbb4d;
+  --attention-soft: #33260f;
+  --unknown: #7b93ad;
+  --unknown-soft: #131f2c;
+
+  --tone-its: #7ee787;
+  --tone-tix: #6cb6ff;
+  --tone-sentinel: #4fd0e8;
+  --tone-sync: #56d4dd;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 40%), 0 14px 34px -14px rgb(0 0 0 / 70%);
+  --shadow-pop: 0 10px 34px -8px rgb(0 0 0 / 70%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-scheme="soc"]:not([data-mode="light"]) {
+    color-scheme: dark;
+
+    --canvas: #04080f;
+    --surface: #0a1420;
+    --surface-muted: #0f1c2b;
+    --surface-sunken: #060d17;
+    --line: #16273a;
+    --line-strong: #23405c;
+
+    --ink: #e6f2fb;
+    --ink-soft: #a6c1d8;
+    --ink-faint: #7590aa;
+
+    --brand: #22c7e0;
+    --brand-soft: #0a2c36;
+    --brand-ink: #04161d;
+    --brand-ring: #17788c;
+
+    --ok: #3ad77f;
+    --ok-soft: #0d2a1b;
+    --info: #4cc6ff;
+    --info-soft: #0c2437;
+    --bad: #ff5f6d;
+    --bad-soft: #33141a;
+    --attention: #ffbb4d;
+    --attention-soft: #33260f;
+    --unknown: #7b93ad;
+    --unknown-soft: #131f2c;
+
+    --tone-its: #7ee787;
+    --tone-tix: #6cb6ff;
+    --tone-sentinel: #4fd0e8;
+    --tone-sync: #56d4dd;
+
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 40%), 0 14px 34px -14px rgb(0 0 0 / 70%);
+    --shadow-pop: 0 10px 34px -8px rgb(0 0 0 / 70%);
+  }
+}
+
+/* ══ the shared primitives ═════════════════════════════════════════════════
+ * Small, opinionated, and the same in every product: a surface, a button, a field,
+ * a pill and a table. Everything else is a product's own layout, built out of
+ * these, so two apps cannot drift in ways nobody notices until somebody has to
+ * use both.
+ */
+
+.ot-surface {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.ot-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.ot-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-muted);
+}
+.ot-panel > header h2 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.ot-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface-muted);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.ot-btn:hover:not(:disabled) { border-color: var(--brand-ring); }
+.ot-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.ot-btn--primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--brand-ink);
+  font-weight: 600;
+}
+.ot-btn--quiet { background: transparent; }
+
+.ot-field > span {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin-bottom: 4px;
+}
+.ot-field input,
+.ot-field select,
+.ot-input {
+  width: 100%;
+  background: var(--surface-sunken);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+.ot-input:focus, .ot-field input:focus, .ot-field select:focus {
+  outline: 2px solid var(--brand-ring);
+  outline-offset: 1px;
+  border-color: var(--brand);
+}
+
+.ot-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface-muted);
+  color: var(--ink-soft);
+  padding: 2px 10px;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.ot-pill--ok { border-color: var(--ok); color: var(--ok); background: var(--ok-soft); }
+.ot-pill--bad { border-color: var(--bad); color: var(--bad); background: var(--bad-soft); }
+.ot-pill--attention { border-color: var(--attention); color: var(--attention); background: var(--attention-soft); }
+.ot-pill--unknown { border-color: var(--unknown); color: var(--unknown); background: var(--unknown-soft); }
+.ot-pill--brand { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
+
+.ot-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--unknown); flex: none; }
+.ot-dot--ok { background: var(--ok); }
+.ot-dot--bad { background: var(--bad); }
+.ot-dot--attention { background: var(--attention); }
+
+.ot-table { width: 100%; border-collapse: collapse; }
+.ot-table th, .ot-table td {
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+  font-size: 13px;
+}
+.ot-table th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  font-weight: 600;
+  background: var(--surface-muted);
+}
+.ot-table tbody tr:last-child td { border-bottom: none; }
+.ot-table tbody tr:hover { background: var(--surface-muted); }
+
+.ot-note {
+  border-left: 3px solid var(--line-strong);
+  background: var(--surface-muted);
+  color: var(--ink-soft);
+  padding: 9px 12px;
+  font-size: 12.5px;
+  border-radius: 0 6px 6px 0;
+}
+.ot-note--warn { border-left-color: var(--attention); background: var(--attention-soft); color: var(--ink); }
+.ot-note--bad { border-left-color: var(--bad); background: var(--bad-soft); color: var(--ink); }
+.ot-note--ok { border-left-color: var(--ok); background: var(--ok-soft); color: var(--ink); }
+
+.ot-muted { color: var(--ink-faint); }
+.ot-dim { color: var(--ink-soft); }
+.ot-mono { font-family: var(--mono); font-size: 12.5px; }
+.ot-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* ── the theme switch ──────────────────────────────────────────────────────
+ * The control that flips light → dark → system. It lives here rather than in each
+ * product's stylesheet because a switch that looks different in each of five apps
+ * is precisely the drift this file exists to prevent, and because the markup is
+ * the same everywhere: a group of buttons that call `window.OntrakTheme`.
+ *
+ * A product drops its <ThemeToggle> into its masthead and gets these styles; it
+ * does not restyle them.
+ */
+.ot-theme {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  padding: 2px;
+}
+.ot-theme button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ink-faint);
+  border-radius: var(--radius-pill);
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.ot-theme button:hover { color: var(--ink); }
+.ot-theme button[aria-pressed="true"] {
+  background: var(--surface);
+  border-color: var(--line-strong);
+  color: var(--ink);
+  font-weight: 600;
+}
+.ot-theme svg { width: 13px; height: 13px; }
