@@ -89,12 +89,16 @@ jobs:
 
           # ── 1. Commit messages in the range ───────────────────────────
           if [ -n "$base" ] && [ -n "$head" ]; then
-            if git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1; then
+            # The "before" SHA must not only resolve but be an ancestor of the
+            # pushed head: a force-push leaves it unreachable (history was
+            # rewritten), and even where the object still resolves, `git log
+            # base..head` then dies with "Invalid revision range" — which
+            # `pipefail` reads as a guard failure. Requiring ancestry sends that
+            # case to the head-only scan instead, mirroring the tag-push path.
+            if git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 \
+               && git merge-base --is-ancestor "${base}" "${head}" >/dev/null 2>&1; then
               git log --format=%B "${base}..${head}" | guard_check_stream || fail=1
             else
-              # A force-push left the "before" SHA unreachable (history was
-              # rewritten), so the range can't be resolved. Scan the pushed
-              # head commit only, mirroring the tag-push path.
               git log -1 --format=%B "$head" | guard_check_stream || fail=1
             fi
           else
@@ -112,7 +116,8 @@ jobs:
           # from the scan.
           added=""
           if [ -n "$base" ] && [ -n "$head" ]; then
-            if git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1; then
+            if git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 \
+               && git merge-base --is-ancestor "${base}" "${head}" >/dev/null 2>&1; then
               added="$(git diff --no-color -U0 "$base" "$head" -- . 2>/dev/null | grep '^+' | grep -v '^+++' | sed 's/^+//' || true)"
             else
               added="$(git show --format= --no-color -U0 "$head" -- . 2>/dev/null | grep '^+' | grep -v '^+++' | sed 's/^+//' || true)"
