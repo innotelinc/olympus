@@ -184,13 +184,20 @@ class DetectDataDir(unittest.TestCase):
         # /root/.omniroute/server.env" while the gateway was merely stopped — which
         # reads like a broken backup rather than a stopped service.
         saved = os.environ.pop("OMNIROUTE_DATA_DIR", None)
+        # Pin the host-run fallback to an empty directory: reading the real
+        # /root/.omniroute is not hermetic (on CI the runner cannot stat it, so
+        # `is_file()` raises PermissionError instead of returning False).
+        saved_dir = backup.DEFAULT_HOST_DATA_DIR
         try:
-            with self.assertRaises(backup.Failure) as caught:
-                backup.detect_data_dir("", "a-container-that-does-not-exist")
+            with tempfile.TemporaryDirectory() as home:
+                backup.DEFAULT_HOST_DATA_DIR = Path(home)
+                with self.assertRaises(backup.Failure) as caught:
+                    backup.detect_data_dir("", "a-container-that-does-not-exist")
             message = str(caught.exception)
             self.assertIn("docker compose up -d omniroute", message)
             self.assertIn("--container", message)
         finally:
+            backup.DEFAULT_HOST_DATA_DIR = saved_dir
             if saved is not None:
                 os.environ["OMNIROUTE_DATA_DIR"] = saved
 
