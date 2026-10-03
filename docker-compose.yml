@@ -210,7 +210,7 @@ services:
   # the staged copy is reachable without anyone installing a web server by hand.
   #
   # Host networking for the same reason the SSO proxy uses it: the NPM edge lives
-  # on another host (192.168.1.46) and has to reach back to a LAN address, and
+  # on another host (192.168.1.71) and has to reach back to a LAN address, and
   # `network_mode: host` is what makes that address exist. It binds ONE port —
   # ${SITE_PORT:-20130} — on every interface, so a site staged here is readable by
   # anything that can route to this host. That is the intent: a published site is

@@ -455,7 +455,7 @@ def local_addresses():
         return addrs
     for line in out.splitlines():
         parts = line.split()
-        # `2: eth0    inet 192.168.1.46/24 brd ...`
+        # `2: eth0    inet 192.168.1.74/24 brd ...`
         if len(parts) > 3 and parts[2] == "inet":
             addrs.add(parts[3].split("/")[0])
     return addrs

@@ -7,7 +7,7 @@ proxy that authenticates against Cerulean Authentik and admits only members of
 **https://gateway.olympus.innotel.us** with a Let's Encrypt certificate:
 
 ```
-browser ──https──▶ NPM edge (192.168.1.46)
+browser ──https──▶ NPM edge (192.168.1.71)
                        │  gateway.olympus.innotel.us  (CNAME → innotel.us → 73.68.203.71)
                        ▼  http://172.17.0.1:20128
                  gateway-sso (oauth2-proxy) ──▶ Authentik OIDC + group check
@@ -217,7 +217,7 @@ send the key — the key is not what is being checked.
 
 ## Where this now runs
 
-The stack below was first stood up on `192.168.1.10`. It now runs on `192.168.1.46`
+The stack below was first stood up on `192.168.1.10`. It now runs on `192.168.1.71`
 (`5-dev/olympus`), together with the rest of the estate — see
 [host-migration.md](host-migration.md). The proxy and the gateway moved, and the edge
 was re-pointed at the new host:
@@ -253,10 +253,10 @@ as a label:
 ### The split: one host for gateway and proxy, and no LAN binding
 
 After the host split, `5-dev/olympus` moved to `192.168.1.50` while the gateway stayed
-on `192.168.1.46` (it is declared by `2-voice/capstone/docker-compose.yml`, which keeps
+on `192.168.1.71` (it is declared by `2-voice/capstone/docker-compose.yml`, which keeps
 it on the Cerulean/trust host). The proxy travelled with olympus, so it reached its
 upstream across the LAN — which only worked because the gateway still published a LAN
-binding (`OMNIROUTE_LAN_BIND=192.168.1.46`), and on that address the **only** gate was
+binding (`OMNIROUTE_LAN_BIND=192.168.1.71`), and on that address the **only** gate was
 the dashboard's own password. That is the exact configuration this document exists to
 refuse: with `requireLogin=false` there is no password, so a LAN binding publishes a
 dashboard that can read every provider credential.
@@ -264,7 +264,7 @@ dashboard that can read every provider credential.
 So the two halves were put back on one host, and the LAN binding removed:
 
 ```
-                   192.168.1.46
+                   192.168.1.71
   ┌─────────────────────────────────────────────────────────────┐
   │  edge (NPM) ──▶ gateway-sso :20128 (0.0.0.0)        │
   │                       │  http://127.0.0.1:20128             │
@@ -276,7 +276,7 @@ So the two halves were put back on one host, and the LAN binding removed:
 | | Before the split | Now |
 | --- | --- | --- |
 | Proxy host | `5-dev/olympus` on `.50` | `5-dev/olympus` on `.46`, upstream `http://127.0.0.1:20128` |
-| Gateway bindings | `127.0.0.1`, `172.17.0.1`, **`192.168.1.46`** | `127.0.0.1`, `172.17.0.1` — no LAN binding |
+| Gateway bindings | `127.0.0.1`, `172.17.0.1`, **`192.168.1.71`** | `127.0.0.1`, `172.17.0.1` — no LAN binding |
 | Gateway own login | on (`requireLogin=true`), protecting the LAN address | **off** (`requireLogin=false`) — Authentik is the only gate |
 | Public names | `gateway.olympus.innotel.us` → `.50:20128` | `gateway.studio.innotel.us` **and** `gateway.olympus.innotel.us` → `.46:20128`, one proxy, each name its own callback |
 | Edge hosts | #81 → `.50:20128`, cert #5 | #178 (studio, cert #49) and #179 (olympus, cert #5); #81 deleted |
@@ -481,7 +481,7 @@ sentence in a browser:
 
 ```
 DNS        gateway.olympus.innotel.us  CNAME  innotel.us  → A  73.68.203.71
-edge       NPM (192.168.1.46) :443     →  http://172.17.0.1:20128
+edge       NPM (192.168.1.71) :443     →  http://172.17.0.1:20128
 proxy      oauth2-proxy                →  Authentik, for everything but /ping
 session    oauth2-proxy                →  redis at 127.0.0.1:16379
 gateway    omniroute                   →  127.0.0.1:20128
@@ -500,7 +500,7 @@ $ make gateway-edge-check
   gateway.olympus.innotel.us
     1. dns
        system    127.0.0.53       NOERROR via innotel.us 73.68.203.71
-       cerulean  192.168.1.46     NOERROR via innotel.us 73.68.203.71
+       cerulean  192.168.1.71     NOERROR via innotel.us 73.68.203.71
     ok   tls    YR2 · expires Dec 12 12:24:25 2026 GMT (89d)
     ok   edge   HTTP 302 · openresty · redirects to the identity provider, as the SSO proxy should
     ok   proxy  HTTP 200 · OK
@@ -559,7 +559,7 @@ network layer:
 
 ```bash
 # on the host running the proxy, allowing only the edge
-iptables -I INPUT -p tcp --dport 20128 ! -s 192.168.1.46 -j DROP
+iptables -I INPUT -p tcp --dport 20128 ! -s 192.168.1.71 -j DROP
 ```
 
 That is deliberately not applied here: this host has no firewall in force
