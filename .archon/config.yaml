@@ -3,7 +3,16 @@ platforms:
     enabled: true
     bot_token: "ENV_VAR"
     provider: "openrouter"
-    model: "nousresearch/hermes-3-llama-3-70b:free"
+    # The model id is the GATEWAY's, not OpenRouter's: everything on this estate
+    # reaches a model through OmniRoute, which names an OpenRouter model
+    # `openrouter/<org>/<model>` — the same form `web/studio/lib/omniroute.ts`
+    # and `OMNIROUTE_MODEL` already use. Two things were wrong with the previous
+    # value, and together they are the "model provider failed after retries" this
+    # bot reported: it carried no `openrouter/` prefix, and the free Hermes 3 70B
+    # slug has since been retired upstream, so the gateway answers
+    # `nousresearch/hermes-3-llama-3-70b:free is not a valid model ID`. Hermes 3
+    # 405B is the same family and was verified answering through the gateway.
+    model: "openrouter/nousresearch/hermes-3-llama-3.1-405b"
 
 # `apiBaseUrl` used to be `http://localhost:20128/v1` — the gateway's own port,
 # which was right only while a gateway ran on the same box as the assistant. It
